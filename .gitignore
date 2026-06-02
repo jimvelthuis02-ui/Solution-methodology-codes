@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Generated outputs and runtime data
+Output/*/*
+!Output/1_Initial/.gitkeep
+!Output/2_Model_Design/.gitkeep
+!Output/3_Model_Implementation/.gitkeep
+!Output/4_Testing_Evaluation/.gitkeep
+!Output/5_Baselines/.gitkeep
+!Output/6_Data_Quality/.gitkeep
