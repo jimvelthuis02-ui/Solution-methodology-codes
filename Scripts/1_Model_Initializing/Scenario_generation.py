@@ -1,5 +1,6 @@
 import csv
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -77,7 +78,7 @@ def _quartile_group(value: float, p25: float, p50: float, p75: float) -> str:
     return "Group 4"
 
 
-def _is_excluded_location(row: dict[str, object | None]) -> bool:
+def _is_excluded_location(row: Mapping[str, object | None]) -> bool:
     status = str(row.get(STATUS_COLUMN, "")).strip().lower()
     item_height = _to_float(row.get(ITEM_HEIGHT_COLUMN))
     location_type = str(row.get(LOCATION_TYPE_COLUMN, "")).strip().lower()
@@ -151,7 +152,7 @@ def generate_slot_height_quartiles() -> Path:
     return OUTPUT_FILE
 
 
-def _normalized_location_code(row: dict[str, object | None]) -> str:
+def _normalized_location_code(row: Mapping[str, object | None]) -> str:
     return str(row.get(LOCATION_COLUMN, "")).strip().upper()
 
 
