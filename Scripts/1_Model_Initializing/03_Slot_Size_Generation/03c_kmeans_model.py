@@ -168,13 +168,21 @@ def _assignments(values: list[tuple[str, float]], clusters: list[Cluster]) -> tu
     for location, value in values:
         assigned = None
         for row in summary_rows:
-            lower = float(row["Lower Bound"])
-            upper = float(row["Upper Bound"])
+            lower = _to_float(row.get("Lower Bound"))
+            upper = _to_float(row.get("Upper Bound"))
+            if lower is None or upper is None:
+                continue
             if lower <= value <= upper:
                 assigned = row
                 break
         if assigned is None:
-            assigned = min(summary_rows, key=lambda row: abs(value - float(row["Representative Slot Size"])))
+            def _distance_to_representative(row: dict[str, object]) -> float:
+                representative = _to_float(row.get("Representative Slot Size"))
+                if representative is None:
+                    return float("inf")
+                return abs(value - representative)
+
+            assigned = min(summary_rows, key=_distance_to_representative)
 
         assignment_rows.append(
             {

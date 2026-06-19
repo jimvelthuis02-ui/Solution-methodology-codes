@@ -10,7 +10,6 @@ LOCATION_COLUMN = "Location"
 LOCATION_HEIGHT_COLUMN = "Location height"
 ITEM_HEIGHT_COLUMN = "Item height"
 DELTA_COLUMN = "Delta"
-STATUS_COLUMN = "Status"
 LOCATION_TYPE_COLUMN = "Location Type"
 
 
@@ -31,10 +30,9 @@ def _format(value: float | None) -> str:
 
 
 def _eligible(row: dict[str, str]) -> bool:
-    status = str(row.get(STATUS_COLUMN, "")).strip().lower()
     item_height = _to_float(row.get(ITEM_HEIGHT_COLUMN))
     location_type = str(row.get(LOCATION_TYPE_COLUMN, "")).strip().lower()
-    return not (status == "empty" or item_height == 0.0 or location_type == "doorgang")
+    return not (item_height == 0.0 or location_type == "doorgang")
 
 
 def generate_weighted_delta_scenarios() -> Path:

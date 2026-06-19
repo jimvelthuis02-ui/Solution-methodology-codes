@@ -18,7 +18,7 @@ MIN_HIGH_NON_OCCUPIED_SHARE = 0.50
 HIGH_SLOT_THRESHOLD = 99.0
 
 RACK_EXPECTED_COLUMNS = {
-    "A": 15,
+    "A": 16,
     "B": 22,
     "D": 22,
     "E": 22,
@@ -33,7 +33,9 @@ EXPECTED_RACK_COUNT = len(RACK_EXPECTED_COLUMNS)
 COLUMN_MAX_HEIGHT = 770.0
 TOP_BEAM_HEIGHT = 16.0
 MAX_USED_HEIGHT_BASE = COLUMN_MAX_HEIGHT - TOP_BEAM_HEIGHT
-LOCATION_CODE_PATTERN = re.compile(r"^([A-Z])(\d{2})(\d{2})$")
+MIN_BEAMS_PER_COLUMN = 3
+BEAM_HEIGHT = 16.0
+LOCATION_CODE_PATTERN = re.compile(r"^([A-Z])(\d{2})(\d{2})([A-Za-z]+)?$")
 
 
 def _to_float(value: object | None) -> float | None:
@@ -65,8 +67,12 @@ def _parse_location_code(location: str) -> tuple[str, int, int] | None:
     return match.group(1), int(match.group(2)), int(match.group(3))
 
 
-def _static_checks(prepared_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+def _static_checks(
+    prepared_rows: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     checks: list[dict[str, str]] = []
+    invalid_location_rows: list[dict[str, str]] = []
+    violating_column_rows: list[dict[str, str]] = []
 
     parsed = []
     invalid_codes = 0
@@ -75,6 +81,7 @@ def _static_checks(prepared_rows: list[dict[str, str]]) -> list[dict[str, str]]:
         parsed_code = _parse_location_code(location)
         if parsed_code is None:
             invalid_codes += 1
+            invalid_location_rows.append({"Location": location})
         else:
             parsed.append((location, parsed_code[0], parsed_code[1], parsed_code[2], row))
 
@@ -98,50 +105,94 @@ def _static_checks(prepared_rows: list[dict[str, str]]) -> list[dict[str, str]]:
         column_groups[(rack, column)].append(row)
 
     violating_columns = 0
-    for rows in column_groups.values():
+    for (rack, column), rows in column_groups.items():
         slot_heights = [_to_float(row.get("Location height")) for row in rows]
         slot_heights = [height for height in slot_heights if height is not None]
-        beam_count = len(rows)
-        max_used_height = MAX_USED_HEIGHT_BASE - beam_count
+        beam_count = max(len(rows) - 1, MIN_BEAMS_PER_COLUMN)
+        max_used_height = MAX_USED_HEIGHT_BASE - beam_count * BEAM_HEIGHT
         used_height = sum(slot_heights)
         if used_height > max_used_height + 1e-9:
             violating_columns += 1
+            violating_column_rows.append(
+                {
+                    "Rack": rack,
+                    "Column": f"{column:02d}",
+                    "Location_Count": str(len(rows)),
+                    "Beam_Count_Used": str(beam_count),
+                    "Allowed_Used_Height": f"{max_used_height:.3f}",
+                    "Actual_Used_Height": f"{used_height:.3f}",
+                    "Excess_Height": f"{used_height - max_used_height:.3f}",
+                    "Locations": ",".join(str(row.get("Location", "")).strip() for row in rows),
+                    "Location_Heights": ",".join(
+                        "" if _to_float(row.get("Location height")) is None else f"{_to_float(row.get('Location height')):g}"
+                        for row in rows
+                    ),
+                }
+            )
 
-    checks.append({"Constraint": "Column max used height (754 - beam_count)", "Status": "PASS" if violating_columns == 0 else "FAIL", "Details": f"Violating columns: {violating_columns}"})
+    checks.append({"Constraint": "Column max used height (754 - 16 * beam_count, min 3 beams)", "Status": "PASS" if violating_columns == 0 else "FAIL", "Details": f"Violating columns: {violating_columns}"})
 
     doorgang_rows = [row for row in prepared_rows if str(row.get("Location Type", "")).strip().lower() == "doorgang"]
-    checks.append({"Constraint": "Doorgang heights fixed", "Status": "ASSUMED", "Details": f"Baseline doorgang locations tracked: {len(doorgang_rows)}"})
+    checks.append({"Constraint": "Doorgang heights fixed", "Status": "ASSUMED", "Details": f"Doorgang locations tracked: {len(doorgang_rows)}"})
 
-    return checks
+    return checks, invalid_location_rows, violating_column_rows
 
 
 def _load_method_rows(method: str, file_name: str) -> list[dict[str, str]]:
     return _read_csv(SLOT_SIZE_ROOT / method / file_name)
 
 
-def _method_constraint_rows(method: str, assignments: list[dict[str, str]], summaries: list[dict[str, str]], sku_count: int) -> list[dict[str, str]]:
+def _slot_size_variable_name(slot_size: float) -> str:
+    return f"x_{int(round(slot_size))}"
+
+
+def _method_constraint_rows(
+    method: str,
+    summaries: list[dict[str, str]],
+    sku_count: int,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     rows: list[dict[str, str]] = []
+    slot_size_rows: list[dict[str, str]] = []
     combos = sorted({(row["Scenario"], row["K"]) for row in summaries})
     min_locations_required = math.ceil(sku_count / MAX_OCCUPANCY_RATE)
+    min_high_non_occupied = math.ceil(max(min_locations_required - sku_count, 0) * MIN_HIGH_NON_OCCUPIED_SHARE)
 
     for scenario, k in combos:
-        combo_assignments = [row for row in assignments if row.get("Scenario") == scenario and row.get("K") == k]
-        total_locations = len(combo_assignments)
-        occupancy_ok = total_locations >= min_locations_required
+        combo_summaries = [row for row in summaries if row.get("Scenario") == scenario and row.get("K") == k]
 
-        non_occupied = max(total_locations - sku_count, 0)
-        required_high_non_occupied = math.ceil(non_occupied * MIN_HIGH_NON_OCCUPIED_SHARE)
-
-        high_slot_locations = 0
-        for row in combo_assignments:
+        slot_size_counts: list[tuple[float, int]] = []
+        for row in combo_summaries:
             slot_size = _to_float(row.get("Representative Slot Size"))
-            if slot_size is not None and slot_size >= HIGH_SLOT_THRESHOLD:
-                high_slot_locations += 1
+            cluster_count = _to_float(row.get("Cluster Count"))
+            if slot_size is None or cluster_count is None:
+                continue
+            count = int(round(cluster_count))
+            slot_size_counts.append((slot_size, count))
 
-        high_non_occupied_ok = high_slot_locations >= required_high_non_occupied
-
-        slot_sizes = sorted({_to_float(row.get("Representative Slot Size")) for row in combo_assignments if _to_float(row.get("Representative Slot Size")) is not None})
+        slot_sizes = sorted(slot_size for slot_size, _ in slot_size_counts)
         slot_size_text = ",".join(f"{value:.0f}" for value in slot_sizes)
+
+        running_demand = 0
+        cumulative_by_slot_size: dict[float, int] = {}
+        for slot_size, count in reversed(slot_size_counts):
+            running_demand += count
+            cumulative_by_slot_size[slot_size] = running_demand
+
+        for slot_size, count in slot_size_counts:
+            eligible_sizes = [candidate for candidate in slot_sizes if candidate >= slot_size]
+            decision_terms = " + ".join(_slot_size_variable_name(candidate) for candidate in eligible_sizes)
+            slot_size_rows.append(
+                {
+                    "Method": method,
+                    "Scenario": scenario,
+                    "K": k,
+                    "Representative_Slot_Size": f"{slot_size:.0f}",
+                    "Assigned_SKUs_At_Representative_Size": str(count),
+                    "Decision_Variable": _slot_size_variable_name(slot_size),
+                    "Cumulative_Demand_At_Or_Above_Size": str(cumulative_by_slot_size[slot_size]),
+                    "Coverage_Constraint": f"{decision_terms} >= {cumulative_by_slot_size[slot_size]}",
+                }
+            )
 
         rows.append(
             {
@@ -149,14 +200,13 @@ def _method_constraint_rows(method: str, assignments: list[dict[str, str]], summ
                 "Scenario": scenario,
                 "K": k,
                 "SKU_Count": str(sku_count),
-                "Total_Locations": str(total_locations),
-                "Min_Locations_Required_At_85pct": str(min_locations_required),
-                "Occupancy_Constraint_OK": "PASS" if occupancy_ok else "FAIL",
-                "Non_Occupied_Locations": str(non_occupied),
+                "Required_Total_Locations_At_85pct": str(min_locations_required),
+                "Total_Location_Decision": "sum(x_s)",
+                "Occupancy_Constraint": f"sum(x_s) >= {min_locations_required}",
                 "High_Slot_Threshold_cm": f"{HIGH_SLOT_THRESHOLD:.0f}",
-                "Required_High_Non_Occupied_Count": str(required_high_non_occupied),
-                "High_Slot_Locations_Available": str(high_slot_locations),
-                "High_Non_Occupied_Constraint_OK_Proxy": "PASS" if high_non_occupied_ok else "FAIL",
+                "Required_High_Non_Occupied_Count_At_Minimum": str(min_high_non_occupied),
+                "High_Slot_Location_Decision": f"sum(x_s for s >= {HIGH_SLOT_THRESHOLD:.0f})",
+                "High_Non_Occupied_Constraint": f"sum(x_s for s >= {HIGH_SLOT_THRESHOLD:.0f}) >= {min_high_non_occupied}",
                 "Slot_Sizes": slot_size_text,
                 "Rack_Column_Division": "FIXED (validated in static checks)",
                 "Location_Coding": "FIXED (validated in static checks)",
@@ -165,20 +215,22 @@ def _method_constraint_rows(method: str, assignments: list[dict[str, str]], summ
             }
         )
 
-    return rows
+    return rows, slot_size_rows
 
 
 def build_configuration_model_constraints(sku_count: int = DEFAULT_SKU_COUNT) -> Path:
     prepared_rows = _read_csv(INPUT_PREPARED)
     _ = _read_csv(INPUT_SCENARIOS)
 
-    static_rows = _static_checks(prepared_rows)
+    static_rows, invalid_location_rows, violating_column_rows = _static_checks(prepared_rows)
     model_rows: list[dict[str, str]] = []
+    slot_size_constraint_rows: list[dict[str, str]] = []
 
     for method in METHODS:
-        assignments = _load_method_rows(method, "Slot_Size_Configuration_Assignments.csv")
         summaries = _load_method_rows(method, "Slot_Size_Configuration_Summary.csv")
-        model_rows.extend(_method_constraint_rows(method, assignments, summaries, sku_count))
+        method_rows, method_slot_rows = _method_constraint_rows(method, summaries, sku_count)
+        model_rows.extend(method_rows)
+        slot_size_constraint_rows.extend(method_slot_rows)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -188,11 +240,55 @@ def build_configuration_model_constraints(sku_count: int = DEFAULT_SKU_COUNT) ->
         writer.writeheader()
         writer.writerows(static_rows)
 
+    invalid_codes_file = OUTPUT_DIR / "Constraint_Invalid_Location_Codes.csv"
+    with invalid_codes_file.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(target, fieldnames=["Location"])
+        writer.writeheader()
+        writer.writerows(invalid_location_rows)
+
+    violating_columns_file = OUTPUT_DIR / "Constraint_Violating_Columns_Detail.csv"
+    with violating_columns_file.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(
+            target,
+            fieldnames=[
+                "Rack",
+                "Column",
+                "Location_Count",
+                "Beam_Count_Used",
+                "Allowed_Used_Height",
+                "Actual_Used_Height",
+                "Excess_Height",
+                "Locations",
+                "Location_Heights",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(violating_column_rows)
+
+    slot_size_constraints_file = OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
+    with slot_size_constraints_file.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(
+            target,
+            fieldnames=[
+                "Method",
+                "Scenario",
+                "K",
+                "Representative_Slot_Size",
+                "Assigned_SKUs_At_Representative_Size",
+                "Decision_Variable",
+                "Cumulative_Demand_At_Or_Above_Size",
+                "Coverage_Constraint",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(slot_size_constraint_rows)
+
     model_file = OUTPUT_DIR / "Constraint_Model_By_Method_Scenario_K.csv"
     fields = list(model_rows[0].keys()) if model_rows else [
-        "Method", "Scenario", "K", "SKU_Count", "Total_Locations", "Min_Locations_Required_At_85pct",
-        "Occupancy_Constraint_OK", "Non_Occupied_Locations", "High_Slot_Threshold_cm",
-        "Required_High_Non_Occupied_Count", "High_Slot_Locations_Available", "High_Non_Occupied_Constraint_OK_Proxy",
+        "Method", "Scenario", "K", "SKU_Count", "Required_Total_Locations_At_85pct",
+        "Total_Location_Decision", "Occupancy_Constraint", "High_Slot_Threshold_cm",
+        "Required_High_Non_Occupied_Count_At_Minimum", "High_Slot_Location_Decision",
+        "High_Non_Occupied_Constraint",
         "Slot_Sizes", "Rack_Column_Division", "Location_Coding", "Beam_Coupling_Constraint", "Doorgang_Fixed_Heights",
     ]
 
