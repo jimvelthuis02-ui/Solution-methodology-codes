@@ -6,10 +6,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-INPUT_PREPARED = ROOT / "Output" / "1_Initial" / "01_Data_Preparation" / "01_Location_Details_Prepared.csv"
-INPUT_SCENARIOS = ROOT / "Output" / "1_Initial" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
-SLOT_SIZE_ROOT = ROOT / "Output" / "1_Initial" / "03_Slot_Size_Generation"
-OUTPUT_DIR = ROOT / "Output" / "1_Initial" / "04_Slot_Size_Configuration_Model"
+INPUT_PREPARED = ROOT / "Output" / "01_Data_Preparation" / "01_Location_Details_Prepared.csv"
+INPUT_SCENARIOS = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
+SLOT_SIZE_ROOT = ROOT / "Output" / "03_Slot_Size_Generation"
+OUTPUT_DIR = ROOT / "Output" / "04_Slot_Size_Configuration_Model"
 
 METHODS = ("quantile_binning", "hierarchical_clustering", "kmeans_clustering")
 MAX_OCCUPANCY_RATE = 0.85

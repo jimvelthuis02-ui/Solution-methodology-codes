@@ -3,8 +3,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-INPUT_FILE = ROOT / "Output" / "1_Initial" / "01_Data_Preparation" / "01_Location_Details_Prepared.csv"
-OUTPUT_FILE = ROOT / "Output" / "1_Initial" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
+INPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "01_Location_Details_Prepared.csv"
+OUTPUT_FILE = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
 
 LOCATION_COLUMN = "Location"
 LOCATION_HEIGHT_COLUMN = "Location height"

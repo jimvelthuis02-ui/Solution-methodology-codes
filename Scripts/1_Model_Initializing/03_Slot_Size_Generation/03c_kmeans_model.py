@@ -5,8 +5,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-INPUT_FILE = ROOT / "Output" / "1_Initial" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
-OUTPUT_DIR = ROOT / "Output" / "1_Initial" / "03_Slot_Size_Generation" / "kmeans_clustering"
+INPUT_FILE = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
+OUTPUT_DIR = ROOT / "Output" / "03_Slot_Size_Generation" / "kmeans_clustering"
 
 SCENARIO_COLUMNS = [
     "Scenario_1_Item_Height",

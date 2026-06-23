@@ -5,10 +5,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-INPUT_FILE = ROOT / "Output" / "1_Initial" / "Location_Details_Preliminary_Delta.csv"
-OUTPUT_FILE = ROOT / "Output" / "1_Initial" / "Location_Details_Slot_Height_Quartiles.csv"
-DELTA_PERCENTILES_OUTPUT_FILE = ROOT / "Output" / "1_Initial" / "Delta_Percentiles_By_Slot_Height_Group.csv"
-ITEM_HEIGHT_SCENARIOS_OUTPUT_FILE = ROOT / "Output" / "1_Initial" / "Item_Height_Scenarios.csv"
+INPUT_FILE = ROOT / "Output" / "Location_Details_Preliminary_Delta.csv"
+OUTPUT_FILE = ROOT / "Output" / "Location_Details_Slot_Height_Quartiles.csv"
+DELTA_PERCENTILES_OUTPUT_FILE = ROOT / "Output" / "Delta_Percentiles_By_Slot_Height_Group.csv"
+ITEM_HEIGHT_SCENARIOS_OUTPUT_FILE = ROOT / "Output" / "Item_Height_Scenarios.csv"
 SLOT_HEIGHT_COLUMN = "Location height"
 STATUS_COLUMN = "Status"
 ITEM_HEIGHT_COLUMN = "Item height"
