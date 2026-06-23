@@ -6,7 +6,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ORDERED_SCRIPTS = [
     "01_Data_Preparation/01_data_preparation.py",
     "02_Scenario_Generation/02_scenario_generation_weighted_delta.py",
-    "03_Slot_Size_Generation/03_slot_size_generation_common.py",
+    "03_Slot_Size_Generation/03_slot_size_generation_main.py",
     "04_Slot_Size_Configuration_Model/04_slot_size_configuration_model.py",
 ]
 

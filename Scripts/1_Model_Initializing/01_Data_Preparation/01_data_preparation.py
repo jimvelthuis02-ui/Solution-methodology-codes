@@ -8,8 +8,8 @@ from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[3]
 INPUT_DIR = ROOT / "Input files" / "Locations"
-PREPARED_OUTPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "01_Location_Details_Prepared.csv"
-BEAM_OUTPUT_DIR = ROOT / "Output" / "05_Beam_Grid_Mapping"
+PREPARED_OUTPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
+BEAM_OUTPUT_DIR = ROOT / "Output" / "01_Data_Preparation" / "Beam_Grid_Mapping"
 
 BEAM_HEIGHT_CM = 16.0
 ROW_ORDER_PATTERN = re.compile(r"^(\d+)([A-Za-z]?)$")
