@@ -11,6 +11,7 @@ LOCATION_HEIGHT_COLUMN = "Location height"
 ITEM_HEIGHT_COLUMN = "Item height"
 DELTA_COLUMN = "Delta"
 LOCATION_TYPE_COLUMN = "Location Type"
+BASE_SKU_COUNT = 843
 
 # Locations with fixed items that must be picked entirely at once (delta does not change)
 FIXED_HEIGHT_LOCATIONS = {
@@ -23,6 +24,17 @@ FIXED_HEIGHT_LOCATIONS = {
     "D0505", "D0605", "D0705", "D0905", "D1005", "D1105", "D1205", "D1305",
     "D1405", "D1505", "D1605", "D1705", "D1805", "D2005", "H0203"
 }
+
+
+def build_sku_count_scenarios(rows: list[dict[str, str]]) -> dict[str, int]:
+    """Build low/base/high SKU-count scenarios from currently eligible locations."""
+    _ = rows
+    base_sku_count = BASE_SKU_COUNT
+    return {
+        "low": int(round(base_sku_count * 0.9)),
+        "base": base_sku_count,
+        "high": int(round(base_sku_count * 1.1)),
+    }
 
 
 def _to_float(value: object | None) -> float | None:
@@ -61,6 +73,9 @@ def generate_weighted_delta_scenarios() -> Path:
     missing = [column for column in required if column not in reader.fieldnames]
     if missing:
         raise KeyError("Missing required columns: " + ", ".join(missing))
+
+    # Build global SKU-count scenarios for downstream use (not written to this CSV).
+    sku_count_scenarios = build_sku_count_scenarios(rows)
 
     output_fields = [
         LOCATION_COLUMN,
@@ -160,6 +175,8 @@ def generate_weighted_delta_scenarios() -> Path:
                     "Scenario_6_Item_Height": _format(scenario_values[5]),
                 }
             )
+
+    _ = sku_count_scenarios
 
     return OUTPUT_FILE
 

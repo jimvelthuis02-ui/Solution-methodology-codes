@@ -105,6 +105,7 @@ def generate_quantile_model() -> Path:
         "K",
         "Cluster ID",
         "Cluster Count",
+        "Cluster Count Percentage",
         "Lower Bound",
         "Upper Bound",
         "Representative Slot Size",
@@ -140,6 +141,7 @@ def generate_quantile_model() -> Path:
                     continue
 
                 cut_starts = _natural_cut_starts(numeric, k)
+                total_count = len(scenario_values)
                 for index in range(k):
                     start = cut_starts[index]
                     end = cut_starts[index + 1]
@@ -161,6 +163,7 @@ def generate_quantile_model() -> Path:
                             "K": k,
                             "Cluster ID": cluster_id,
                             "Cluster Count": len(bucket),
+                            "Cluster Count Percentage": f"{(len(bucket) / total_count) * 100:.2f}%",
                             "Lower Bound": _format_number(lower_bound),
                             "Upper Bound": _format_number(upper_bound),
                             "Representative Slot Size": _format_number(slot_size),

@@ -205,7 +205,7 @@ def generate_kmeans_model() -> Path:
     summary_file = OUTPUT_DIR / "Slot_Size_Configuration_Summary.csv"
     assignments_file = OUTPUT_DIR / "Slot_Size_Configuration_Assignments.csv"
 
-    summary_fields = ["Scenario", "Method", "K", "Cluster ID", "Cluster Count", "Lower Bound", "Upper Bound", "Representative Slot Size", "Mean Item Height"]
+    summary_fields = ["Scenario", "Method", "K", "Cluster ID", "Cluster Count", "Cluster Count Percentage", "Lower Bound", "Upper Bound", "Representative Slot Size", "Mean Item Height"]
     assignment_fields = ["Scenario", "Method", "K", "Location", "Scenario Value", "Assigned Cluster", "Cluster Lower Bound", "Cluster Upper Bound", "Representative Slot Size"]
 
     with summary_file.open("w", newline="", encoding="utf-8") as summary_target, assignments_file.open("w", newline="", encoding="utf-8") as assignment_target:
@@ -225,6 +225,7 @@ def generate_kmeans_model() -> Path:
 
                 clusters = _kmeans_clusters(numeric, k)
                 summary_rows, assignment_rows = _assignments(values, clusters)
+                total_count = len(values)
 
                 for row in summary_rows:
                     summary_writer.writerow(
@@ -234,6 +235,7 @@ def generate_kmeans_model() -> Path:
                             "K": k,
                             "Cluster ID": row["Cluster ID"],
                             "Cluster Count": row["Cluster Count"],
+                            "Cluster Count Percentage": f"{(_to_float(row.get('Cluster Count')) / total_count) * 100:.2f}%",
                             "Lower Bound": _format_number(_to_float(row.get("Lower Bound"))),
                             "Upper Bound": _format_number(_to_float(row.get("Upper Bound"))),
                             "Representative Slot Size": _format_number(_to_float(row.get("Representative Slot Size"))),
