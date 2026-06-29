@@ -15,6 +15,7 @@ OUTPUT_DIR = ROOT / "Output" / "04_Slot_Size_Configuration_Model"
 
 METHODS = ("quantile_binning", "hierarchical_clustering", "kmeans_clustering")
 MAX_OCCUPANCY_RATE = 0.85
+ENFORCE_OCCUPANCY_RATE_CONSTRAINT = False
 BASE_SKU_COUNT = 843
 SKU_SCENARIO_FACTORS = {
     "Low_Count": 0.9,
@@ -22,6 +23,7 @@ SKU_SCENARIO_FACTORS = {
     "High_Count": 1.1,
 }
 MIN_HIGH_NON_OCCUPIED_SHARE = 0.50
+ENFORCE_MIN_HIGH_NON_OCCUPIED_CONSTRAINT = False
 HIGH_SLOT_THRESHOLD = 99.0
 
 RACK_EXPECTED_COLUMNS = {
@@ -340,7 +342,7 @@ def _build_feasible_solution_for_combo(
         sku_high_demand = 0
 
     achieved_high_non_occupied = max(achieved_high_total - sku_high_demand, 0)
-    high_constraint_status = "ENFORCED"
+    high_constraint_status = "ENFORCED" if ENFORCE_MIN_HIGH_NON_OCCUPIED_CONSTRAINT else "DISABLED"
     note = ""
 
     if achieved_high_non_occupied < required_high_non_occupied:
@@ -378,6 +380,234 @@ def _build_feasible_solution_for_combo(
         unit_usage[unit_type] = unit_usage.get(unit_type, 0) + 1
 
     return True, dict(assigned_by_slot), achieved_at_or_above, achieved_high_non_occupied, achieved_high_total, high_constraint_status if note == "" else f"{high_constraint_status}: {note}", unit_usage
+
+
+def _build_location_metadata(prepared_rows: list[dict[str, str]], beam_map_rows: list[dict[str, str]]) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    location_meta: dict[str, dict[str, str]] = {}
+    for row in prepared_rows:
+        location = str(row.get("Location", "")).strip()
+        if location == "":
+            continue
+        location_meta[location] = {
+            "Rack": str(row.get("Rack", "")).strip(),
+            "Column": str(row.get("Column", "")).strip(),
+            "Row": str(row.get("Row", "")).strip(),
+        }
+
+    beam_by_location: dict[str, str] = {}
+    for row in beam_map_rows:
+        location = str(row.get("Location", "")).strip()
+        if location == "":
+            continue
+        beam_by_location[location] = str(row.get("Beam_Coordinate", "")).strip()
+
+    return location_meta, beam_by_location
+
+
+def _build_column_capacity(prepared_rows: list[dict[str, str]]) -> tuple[dict[str, float], dict[str, int], dict[str, int]]:
+    rows_by_column: dict[str, int] = defaultdict(int)
+    for row in prepared_rows:
+        location_type = str(row.get("Location Type", "")).strip().lower()
+        if location_type == "doorgang":
+            continue
+        rack = str(row.get("Rack", "")).strip()
+        column = str(row.get("Column", "")).strip()
+        if rack == "" or column == "":
+            continue
+        key = f"{rack}{column}"
+        rows_by_column[key] += 1
+
+    allowed_used_height: dict[str, float] = {}
+    beam_count_by_column: dict[str, int] = {}
+    for key, row_count in rows_by_column.items():
+        beam_count = max(row_count - 1, MIN_BEAMS_PER_COLUMN)
+        beam_count_by_column[key] = beam_count
+        allowed_used_height[key] = MAX_USED_HEIGHT_BASE - beam_count * BEAM_HEIGHT
+
+    return allowed_used_height, beam_count_by_column, rows_by_column
+
+
+def _unit_column_counts(unit: CapacityUnit) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for location in unit.locations:
+        parsed = _parse_location_code(location)
+        if parsed is None:
+            continue
+        rack, column, _ = parsed
+        counts[f"{rack}{column:02d}"] += 1
+    return dict(counts)
+
+
+def _allocate_layout_for_combo(
+    target_exact_counts: dict[float, int],
+    units: list[CapacityUnit],
+    allowed_used_height: dict[str, float],
+) -> tuple[bool, dict[float, int], dict[str, float], list[tuple[int, float]], str]:
+    remaining_units = set(range(len(units)))
+    assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
+    used_height_by_column: dict[str, float] = defaultdict(float)
+    unit_assignments: list[tuple[int, float]] = []
+
+    slot_sizes_desc = sorted(target_exact_counts.keys(), reverse=True)
+    for slot_size in slot_sizes_desc:
+        needed = int(target_exact_counts.get(slot_size, 0))
+        while needed > 0:
+            candidates: list[tuple[float, int, int]] = []
+            for unit_index in remaining_units:
+                unit = units[unit_index]
+                if unit.size > needed:
+                    continue
+
+                unit_columns = _unit_column_counts(unit)
+                fits = True
+                post_slack_sum = 0.0
+                for column_key, count in unit_columns.items():
+                    allowed = allowed_used_height.get(column_key)
+                    if allowed is None:
+                        fits = False
+                        break
+                    proposed = used_height_by_column[column_key] + slot_size * count
+                    if proposed > allowed + 1e-9:
+                        fits = False
+                        break
+                    post_slack_sum += allowed - proposed
+
+                if fits:
+                    # Prefer larger unit sizes first, then best fit (lower remaining slack after placement).
+                    candidates.append((post_slack_sum, -unit.size, unit_index))
+
+            if not candidates:
+                return False, assigned_exact_counts, dict(used_height_by_column), unit_assignments, f"No allocatable unit found for slot size {slot_size:.0f} with remaining demand {needed}."
+
+            candidates.sort(key=lambda item: (item[1], item[0]))
+            chosen_index = candidates[0][2]
+            chosen_unit = units[chosen_index]
+
+            for column_key, count in _unit_column_counts(chosen_unit).items():
+                used_height_by_column[column_key] += slot_size * count
+
+            assigned_exact_counts[slot_size] += chosen_unit.size
+            unit_assignments.append((chosen_index, slot_size))
+            remaining_units.remove(chosen_index)
+            needed -= chosen_unit.size
+
+    return True, assigned_exact_counts, dict(used_height_by_column), unit_assignments, "OK"
+
+
+def _generate_layout_distribution_outputs(
+    feasible_slot_rows: list[dict[str, str]],
+    units: list[CapacityUnit],
+    prepared_rows: list[dict[str, str]],
+    beam_map_rows: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    location_meta, beam_by_location = _build_location_metadata(prepared_rows, beam_map_rows)
+    allowed_used_height, beam_count_by_column, _ = _build_column_capacity(prepared_rows)
+
+    grouped_targets: dict[tuple[str, str, str, str], dict[float, int]] = defaultdict(dict)
+    for row in feasible_slot_rows:
+        key = (
+            str(row.get("Method", "")),
+            str(row.get("Scenario", "")),
+            str(row.get("K", "")),
+            str(row.get("SKU_Scenario", "")),
+        )
+        slot_size = _to_float(row.get("Representative_Slot_Size"))
+        exact_count = int(round(_to_float(row.get("Assigned_Locations_Exact_Size")) or 0.0))
+        if slot_size is None:
+            continue
+        grouped_targets[key][slot_size] = exact_count
+
+    summary_rows: list[dict[str, str]] = []
+    column_rows: list[dict[str, str]] = []
+    location_rows: list[dict[str, str]] = []
+
+    for key, target_counts in grouped_targets.items():
+        method, scenario, k, sku_scenario = key
+        success, assigned_exact, used_by_column, unit_assignments, note = _allocate_layout_for_combo(
+            target_exact_counts=target_counts,
+            units=units,
+            allowed_used_height=allowed_used_height,
+        )
+
+        assignment_by_location: dict[str, tuple[str, str, str, float]] = {}
+        slot_mix_by_column: dict[str, dict[float, int]] = defaultdict(lambda: defaultdict(int))
+        for unit_index, slot_size in unit_assignments:
+            unit = units[unit_index]
+            for location in unit.locations:
+                meta = location_meta.get(location, {"Rack": "", "Column": "", "Row": ""})
+                assignment_by_location[location] = (
+                    unit.unit_id,
+                    unit.unit_type,
+                    beam_by_location.get(location, ""),
+                    slot_size,
+                )
+                rack = meta.get("Rack", "")
+                column = meta.get("Column", "")
+                if rack and column:
+                    slot_mix_by_column[f"{rack}{column}"][slot_size] += 1
+
+        total_assigned = sum(assigned_exact.values())
+        total_target = sum(target_counts.values())
+        avg_fill = 0.0
+        if used_by_column:
+            avg_fill = sum((used_by_column.get(col, 0.0) / cap) for col, cap in allowed_used_height.items() if cap > 0) / max(len(allowed_used_height), 1)
+
+        summary_rows.append(
+            {
+                "Method": method,
+                "Scenario": scenario,
+                "K": k,
+                "SKU_Scenario": sku_scenario,
+                "Layout_Feasible": "YES" if success else "NO",
+                "Assigned_Locations_Total": str(total_assigned),
+                "Target_Locations_Total": str(total_target),
+                "Average_Column_Fill_Ratio": f"{avg_fill:.4f}",
+                "Notes": note,
+            }
+        )
+
+        for column_key, allowed in sorted(allowed_used_height.items()):
+            used = used_by_column.get(column_key, 0.0)
+            mix = slot_mix_by_column.get(column_key, {})
+            mix_text = "|".join(
+                f"{int(slot)}:{count}" for slot, count in sorted(mix.items())
+            )
+            column_rows.append(
+                {
+                    "Method": method,
+                    "Scenario": scenario,
+                    "K": k,
+                    "SKU_Scenario": sku_scenario,
+                    "Rack_Column": column_key,
+                    "Beam_Count_Used": str(beam_count_by_column.get(column_key, 0)),
+                    "Allowed_Used_Height_cm": f"{allowed:.3f}",
+                    "Assigned_Used_Height_cm": f"{used:.3f}",
+                    "Fill_Ratio": f"{(used / allowed) if allowed > 0 else 0.0:.4f}",
+                    "Remaining_Height_cm": f"{max(allowed - used, 0.0):.3f}",
+                    "Slot_Size_Distribution": mix_text,
+                }
+            )
+
+        for location, (unit_id, unit_type, beam_coordinate, slot_size) in sorted(assignment_by_location.items()):
+            meta = location_meta.get(location, {"Rack": "", "Column": "", "Row": ""})
+            location_rows.append(
+                {
+                    "Method": method,
+                    "Scenario": scenario,
+                    "K": k,
+                    "SKU_Scenario": sku_scenario,
+                    "Location": location,
+                    "Rack": meta.get("Rack", ""),
+                    "Column": meta.get("Column", ""),
+                    "Row": meta.get("Row", ""),
+                    "Beam_Coordinate": beam_coordinate,
+                    "Assignment_Unit_ID": unit_id,
+                    "Assignment_Unit_Type": unit_type,
+                    "Assigned_Slot_Size_cm": f"{slot_size:.0f}",
+                }
+            )
+
+    return summary_rows, column_rows, location_rows
 
 
 def _load_capacity_units(prepared_rows: list[dict[str, str]]) -> tuple[list[dict[str, object]], dict[str, int]]:
@@ -748,7 +978,10 @@ def _method_constraint_rows(
                 slot_size = slot_size_clusters[index][0]
                 running_demand += allocated_counts[index]
                 cumulative_skus_by_slot_size[slot_size] = running_demand
-                min_locations_by_slot_size[slot_size] = math.ceil(running_demand / MAX_OCCUPANCY_RATE)
+                if ENFORCE_OCCUPANCY_RATE_CONSTRAINT:
+                    min_locations_by_slot_size[slot_size] = math.ceil(running_demand / MAX_OCCUPANCY_RATE)
+                else:
+                    min_locations_by_slot_size[slot_size] = running_demand
 
             for index, (slot_size, _, percentage) in enumerate(slot_size_clusters):
                 eligible_sizes = [candidate for candidate in slot_sizes if candidate >= slot_size]
@@ -774,8 +1007,15 @@ def _method_constraint_rows(
                     }
                 )
 
-            min_locations_required = math.ceil(sku_count / MAX_OCCUPANCY_RATE)
-            min_high_non_occupied = math.ceil(max(min_locations_required - sku_count, 0) * MIN_HIGH_NON_OCCUPIED_SHARE)
+            if ENFORCE_OCCUPANCY_RATE_CONSTRAINT:
+                min_locations_required = math.ceil(sku_count / MAX_OCCUPANCY_RATE)
+            else:
+                min_locations_required = sku_count
+
+            if ENFORCE_MIN_HIGH_NON_OCCUPIED_CONSTRAINT and ENFORCE_OCCUPANCY_RATE_CONSTRAINT:
+                min_high_non_occupied = math.ceil(max(min_locations_required - sku_count, 0) * MIN_HIGH_NON_OCCUPIED_SHARE)
+            else:
+                min_high_non_occupied = 0
 
             rows.append(
                 {
@@ -784,7 +1024,7 @@ def _method_constraint_rows(
                     "K": k,
                     "SKU_Scenario": sku_scenario_name,
                     "SKU_Count": str(sku_count),
-                    "Max_Occupancy_Rate": f"{MAX_OCCUPANCY_RATE:.2f}",
+                    "Max_Occupancy_Rate": f"{MAX_OCCUPANCY_RATE:.2f}" if ENFORCE_OCCUPANCY_RATE_CONSTRAINT else "DISABLED",
                     "Required_Total_Locations_At_Max_Occupancy": str(min_locations_required),
                     "Total_Location_Decision": "sum(x_s)",
                     "Occupancy_Constraint": f"sum(x_s) >= {min_locations_required}",
@@ -885,7 +1125,9 @@ def build_configuration_model_constraints() -> Path:
                 "Feasible": "YES" if feasible else "NO",
                 "Total_Assigned_Locations": str(total_assigned),
                 "Required_Total_Locations_At_Max_Occupancy": str(required_total_locations),
-                "Total_Occupancy_Constraint_Satisfied": "YES" if achieved_total_for_min_slot >= required_total_locations else "NO",
+                "Total_Occupancy_Constraint_Satisfied": (
+                    "YES" if achieved_total_for_min_slot >= required_total_locations else "NO"
+                ) if ENFORCE_OCCUPANCY_RATE_CONSTRAINT else "DISABLED",
                 "High_Non_Occupied_Status": high_status,
                 "Achieved_High_Locations_At_Or_Above_99": str(achieved_high_total),
                 "Achieved_High_Non_Occupied_Count": str(achieved_high_non_occupied),
@@ -894,6 +1136,13 @@ def build_configuration_model_constraints() -> Path:
                 "Floor_Units_Used": str(unit_usage.get("floor", 0)),
             }
         )
+
+    layout_summary_rows, layout_column_rows, layout_location_rows = _generate_layout_distribution_outputs(
+        feasible_slot_rows=feasible_slot_rows,
+        units=capacity_units,
+        prepared_rows=prepared_rows,
+        beam_map_rows=beam_map_rows,
+    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -950,7 +1199,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(slot_size_constraint_rows)
 
-    feasible_slot_file = OUTPUT_DIR / "Feasible_Slot_Size_Counts_By_Method_Scenario_K.csv"
+    feasible_slot_file = OUTPUT_DIR / "Feasible_Slot_Size_Counts_By_Method_Scenario_K_v2.csv"
     with feasible_slot_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -969,7 +1218,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(feasible_slot_rows)
 
-    feasible_summary_file = OUTPUT_DIR / "Feasible_Solution_Summary_By_Method_Scenario_K.csv"
+    feasible_summary_file = OUTPUT_DIR / "Feasible_Solution_Summary_By_Method_Scenario_K_v2.csv"
     with feasible_summary_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -992,6 +1241,68 @@ def build_configuration_model_constraints() -> Path:
         )
         writer.writeheader()
         writer.writerows(feasible_summary_rows)
+
+    layout_summary_file = OUTPUT_DIR / "Layout_Distribution_Summary_By_Method_Scenario_K_v2.csv"
+    with layout_summary_file.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(
+            target,
+            fieldnames=[
+                "Method",
+                "Scenario",
+                "K",
+                "SKU_Scenario",
+                "Layout_Feasible",
+                "Assigned_Locations_Total",
+                "Target_Locations_Total",
+                "Average_Column_Fill_Ratio",
+                "Notes",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(layout_summary_rows)
+
+    layout_column_file = OUTPUT_DIR / "Layout_Distribution_By_Rack_Column_v2.csv"
+    with layout_column_file.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(
+            target,
+            fieldnames=[
+                "Method",
+                "Scenario",
+                "K",
+                "SKU_Scenario",
+                "Rack_Column",
+                "Beam_Count_Used",
+                "Allowed_Used_Height_cm",
+                "Assigned_Used_Height_cm",
+                "Fill_Ratio",
+                "Remaining_Height_cm",
+                "Slot_Size_Distribution",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(layout_column_rows)
+
+    layout_location_file = OUTPUT_DIR / "Layout_Distribution_By_Location_v2.csv"
+    with layout_location_file.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(
+            target,
+            fieldnames=[
+                "Method",
+                "Scenario",
+                "K",
+                "SKU_Scenario",
+                "Location",
+                "Rack",
+                "Column",
+                "Row",
+                "Beam_Coordinate",
+                "Assignment_Unit_ID",
+                "Assignment_Unit_Type",
+                "Assigned_Slot_Size_cm",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(layout_location_rows)
 
     model_file = OUTPUT_DIR / "Constraint_Model_By_Method_Scenario_K.csv"
     fields = list(model_rows[0].keys()) if model_rows else [
