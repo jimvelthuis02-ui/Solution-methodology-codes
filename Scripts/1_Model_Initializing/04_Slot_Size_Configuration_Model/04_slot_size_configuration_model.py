@@ -14,17 +14,12 @@ SLOT_SIZE_ROOT = ROOT / "Output" / "03_Slot_Size_Generation"
 OUTPUT_DIR = ROOT / "Output" / "04_Slot_Size_Configuration_Model"
 
 METHODS = ("quantile_binning", "hierarchical_clustering", "kmeans_clustering")
-MAX_OCCUPANCY_RATE = 0.85
-ENFORCE_OCCUPANCY_RATE_CONSTRAINT = False
 BASE_SKU_COUNT = 843
 SKU_SCENARIO_FACTORS = {
     "Low_Count": 0.9,
     "Base_Count": 1.0,
     "High_Count": 1.1,
 }
-MIN_HIGH_NON_OCCUPIED_SHARE = 0.50
-ENFORCE_MIN_HIGH_NON_OCCUPIED_CONSTRAINT = False
-HIGH_SLOT_THRESHOLD = 99.0
 
 RACK_EXPECTED_COLUMNS = {
     "A": 16,
@@ -310,9 +305,7 @@ def _build_capacity_units(
 def _build_feasible_solution_for_combo(
     requirement_rows: list[dict[str, str]],
     units: list[CapacityUnit],
-    high_slot_threshold: float,
-    required_high_non_occupied: int,
-) -> tuple[bool, dict[float, int], dict[float, int], int, int, str, dict[str, int]]:
+) -> tuple[bool, dict[float, int], dict[float, int], dict[str, int]]:
     slot_sizes = sorted(
         {
             value
@@ -321,7 +314,7 @@ def _build_feasible_solution_for_combo(
         }
     )
     if not slot_sizes:
-        return False, {}, {}, 0, 0, "No slot sizes found for combination.", {"beam": 0, "floor": 0}
+        return False, {}, {}, {"beam": 0, "floor": 0}
 
     min_at_or_above = {
         slot_size: int(round(_to_float(next(row for row in requirement_rows if _to_float(row.get("Representative_Slot_Size")) == slot_size).get("Min_Required_Locations_At_Or_Above_Size")) or 0.0))
@@ -355,61 +348,19 @@ def _build_feasible_solution_for_combo(
                 break
 
         if deficit > 0:
-            return False, dict(assigned_by_slot), {}, 0, 0, f"Insufficient capacity for slot size >= {slot_size:.0f}.", {"beam": 0, "floor": 0}
+            return False, dict(assigned_by_slot), {}, {"beam": 0, "floor": 0}
 
     achieved_at_or_above = {
         slot_size: sum(count for size, count in assigned_by_slot.items() if size >= slot_size)
         for slot_size in slot_sizes
     }
 
-    achieved_high_total = sum(count for size, count in assigned_by_slot.items() if size >= high_slot_threshold)
-
-    high_slot_candidates = [size for size in slot_sizes if size >= high_slot_threshold]
-    if high_slot_candidates:
-        threshold_slot = min(high_slot_candidates)
-        sku_high_demand = int(round(_to_float(next(row for row in requirement_rows if _to_float(row.get("Representative_Slot_Size")) == threshold_slot).get("Cumulative_Assigned_SKUs_At_Or_Above_Size")) or 0.0))
-    else:
-        sku_high_demand = 0
-
-    achieved_high_non_occupied = max(achieved_high_total - sku_high_demand, 0)
-    high_constraint_status = "ENFORCED" if ENFORCE_MIN_HIGH_NON_OCCUPIED_CONSTRAINT else "DISABLED"
-    note = ""
-
-    if achieved_high_non_occupied < required_high_non_occupied:
-        extra_needed = required_high_non_occupied - achieved_high_non_occupied
-        extra_candidates = [
-            unit
-            for unit in units
-            if unit.unit_id not in used_units
-        ]
-        extra_candidates.sort(key=lambda unit: unit.size)
-
-        if high_slot_candidates:
-            target_slot = min(high_slot_candidates)
-            for unit in extra_candidates:
-                used_units.add(unit.unit_id)
-                assigned_by_slot[target_slot] += unit.size
-                extra_needed -= unit.size
-                if extra_needed <= 0:
-                    break
-
-            achieved_at_or_above = {
-                slot_size: sum(count for size, count in assigned_by_slot.items() if size >= slot_size)
-                for slot_size in slot_sizes
-            }
-            achieved_high_total = sum(count for size, count in assigned_by_slot.items() if size >= high_slot_threshold)
-            achieved_high_non_occupied = max(achieved_high_total - sku_high_demand, 0)
-
-        if achieved_high_non_occupied < required_high_non_occupied:
-            high_constraint_status = "RELAXED_INFEASIBLE"
-            note = "High non-occupied big-location minimum could not be met and was relaxed."
-
     unit_usage = {"beam": 0, "floor": 0}
     for unit_id in used_units:
         unit_type = unit_by_id[unit_id].unit_type
         unit_usage[unit_type] = unit_usage.get(unit_type, 0) + 1
 
-    return True, dict(assigned_by_slot), achieved_at_or_above, achieved_high_non_occupied, achieved_high_total, high_constraint_status if note == "" else f"{high_constraint_status}: {note}", unit_usage
+    return True, dict(assigned_by_slot), achieved_at_or_above, unit_usage
 
 
 def _build_location_metadata(prepared_rows: list[dict[str, str]], beam_map_rows: list[dict[str, str]]) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
@@ -851,18 +802,10 @@ def _cumulative_count_at_or_above(counts_by_slot_size: dict[float, int], slot_si
     return sum(counts_by_slot_size.get(candidate, 0) for candidate in slot_sizes if candidate >= slot_size)
 
 
-def _smallest_eligible_slot(slot_sizes: list[float], min_slot_size: float) -> float | None:
-    candidates = [slot for slot in slot_sizes if slot >= min_slot_size]
-    return min(candidates) if candidates else None
-
-
 def _attempt_constructive_allocation(
     units: list[dict[str, object]],
     slot_sizes: list[float],
     min_required_by_slot_size: dict[float, int],
-    high_slot_threshold: float,
-    required_high_non_occupied: int,
-    enforce_high_non_occupied: bool,
 ) -> tuple[bool, dict[float, int], list[tuple[int, float]], str]:
     assigned_counts = {slot_size: 0 for slot_size in slot_sizes}
     assigned_units: list[tuple[int, float]] = []
@@ -895,35 +838,6 @@ def _attempt_constructive_allocation(
 
         if covered < needed:
             return False, assigned_counts, assigned_units, f"Insufficient capacity for slot size >= {slot_size:.0f}"
-
-    if enforce_high_non_occupied and required_high_non_occupied > 0:
-        currently_high = sum(count for slot_size, count in assigned_counts.items() if slot_size >= high_slot_threshold)
-        need_high = max(0, required_high_non_occupied - currently_high)
-
-        if need_high > 0:
-            extra_candidates: list[tuple[int, float]] = []
-            for index in remaining_indices:
-                target_slot = _smallest_eligible_slot(slot_sizes, high_slot_threshold)
-                if target_slot is not None:
-                    extra_candidates.append((index, target_slot))
-
-            extra_candidates.sort(
-                key=lambda item: (
-                    _to_int_default(units[item[0]].get("Capacity"), 0),
-                )
-            )
-
-            covered = 0
-            for index, target_slot in extra_candidates:
-                assigned_counts[target_slot] += _to_int_default(units[index].get("Capacity"), 0)
-                assigned_units.append((index, target_slot))
-                remaining_indices.remove(index)
-                covered += _to_int_default(units[index].get("Capacity"), 0)
-                if covered >= need_high:
-                    break
-
-            if covered < need_high:
-                return False, assigned_counts, assigned_units, "Insufficient high-slot capacity"
 
     for slot_size in slot_sizes:
         if _cumulative_count_at_or_above(assigned_counts, slot_sizes, slot_size) < min_required_by_slot_size.get(slot_size, 0):
@@ -966,10 +880,6 @@ def _generate_feasible_solutions(
 
     for key, constraint_rows in grouped_constraints.items():
         method, scenario, k, sku_scenario = key
-        model_row = model_index.get(key, {})
-
-        high_threshold = _to_float(model_row.get("High_Slot_Threshold_cm")) or HIGH_SLOT_THRESHOLD
-        required_high_non_occupied = int(round(_to_float(model_row.get("Required_High_Non_Occupied_Count_At_Minimum")) or 0.0))
 
         slot_rows_sorted = sorted(
             constraint_rows,
@@ -988,26 +898,7 @@ def _generate_feasible_solutions(
             units=units,
             slot_sizes=slot_sizes,
             min_required_by_slot_size=min_required_by_slot_size,
-            high_slot_threshold=high_threshold,
-            required_high_non_occupied=required_high_non_occupied,
-            enforce_high_non_occupied=True,
         )
-
-        high_constraint_applied = "YES"
-        if not success:
-            success, assigned_counts, assigned_units, fallback_note = _attempt_constructive_allocation(
-                units=units,
-                slot_sizes=slot_sizes,
-                min_required_by_slot_size=min_required_by_slot_size,
-                high_slot_threshold=high_threshold,
-                required_high_non_occupied=required_high_non_occupied,
-                enforce_high_non_occupied=False,
-            )
-            if success:
-                high_constraint_applied = "NO (relaxed)"
-                note = f"High-slot rule relaxed: {note}"
-            else:
-                note = f"{note}; fallback without high-slot rule failed: {fallback_note}"
 
         used_rack_columns: dict[str, int] = defaultdict(int)
         for unit_index, _slot_size in assigned_units:
@@ -1025,7 +916,6 @@ def _generate_feasible_solutions(
                 "K": k,
                 "SKU_Scenario": sku_scenario,
                 "Feasible": "YES" if success else "NO",
-                "High_Non_Occupied_Constraint_Applied": high_constraint_applied if success else "N/A",
                 "Assigned_Total_Locations": str(total_assigned),
                 "Available_Total_Locations": str(total_capacity),
                 "Assigned_Beam_Coupled_Units": str(sum(1 for unit_index, _ in assigned_units if bool(units[unit_index].get("Is_Beam_Coupled")))),
@@ -1141,10 +1031,7 @@ def _method_constraint_rows(
                 slot_size = slot_size_clusters[index][0]
                 running_demand += allocated_counts[index]
                 cumulative_skus_by_slot_size[slot_size] = running_demand
-                if ENFORCE_OCCUPANCY_RATE_CONSTRAINT:
-                    min_locations_by_slot_size[slot_size] = math.ceil(running_demand / MAX_OCCUPANCY_RATE)
-                else:
-                    min_locations_by_slot_size[slot_size] = running_demand
+                min_locations_by_slot_size[slot_size] = running_demand
 
             for index, (slot_size, _, percentage) in enumerate(slot_size_clusters):
                 eligible_sizes = [candidate for candidate in slot_sizes if candidate >= slot_size]
@@ -1170,16 +1057,6 @@ def _method_constraint_rows(
                     }
                 )
 
-            if ENFORCE_OCCUPANCY_RATE_CONSTRAINT:
-                min_locations_required = math.ceil(sku_count / MAX_OCCUPANCY_RATE)
-            else:
-                min_locations_required = sku_count
-
-            if ENFORCE_MIN_HIGH_NON_OCCUPIED_CONSTRAINT and ENFORCE_OCCUPANCY_RATE_CONSTRAINT:
-                min_high_non_occupied = math.ceil(max(min_locations_required - sku_count, 0) * MIN_HIGH_NON_OCCUPIED_SHARE)
-            else:
-                min_high_non_occupied = 0
-
             rows.append(
                 {
                     "Method": method,
@@ -1187,14 +1064,8 @@ def _method_constraint_rows(
                     "K": k,
                     "SKU_Scenario": sku_scenario_name,
                     "SKU_Count": str(sku_count),
-                    "Max_Occupancy_Rate": f"{MAX_OCCUPANCY_RATE:.2f}" if ENFORCE_OCCUPANCY_RATE_CONSTRAINT else "DISABLED",
-                    "Required_Total_Locations_At_Max_Occupancy": str(min_locations_required),
                     "Total_Location_Decision": "sum(x_s)",
-                    "Occupancy_Constraint": f"sum(x_s) >= {min_locations_required}",
-                    "High_Slot_Threshold_cm": f"{HIGH_SLOT_THRESHOLD:.0f}",
-                    "Required_High_Non_Occupied_Count_At_Minimum": str(min_high_non_occupied),
-                    "High_Slot_Location_Decision": f"sum(x_s for s >= {HIGH_SLOT_THRESHOLD:.0f})",
-                    "High_Non_Occupied_Constraint": f"sum(x_s for s >= {HIGH_SLOT_THRESHOLD:.0f}) >= {min_high_non_occupied}",
+                    "Coverage_Basis": "Direct cumulative SKU demand",
                     "Slot_Sizes": slot_size_text,
                     "Rack_Column_Division": "FIXED (validated in static checks)",
                     "Location_Coding": "FIXED (validated in static checks)",
@@ -1243,20 +1114,13 @@ def build_configuration_model_constraints() -> Path:
 
     for key, requirement_rows in requirement_groups.items():
         method, scenario, k, sku_scenario = key
-        model_row = model_row_by_key.get(key, {})
-        required_total_locations = int(round(_to_float(model_row.get("Required_Total_Locations_At_Max_Occupancy")) or 0.0))
-        required_high_non_occupied = int(round(_to_float(model_row.get("Required_High_Non_Occupied_Count_At_Minimum")) or 0.0))
 
-        feasible, assigned_by_slot, achieved_at_or_above, achieved_high_non_occupied, achieved_high_total, high_status, unit_usage = _build_feasible_solution_for_combo(
+        feasible, assigned_by_slot, achieved_at_or_above, unit_usage = _build_feasible_solution_for_combo(
             requirement_rows,
             capacity_units,
-            HIGH_SLOT_THRESHOLD,
-            required_high_non_occupied,
         )
 
         total_assigned = sum(assigned_by_slot.values())
-        min_slot_size = min(assigned_by_slot.keys()) if assigned_by_slot else None
-        achieved_total_for_min_slot = achieved_at_or_above.get(min_slot_size, 0) if min_slot_size is not None else 0
 
         for requirement_row in sorted(requirement_rows, key=lambda row: _to_float(row.get("Representative_Slot_Size")) or 0.0):
             slot_size = _to_float(requirement_row.get("Representative_Slot_Size"))
@@ -1287,14 +1151,6 @@ def build_configuration_model_constraints() -> Path:
                 "SKU_Scenario": sku_scenario,
                 "Feasible": "YES" if feasible else "NO",
                 "Total_Assigned_Locations": str(total_assigned),
-                "Required_Total_Locations_At_Max_Occupancy": str(required_total_locations),
-                "Total_Occupancy_Constraint_Satisfied": (
-                    "YES" if achieved_total_for_min_slot >= required_total_locations else "NO"
-                ) if ENFORCE_OCCUPANCY_RATE_CONSTRAINT else "DISABLED",
-                "High_Non_Occupied_Status": high_status,
-                "Achieved_High_Locations_At_Or_Above_99": str(achieved_high_total),
-                "Achieved_High_Non_Occupied_Count": str(achieved_high_non_occupied),
-                "Required_High_Non_Occupied_Count": str(required_high_non_occupied),
                 "Beam_Units_Used": str(unit_usage.get("beam", 0)),
                 "Floor_Units_Used": str(unit_usage.get("floor", 0)),
             }
@@ -1392,12 +1248,6 @@ def build_configuration_model_constraints() -> Path:
                 "SKU_Scenario",
                 "Feasible",
                 "Total_Assigned_Locations",
-                "Required_Total_Locations_At_Max_Occupancy",
-                "Total_Occupancy_Constraint_Satisfied",
-                "High_Non_Occupied_Status",
-                "Achieved_High_Locations_At_Or_Above_99",
-                "Achieved_High_Non_Occupied_Count",
-                "Required_High_Non_Occupied_Count",
                 "Beam_Units_Used",
                 "Floor_Units_Used",
             ],
@@ -1469,10 +1319,8 @@ def build_configuration_model_constraints() -> Path:
 
     model_file = OUTPUT_DIR / "Constraint_Model_By_Method_Scenario_K.csv"
     fields = list(model_rows[0].keys()) if model_rows else [
-        "Method", "Scenario", "K", "SKU_Scenario", "SKU_Count", "Max_Occupancy_Rate", "Required_Total_Locations_At_Max_Occupancy",
-        "Total_Location_Decision", "Occupancy_Constraint", "High_Slot_Threshold_cm",
-        "Required_High_Non_Occupied_Count_At_Minimum", "High_Slot_Location_Decision",
-        "High_Non_Occupied_Constraint",
+        "Method", "Scenario", "K", "SKU_Scenario", "SKU_Count",
+        "Total_Location_Decision", "Coverage_Basis",
         "Slot_Sizes", "Rack_Column_Division", "Location_Coding", "Beam_Coupling_Constraint", "Doorgang_Fixed_Heights",
     ]
 
