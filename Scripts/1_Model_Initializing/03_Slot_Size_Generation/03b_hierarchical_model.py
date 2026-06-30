@@ -199,6 +199,7 @@ def generate_hierarchical_model() -> Path:
                 total_count = len(values)
 
                 for row in summary_rows:
+                    cluster_count = _to_float(row.get("Cluster Count")) or 0.0
                     summary_writer.writerow(
                         {
                             "Scenario": scenario_label,
@@ -206,7 +207,7 @@ def generate_hierarchical_model() -> Path:
                             "K": k,
                             "Cluster ID": row["Cluster ID"],
                             "Cluster Count": row["Cluster Count"],
-                            "Cluster Count Percentage": f"{(_to_float(row.get('Cluster Count')) / total_count) * 100:.2f}%",
+                            "Cluster Count Percentage": f"{(cluster_count / total_count) * 100:.2f}%",
                             "Lower Bound": _format_number(_to_float(row.get("Lower Bound"))),
                             "Upper Bound": _format_number(_to_float(row.get("Upper Bound"))),
                             "Representative Slot Size": _format_number(_to_float(row.get("Representative Slot Size"))),

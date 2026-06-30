@@ -70,6 +70,18 @@ def _to_float(value: object | None) -> float | None:
         return None
 
 
+def _to_int_default(value: object | None, default: int = 0) -> int:
+    if value is None:
+        return default
+    text = str(value).strip()
+    if text == "":
+        return default
+    try:
+        return int(float(text))
+    except ValueError:
+        return default
+
+
 def _read_csv(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         raise FileNotFoundError(f"Missing file: {path}")
@@ -85,6 +97,14 @@ def _parse_location_code(location: str) -> tuple[str, int, int] | None:
     if not match:
         return None
     return match.group(1), int(match.group(2)), int(match.group(3))
+
+
+def _is_split_location(location: str) -> bool:
+    match = LOCATION_CODE_PATTERN.match(location)
+    if not match:
+        return False
+    suffix = match.group(4)
+    return suffix is not None and suffix.strip() != ""
 
 
 def _static_checks(
@@ -206,6 +226,8 @@ def _build_capacity_units(
 
     for row in beam_map_rows:
         location = str(row.get("Location", "")).strip()
+        if location and _is_split_location(location):
+            continue
         beam_supported = str(row.get("Beam_Supported", "")).strip().upper() == "YES"
         has_grid = str(row.get("Has_Grid", "")).strip().upper() == "YES"
         coordinate = str(row.get("Beam_Coordinate", "")).strip()
@@ -257,6 +279,8 @@ def _build_capacity_units(
         location = str(row.get("Location", "")).strip()
         if location == "" or location in beam_locations:
             continue
+        if _is_split_location(location):
+            continue
 
         location_type = str(row.get("Location Type", "")).strip().lower()
         if location_type == "doorgang":
@@ -289,7 +313,13 @@ def _build_feasible_solution_for_combo(
     high_slot_threshold: float,
     required_high_non_occupied: int,
 ) -> tuple[bool, dict[float, int], dict[float, int], int, int, str, dict[str, int]]:
-    slot_sizes = sorted({_to_float(row.get("Representative_Slot_Size")) for row in requirement_rows if _to_float(row.get("Representative_Slot_Size")) is not None})
+    slot_sizes = sorted(
+        {
+            value
+            for row in requirement_rows
+            if (value := _to_float(row.get("Representative_Slot_Size"))) is not None
+        }
+    )
     if not slot_sizes:
         return False, {}, {}, 0, 0, "No slot sizes found for combination.", {"beam": 0, "floor": 0}
 
@@ -410,6 +440,9 @@ def _build_column_capacity(prepared_rows: list[dict[str, str]]) -> tuple[dict[st
         location_type = str(row.get("Location Type", "")).strip().lower()
         if location_type == "doorgang":
             continue
+        location = str(row.get("Location", "")).strip()
+        if location and _is_split_location(location):
+            continue
         rack = str(row.get("Rack", "")).strip()
         column = str(row.get("Column", "")).strip()
         if rack == "" or column == "":
@@ -436,6 +469,131 @@ def _unit_column_counts(unit: CapacityUnit) -> dict[str, int]:
         rack, column, _ = parsed
         counts[f"{rack}{column:02d}"] += 1
     return dict(counts)
+
+
+def _build_rack_row_groups(prepared_rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    group_locations: dict[tuple[str, str], list[str]] = defaultdict(list)
+    group_column_counts: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    group_row_labels: dict[tuple[str, str], str] = {}
+
+    for row in prepared_rows:
+        location_type = str(row.get("Location Type", "")).strip().lower()
+        if location_type == "doorgang":
+            continue
+
+        location = str(row.get("Location", "")).strip()
+        if location and _is_split_location(location):
+            continue
+        rack = str(row.get("Rack", "")).strip()
+        column = str(row.get("Column", "")).strip()
+        row_label = str(row.get("Row", "")).strip()
+        if location == "" or rack == "" or column == "":
+            continue
+
+        effective_row = row_label if row_label else f"LOC::{location}"
+        key = (rack, effective_row)
+        group_row_labels[key] = row_label
+        group_locations[key].append(location)
+        group_column_counts[key][f"{rack}{column}"] += 1
+
+    result: list[dict[str, object]] = []
+    for (rack, effective_row), locations_list in group_locations.items():
+        locations = sorted({str(loc) for loc in locations_list})
+        counts_map = group_column_counts.get((rack, effective_row), {})
+        column_counts = {str(k): int(v) for k, v in counts_map.items()}
+
+        result.append(
+            {
+                "Group_ID": f"RACKROW::{rack}::{effective_row}",
+                "Rack": rack,
+                "Row": group_row_labels.get((rack, effective_row), ""),
+                "Locations": locations,
+                "Column_Counts": column_counts,
+                "Capacity": len(locations),
+            }
+        )
+
+    result.sort(key=lambda group: (_to_int_default(group.get("Capacity"), 0), str(group.get("Group_ID", ""))))
+    return result
+
+
+def _allocate_layout_rack_standardized(
+    target_exact_counts: dict[float, int],
+    rack_row_groups: list[dict[str, object]],
+    allowed_used_height: dict[str, float],
+) -> tuple[bool, dict[float, int], dict[str, float], list[tuple[int, float]], str]:
+    remaining_groups = set(range(len(rack_row_groups)))
+    assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
+    used_height_by_column: dict[str, float] = defaultdict(float)
+    assignments: list[tuple[int, float]] = []
+    unmet_targets: dict[float, int] = {}
+
+    for slot_size in sorted(target_exact_counts.keys(), reverse=True):
+        target = int(target_exact_counts.get(slot_size, 0))
+        if target <= 0:
+            continue
+
+        covered = 0
+        while covered < target:
+            remaining_need = target - covered
+            candidates: list[tuple[int, int, float, int]] = []
+
+            for group_index in remaining_groups:
+                group = rack_row_groups[group_index]
+                capacity = _to_int_default(group.get("Capacity"), 0)
+                if capacity <= 0:
+                    continue
+
+                counts_obj = group.get("Column_Counts")
+                if not isinstance(counts_obj, dict):
+                    continue
+
+                fits = True
+                post_slack_sum = 0.0
+                for column_key, count in counts_obj.items():
+                    allowed = allowed_used_height.get(str(column_key))
+                    if allowed is None:
+                        fits = False
+                        break
+                    proposed = used_height_by_column[str(column_key)] + slot_size * _to_int_default(count, 0)
+                    if proposed > allowed + 1e-9:
+                        fits = False
+                        break
+                    post_slack_sum += allowed - proposed
+
+                if not fits:
+                    continue
+
+                # Primary objective: close remaining demand. Secondary: avoid overshoot. Tertiary: preserve slack.
+                candidates.append((abs(remaining_need - capacity), 1 if capacity > remaining_need else 0, int(post_slack_sum), group_index))
+
+            if not candidates:
+                unmet_targets[slot_size] = target - covered
+                break
+
+            candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+            chosen_index = candidates[0][3]
+            chosen_group = rack_row_groups[chosen_index]
+            chosen_capacity = _to_int_default(chosen_group.get("Capacity"), 0)
+
+            counts_obj = chosen_group.get("Column_Counts")
+            if isinstance(counts_obj, dict):
+                for column_key, count in counts_obj.items():
+                    used_height_by_column[str(column_key)] += slot_size * _to_int_default(count, 0)
+
+            assigned_exact_counts[slot_size] += chosen_capacity
+            assignments.append((chosen_index, slot_size))
+            remaining_groups.remove(chosen_index)
+            covered += chosen_capacity
+
+    success = all(assigned_exact_counts.get(slot, 0) >= int(target_exact_counts.get(slot, 0)) for slot in target_exact_counts)
+    if success:
+        return True, assigned_exact_counts, dict(used_height_by_column), assignments, "Rack-standardized allocation succeeded."
+
+    deviation = sum(abs(assigned_exact_counts.get(slot, 0) - int(target_exact_counts.get(slot, 0))) for slot in target_exact_counts)
+    unmet_text = ", ".join(f"{int(slot)}:{count}" for slot, count in sorted(unmet_targets.items(), reverse=True))
+    note = f"Rack-standardized best effort; unmet slot counts [{unmet_text}] ; total absolute deviation={deviation}."
+    return False, assigned_exact_counts, dict(used_height_by_column), assignments, note
 
 
 def _allocate_layout_for_combo(
@@ -502,6 +660,7 @@ def _generate_layout_distribution_outputs(
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     location_meta, beam_by_location = _build_location_metadata(prepared_rows, beam_map_rows)
     allowed_used_height, beam_count_by_column, _ = _build_column_capacity(prepared_rows)
+    rack_row_groups = _build_rack_row_groups(prepared_rows)
 
     grouped_targets: dict[tuple[str, str, str, str], dict[float, int]] = defaultdict(dict)
     for row in feasible_slot_rows:
@@ -523,21 +682,25 @@ def _generate_layout_distribution_outputs(
 
     for key, target_counts in grouped_targets.items():
         method, scenario, k, sku_scenario = key
-        success, assigned_exact, used_by_column, unit_assignments, note = _allocate_layout_for_combo(
+        success, assigned_exact, used_by_column, unit_assignments, note = _allocate_layout_rack_standardized(
             target_exact_counts=target_counts,
-            units=units,
+            rack_row_groups=rack_row_groups,
             allowed_used_height=allowed_used_height,
         )
 
         assignment_by_location: dict[str, tuple[str, str, str, float]] = {}
         slot_mix_by_column: dict[str, dict[float, int]] = defaultdict(lambda: defaultdict(int))
         for unit_index, slot_size in unit_assignments:
-            unit = units[unit_index]
-            for location in unit.locations:
+            group = rack_row_groups[unit_index]
+            locations_obj = group.get("Locations")
+            locations = locations_obj if isinstance(locations_obj, list) else []
+            group_id = str(group.get("Group_ID", ""))
+
+            for location in locations:
                 meta = location_meta.get(location, {"Rack": "", "Column": "", "Row": ""})
                 assignment_by_location[location] = (
-                    unit.unit_id,
-                    unit.unit_type,
+                    group_id,
+                    "rack_row",
                     beam_by_location.get(location, ""),
                     slot_size,
                 )
@@ -680,7 +843,7 @@ def _load_capacity_units(prepared_rows: list[dict[str, str]]) -> tuple[list[dict
             }
         )
 
-    units.sort(key=lambda row: (_to_float(row.get("Height")) or 0.0, int(row.get("Capacity", 0))))
+    units.sort(key=lambda row: (_to_float(row.get("Height")) or 0.0, _to_int_default(row.get("Capacity"), 0)))
     return units, dict(rack_column_capacity)
 
 
@@ -717,16 +880,16 @@ def _attempt_constructive_allocation(
         ]
         eligible.sort(
             key=lambda index: (
-                int(units[index].get("Capacity", 0)),
+                _to_int_default(units[index].get("Capacity"), 0),
             )
         )
 
         covered = 0
         for index in eligible:
-            assigned_counts[slot_size] += int(units[index].get("Capacity", 0))
+            assigned_counts[slot_size] += _to_int_default(units[index].get("Capacity"), 0)
             assigned_units.append((index, slot_size))
             remaining_indices.remove(index)
-            covered += int(units[index].get("Capacity", 0))
+            covered += _to_int_default(units[index].get("Capacity"), 0)
             if covered >= needed:
                 break
 
@@ -746,16 +909,16 @@ def _attempt_constructive_allocation(
 
             extra_candidates.sort(
                 key=lambda item: (
-                    int(units[item[0]].get("Capacity", 0)),
+                    _to_int_default(units[item[0]].get("Capacity"), 0),
                 )
             )
 
             covered = 0
             for index, target_slot in extra_candidates:
-                assigned_counts[target_slot] += int(units[index].get("Capacity", 0))
+                assigned_counts[target_slot] += _to_int_default(units[index].get("Capacity"), 0)
                 assigned_units.append((index, target_slot))
                 remaining_indices.remove(index)
-                covered += int(units[index].get("Capacity", 0))
+                covered += _to_int_default(units[index].get("Capacity"), 0)
                 if covered >= need_high:
                     break
 
@@ -799,7 +962,7 @@ def _generate_feasible_solutions(
     slot_solution_rows: list[dict[str, str]] = []
     rack_column_rows: list[dict[str, str]] = []
 
-    total_capacity = sum(int(unit.get("Capacity", 0)) for unit in units)
+    total_capacity = sum(_to_int_default(unit.get("Capacity"), 0) for unit in units)
 
     for key, constraint_rows in grouped_constraints.items():
         method, scenario, k, sku_scenario = key
