@@ -12,6 +12,9 @@ INPUT_SCENARIOS = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_S
 INPUT_LOCATION_BEAM_MAP = ROOT / "Output" / "01_Data_Preparation" / "Beam_Grid_Mapping" / "Location_Beam_Map.csv"
 SLOT_SIZE_ROOT = ROOT / "Output" / "03_Slot_Size_Generation"
 OUTPUT_DIR = ROOT / "Output" / "04_Slot_Size_Configuration_Model"
+CONSTRAINT_OUTPUT_DIR = OUTPUT_DIR / "constraint"
+FEASIBLE_OUTPUT_DIR = OUTPUT_DIR / "feasible"
+LAYOUT_OUTPUT_DIR = OUTPUT_DIR / "layout"
 
 METHODS = ("quantile_binning", "hierarchical_clustering", "kmeans_clustering")
 BASE_SKU_COUNT = 843
@@ -1077,6 +1080,27 @@ def _method_constraint_rows(
     return rows, slot_size_rows
 
 
+def _emit_static_check_messages(
+    invalid_location_rows: list[dict[str, str]],
+    violating_column_rows: list[dict[str, str]],
+) -> None:
+    invalid_count = len(invalid_location_rows)
+    violating_count = len(violating_column_rows)
+
+    if invalid_count > 0:
+        sample = ", ".join(row.get("Location", "") for row in invalid_location_rows[:5])
+        suffix = "..." if invalid_count > 5 else ""
+        print(f"WARNING: Invalid location codes found ({invalid_count}). Sample: {sample}{suffix}")
+
+    if violating_count > 0:
+        sample = ", ".join(
+            f"{row.get('Rack', '')}{row.get('Column', '')}"
+            for row in violating_column_rows[:5]
+        )
+        suffix = "..." if violating_count > 5 else ""
+        print(f"WARNING: Column-height violations found ({violating_count}). Sample columns: {sample}{suffix}")
+
+
 def build_configuration_model_constraints() -> Path:
     prepared_rows = _read_csv(INPUT_PREPARED)
     scenario_rows = _read_csv(INPUT_SCENARIOS)
@@ -1085,6 +1109,7 @@ def build_configuration_model_constraints() -> Path:
     capacity_units = _build_capacity_units(prepared_rows, beam_map_rows)
 
     static_rows, invalid_location_rows, violating_column_rows = _static_checks(prepared_rows)
+    _emit_static_check_messages(invalid_location_rows, violating_column_rows)
     model_rows: list[dict[str, str]] = []
     slot_size_constraint_rows: list[dict[str, str]] = []
 
@@ -1164,39 +1189,27 @@ def build_configuration_model_constraints() -> Path:
     )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    CONSTRAINT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    FEASIBLE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    LAYOUT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    static_file = OUTPUT_DIR / "Constraint_Static_Checks.csv"
+    static_file = CONSTRAINT_OUTPUT_DIR / "Constraint_Static_Checks.csv"
     with static_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(target, fieldnames=["Constraint", "Status", "Details"])
         writer.writeheader()
         writer.writerows(static_rows)
 
-    invalid_codes_file = OUTPUT_DIR / "Constraint_Invalid_Location_Codes.csv"
-    with invalid_codes_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(target, fieldnames=["Location"])
-        writer.writeheader()
-        writer.writerows(invalid_location_rows)
+    # Clean up legacy detail outputs that are now replaced by console messages.
+    for stale_file in (
+        OUTPUT_DIR / "Constraint_Invalid_Location_Codes.csv",
+        OUTPUT_DIR / "Constraint_Violating_Columns_Detail.csv",
+        CONSTRAINT_OUTPUT_DIR / "Constraint_Invalid_Location_Codes.csv",
+        CONSTRAINT_OUTPUT_DIR / "Constraint_Violating_Columns_Detail.csv",
+    ):
+        if stale_file.exists():
+            stale_file.unlink()
 
-    violating_columns_file = OUTPUT_DIR / "Constraint_Violating_Columns_Detail.csv"
-    with violating_columns_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=[
-                "Rack",
-                "Column",
-                "Location_Count",
-                "Beam_Count_Used",
-                "Allowed_Used_Height",
-                "Actual_Used_Height",
-                "Excess_Height",
-                "Locations",
-                "Location_Heights",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(violating_column_rows)
-
-    slot_size_constraints_file = OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
+    slot_size_constraints_file = CONSTRAINT_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
     with slot_size_constraints_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -1218,7 +1231,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(slot_size_constraint_rows)
 
-    feasible_slot_file = OUTPUT_DIR / "Feasible_Slot_Size_Counts_By_Method_Scenario_K_v2.csv"
+    feasible_slot_file = FEASIBLE_OUTPUT_DIR / "Feasible_Slot_Size_Counts_By_Method_Scenario_K_v2.csv"
     with feasible_slot_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -1237,7 +1250,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(feasible_slot_rows)
 
-    feasible_summary_file = OUTPUT_DIR / "Feasible_Solution_Summary_By_Method_Scenario_K_v2.csv"
+    feasible_summary_file = FEASIBLE_OUTPUT_DIR / "Feasible_Solution_Summary_By_Method_Scenario_K_v2.csv"
     with feasible_summary_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -1255,7 +1268,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(feasible_summary_rows)
 
-    layout_summary_file = OUTPUT_DIR / "Layout_Distribution_Summary_By_Method_Scenario_K_v2.csv"
+    layout_summary_file = LAYOUT_OUTPUT_DIR / "Layout_Distribution_Summary_By_Method_Scenario_K_v2.csv"
     with layout_summary_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -1274,7 +1287,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(layout_summary_rows)
 
-    layout_column_file = OUTPUT_DIR / "Layout_Distribution_By_Rack_Column_v2.csv"
+    layout_column_file = LAYOUT_OUTPUT_DIR / "Layout_Distribution_By_Rack_Column_v2.csv"
     with layout_column_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -1295,7 +1308,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(layout_column_rows)
 
-    layout_location_file = OUTPUT_DIR / "Layout_Distribution_By_Location_v2.csv"
+    layout_location_file = LAYOUT_OUTPUT_DIR / "Layout_Distribution_By_Location_v2.csv"
     with layout_location_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,
@@ -1317,7 +1330,7 @@ def build_configuration_model_constraints() -> Path:
         writer.writeheader()
         writer.writerows(layout_location_rows)
 
-    model_file = OUTPUT_DIR / "Constraint_Model_By_Method_Scenario_K.csv"
+    model_file = CONSTRAINT_OUTPUT_DIR / "Constraint_Model_By_Method_Scenario_K.csv"
     fields = list(model_rows[0].keys()) if model_rows else [
         "Method", "Scenario", "K", "SKU_Scenario", "SKU_Count",
         "Total_Location_Decision", "Coverage_Basis",
