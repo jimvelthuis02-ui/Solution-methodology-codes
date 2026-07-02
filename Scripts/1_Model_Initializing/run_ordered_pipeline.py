@@ -7,7 +7,11 @@ ORDERED_SCRIPTS = [
     "01_Data_Preparation/01_data_preparation.py",
     "02_Scenario_Generation/02_scenario_generation_weighted_delta.py",
     "03_Slot_Size_Generation/03_slot_size_generation_main.py",
-    "04_Slot_Size_Configuration_Model/04_slot_size_configuration_model.py",
+    "04_Candidate_Configuration_Filtering/04_candidate_configuration_filtering.py",
+    "05_Capacity_Determination/05_capacity_determination.py",
+    "06_Layout_Generation/06_layout_generation.py",
+    "07_Robustness_Evaluation/07_robustness_evaluation.py",
+    "08_Final_Selection/08_final_selection.py",
 ]
 
 

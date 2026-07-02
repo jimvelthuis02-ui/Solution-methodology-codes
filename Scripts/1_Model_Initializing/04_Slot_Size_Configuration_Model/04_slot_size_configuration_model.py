@@ -2,8 +2,8 @@ import csv
 import math
 import re
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -23,6 +23,10 @@ SKU_SCENARIO_FACTORS = {
     "Base_Count": 1.0,
     "High_Count": 1.1,
 }
+MAX_CONFIGURATION_CANDIDATES = 6
+CANDIDATE_LAYOUT_STYLES = ("utilization", "relocation", "material", "balanced")
+MAX_REPRESENTATIVE_LAYOUTS = 10
+FINAL_LAYOUT_COUNT = 6
 
 RACK_EXPECTED_COLUMNS = {
     "A": 16,
@@ -43,17 +47,8 @@ MAX_USED_HEIGHT_BASE = COLUMN_MAX_HEIGHT - TOP_BEAM_HEIGHT
 MIN_BEAMS_PER_COLUMN = 3
 BEAM_HEIGHT = 16.0
 LOCATION_CODE_PATTERN = re.compile(r"^([A-Z])(\d{2})(\d{2})([A-Za-z]+)?$")
-
-
-@dataclass(frozen=True)
-class CapacityUnit:
-    unit_id: str
-    unit_type: str
-    size: int
-    min_height: float
-    rack: str
-    columns: tuple[int, ...]
-    locations: tuple[str, ...]
+BEAM_SPAN_PATTERN = re.compile(r"^([A-Z])\[(\d{2})-(\d{2})\]:([0-9]{1,2}[A-Za-z]?)$")
+BEAM_SINGLE_PATTERN = re.compile(r"^([A-Z])(\d{2}):([0-9]{1,2}[A-Za-z]?)$")
 
 
 def _to_float(value: object | None) -> float | None:
@@ -80,6 +75,31 @@ def _to_int_default(value: object | None, default: int = 0) -> int:
         return default
 
 
+def _to_fraction(value: object | None) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "":
+        return None
+    if text.endswith("%"):
+        text = text[:-1].strip()
+        number = _to_float(text)
+        return None if number is None else number / 100.0
+    return _to_float(text)
+
+
+def _allocate_counts_from_percentages(total_count: int, percentages: list[float]) -> list[int]:
+    raw = [max(0.0, percentage) * total_count for percentage in percentages]
+    floors = [int(math.floor(value)) for value in raw]
+    remainder = max(total_count - sum(floors), 0)
+    ranked = sorted(range(len(raw)), key=lambda i: raw[i] - floors[i], reverse=True)
+
+    for index in ranked[:remainder]:
+        floors[index] += 1
+
+    return floors
+
+
 def _read_csv(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         raise FileNotFoundError(f"Missing file: {path}")
@@ -88,6 +108,51 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         if reader.fieldnames is None:
             raise ValueError(f"CSV has no header row: {path}")
         return list(reader)
+
+
+def _deduplicate_output_columns(
+    fieldnames: list[str],
+    rows: list[dict[str, str]],
+) -> tuple[list[str], list[dict[str, str]]]:
+    if not fieldnames:
+        return fieldnames, rows
+    if not rows:
+        return fieldnames, rows
+
+    column_values: dict[str, list[str]] = {
+        field: [str(row.get(field, "")) for row in rows]
+        for field in fieldnames
+    }
+
+    kept_fields: list[str] = []
+    seen_signatures: set[tuple[str, ...]] = set()
+    for field in fieldnames:
+        signature = tuple(column_values[field])
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        kept_fields.append(field)
+
+    if not kept_fields:
+        kept_fields = [fieldnames[0]]
+
+    cleaned_rows = [
+        {field: str(row.get(field, "")) for field in kept_fields}
+        for row in rows
+    ]
+    return kept_fields, cleaned_rows
+
+
+def _write_csv_clean(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    cleaned_fields, cleaned_rows = _deduplicate_output_columns(fieldnames, rows)
+    with path.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(target, fieldnames=cleaned_fields)
+        writer.writeheader()
+        writer.writerows(cleaned_rows)
+
+
+def _slot_size_variable_name(slot_size: float) -> str:
+    return f"x_{int(round(slot_size))}"
 
 
 def _parse_location_code(location: str) -> tuple[str, int, int] | None:
@@ -105,6 +170,10 @@ def _is_split_location(location: str) -> bool:
     return suffix is not None and suffix.strip() != ""
 
 
+def _load_method_rows(method: str, file_name: str) -> list[dict[str, str]]:
+    return _read_csv(SLOT_SIZE_ROOT / method / file_name)
+
+
 def _static_checks(
     prepared_rows: list[dict[str, str]],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
@@ -112,7 +181,7 @@ def _static_checks(
     invalid_location_rows: list[dict[str, str]] = []
     violating_column_rows: list[dict[str, str]] = []
 
-    parsed = []
+    parsed: list[tuple[str, str, int, int, dict[str, str]]] = []
     invalid_codes = 0
     for row in prepared_rows:
         location = str(row.get("Location", "")).strip()
@@ -176,220 +245,8 @@ def _static_checks(
     return checks, invalid_location_rows, violating_column_rows
 
 
-def _load_method_rows(method: str, file_name: str) -> list[dict[str, str]]:
-    return _read_csv(SLOT_SIZE_ROOT / method / file_name)
-
-
-def _slot_size_variable_name(slot_size: float) -> str:
-    return f"x_{int(round(slot_size))}"
-
-
-def _to_fraction(value: object | None) -> float | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if text == "":
-        return None
-    if text.endswith("%"):
-        text = text[:-1].strip()
-        number = _to_float(text)
-        return None if number is None else number / 100.0
-    return _to_float(text)
-
-
-def _allocate_counts_from_percentages(total_count: int, percentages: list[float]) -> list[int]:
-    """Allocate integer counts from percentages while preserving the exact total."""
-    raw = [max(0.0, percentage) * total_count for percentage in percentages]
-    floors = [int(math.floor(value)) for value in raw]
-    remainder = max(total_count - sum(floors), 0)
-    ranked = sorted(range(len(raw)), key=lambda i: raw[i] - floors[i], reverse=True)
-
-    for index in ranked[:remainder]:
-        floors[index] += 1
-
-    return floors
-
-
-def _build_capacity_units(
-    prepared_rows: list[dict[str, str]],
-    beam_map_rows: list[dict[str, str]],
-) -> list[CapacityUnit]:
-    prepared_by_location = {
-        str(row.get("Location", "")).strip(): row
-        for row in prepared_rows
-    }
-
-    beam_locations: set[str] = set()
-    beam_groups: dict[str, list[str]] = defaultdict(list)
-
-    for row in beam_map_rows:
-        location = str(row.get("Location", "")).strip()
-        if location and _is_split_location(location):
-            continue
-        beam_supported = str(row.get("Beam_Supported", "")).strip().upper() == "YES"
-        has_grid = str(row.get("Has_Grid", "")).strip().upper() == "YES"
-        coordinate = str(row.get("Beam_Coordinate", "")).strip()
-
-        if not location or not beam_supported or not has_grid or coordinate == "":
-            continue
-
-        prepared = prepared_by_location.get(location)
-        if prepared is None:
-            continue
-
-        location_type = str(prepared.get("Location Type", "")).strip().lower()
-        if location_type == "doorgang":
-            continue
-
-        beam_locations.add(location)
-        beam_groups[coordinate].append(location)
-
-    units: list[CapacityUnit] = []
-
-    for coordinate, group_locations in beam_groups.items():
-        unique_locations = sorted(set(group_locations))
-        heights = [_to_float(prepared_by_location[loc].get("Location height")) for loc in unique_locations]
-        heights = [height for height in heights if height is not None]
-        if not heights:
-            continue
-
-        parsed_codes = [_parse_location_code(loc) for loc in unique_locations]
-        parsed_codes = [parsed for parsed in parsed_codes if parsed is not None]
-        if not parsed_codes:
-            continue
-
-        rack = parsed_codes[0][0]
-        columns = tuple(sorted({parsed[1] for parsed in parsed_codes}))
-
-        units.append(
-            CapacityUnit(
-                unit_id=f"BEAM::{coordinate}",
-                unit_type="beam",
-                size=len(unique_locations),
-                min_height=min(heights),
-                rack=rack,
-                columns=columns,
-                locations=tuple(unique_locations),
-            )
-        )
-
-    for row in prepared_rows:
-        location = str(row.get("Location", "")).strip()
-        if location == "" or location in beam_locations:
-            continue
-        if _is_split_location(location):
-            continue
-
-        location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type == "doorgang":
-            continue
-
-        location_height = _to_float(row.get("Location height"))
-        parsed = _parse_location_code(location)
-        if location_height is None or parsed is None:
-            continue
-
-        rack, column, _ = parsed
-        units.append(
-            CapacityUnit(
-                unit_id=f"FLOOR::{location}",
-                unit_type="floor",
-                size=1,
-                min_height=location_height,
-                rack=rack,
-                columns=(column,),
-                locations=(location,),
-            )
-        )
-
-    return units
-
-
-def _build_feasible_solution_for_combo(
-    requirement_rows: list[dict[str, str]],
-    units: list[CapacityUnit],
-) -> tuple[bool, dict[float, int], dict[float, int], dict[str, int]]:
-    slot_sizes = sorted(
-        {
-            value
-            for row in requirement_rows
-            if (value := _to_float(row.get("Representative_Slot_Size"))) is not None
-        }
-    )
-    if not slot_sizes:
-        return False, {}, {}, {"beam": 0, "floor": 0}
-
-    min_at_or_above = {
-        slot_size: int(round(_to_float(next(row for row in requirement_rows if _to_float(row.get("Representative_Slot_Size")) == slot_size).get("Min_Required_Locations_At_Or_Above_Size")) or 0.0))
-        for slot_size in slot_sizes
-    }
-
-    assigned_by_slot: dict[float, int] = defaultdict(int)
-    used_units: set[str] = set()
-    unit_by_id = {unit.unit_id: unit for unit in units}
-
-    slot_desc = sorted(slot_sizes, reverse=True)
-    for slot_size in slot_desc:
-        current_at_or_above = sum(count for size, count in assigned_by_slot.items() if size >= slot_size)
-        required = min_at_or_above[slot_size]
-        deficit = required - current_at_or_above
-        if deficit <= 0:
-            continue
-
-        candidates = [
-            unit
-            for unit in units
-            if unit.unit_id not in used_units
-        ]
-        candidates.sort(key=lambda unit: unit.size)
-
-        for unit in candidates:
-            used_units.add(unit.unit_id)
-            assigned_by_slot[slot_size] += unit.size
-            deficit -= unit.size
-            if deficit <= 0:
-                break
-
-        if deficit > 0:
-            return False, dict(assigned_by_slot), {}, {"beam": 0, "floor": 0}
-
-    achieved_at_or_above = {
-        slot_size: sum(count for size, count in assigned_by_slot.items() if size >= slot_size)
-        for slot_size in slot_sizes
-    }
-
-    unit_usage = {"beam": 0, "floor": 0}
-    for unit_id in used_units:
-        unit_type = unit_by_id[unit_id].unit_type
-        unit_usage[unit_type] = unit_usage.get(unit_type, 0) + 1
-
-    return True, dict(assigned_by_slot), achieved_at_or_above, unit_usage
-
-
-def _build_location_metadata(prepared_rows: list[dict[str, str]], beam_map_rows: list[dict[str, str]]) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
-    location_meta: dict[str, dict[str, str]] = {}
-    for row in prepared_rows:
-        location = str(row.get("Location", "")).strip()
-        if location == "":
-            continue
-        location_meta[location] = {
-            "Rack": str(row.get("Rack", "")).strip(),
-            "Column": str(row.get("Column", "")).strip(),
-            "Row": str(row.get("Row", "")).strip(),
-        }
-
-    beam_by_location: dict[str, str] = {}
-    for row in beam_map_rows:
-        location = str(row.get("Location", "")).strip()
-        if location == "":
-            continue
-        beam_by_location[location] = str(row.get("Beam_Coordinate", "")).strip()
-
-    return location_meta, beam_by_location
-
-
-def _build_column_capacity(prepared_rows: list[dict[str, str]]) -> tuple[dict[str, float], dict[str, int], dict[str, int]]:
-    rows_by_column: dict[str, int] = defaultdict(int)
+def _build_layout_columns(prepared_rows: list[dict[str, str]]) -> list[str]:
+    columns: set[str] = set()
     for row in prepared_rows:
         location_type = str(row.get("Location Type", "")).strip().lower()
         if location_type == "doorgang":
@@ -399,568 +256,326 @@ def _build_column_capacity(prepared_rows: list[dict[str, str]]) -> tuple[dict[st
             continue
         rack = str(row.get("Rack", "")).strip()
         column = str(row.get("Column", "")).strip()
-        if rack == "" or column == "":
-            continue
-        key = f"{rack}{column}"
-        rows_by_column[key] += 1
-
-    allowed_used_height: dict[str, float] = {}
-    beam_count_by_column: dict[str, int] = {}
-    for key, row_count in rows_by_column.items():
-        beam_count = max(row_count - 1, MIN_BEAMS_PER_COLUMN)
-        beam_count_by_column[key] = beam_count
-        allowed_used_height[key] = MAX_USED_HEIGHT_BASE - beam_count * BEAM_HEIGHT
-
-    return allowed_used_height, beam_count_by_column, rows_by_column
+        if rack and column:
+            columns.add(f"{rack}{column}")
+    return sorted(columns)
 
 
-def _unit_column_counts(unit: CapacityUnit) -> dict[str, int]:
-    counts: dict[str, int] = defaultdict(int)
-    for location in unit.locations:
-        parsed = _parse_location_code(location)
-        if parsed is None:
-            continue
-        rack, column, _ = parsed
-        counts[f"{rack}{column:02d}"] += 1
-    return dict(counts)
+def _build_generated_layout_location_rows(
+    layout_id: str,
+    config_id: str,
+    style: str,
+    column_assignments: dict[str, list[float]],
+) -> list[dict[str, str]]:
+    location_rows: list[dict[str, str]] = []
+
+    for column_key in sorted(column_assignments.keys()):
+        rack = column_key[0]
+        column = column_key[1:]
+        ordered_slots = sorted(column_assignments[column_key], reverse=True)
+        for row_index, slot_size in enumerate(ordered_slots, start=1):
+            location_rows.append(
+                {
+                    "Layout_ID": layout_id,
+                    "Config_ID": config_id,
+                    "Style": style,
+                    "Location": f"{rack}{column}{row_index:02d}",
+                    "Rack": rack,
+                    "Column": column,
+                    "Row": f"{row_index:02d}",
+                    "Beam_Coordinate": "" if row_index <= 1 else f"{rack}{column}:{row_index:02d}",
+                    "Assignment_Unit_ID": f"COL::{column_key}::{row_index:02d}",
+                    "Assignment_Unit_Type": "rack_column",
+                    "Assigned_Slot_Size_cm": f"{slot_size:.0f}",
+                }
+            )
+
+    return location_rows
 
 
-def _build_rack_row_groups(prepared_rows: list[dict[str, str]]) -> list[dict[str, object]]:
-    group_locations: dict[tuple[str, str], list[str]] = defaultdict(list)
-    group_column_counts: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    group_row_labels: dict[tuple[str, str], str] = {}
-
-    for row in prepared_rows:
-        location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type == "doorgang":
-            continue
-
-        location = str(row.get("Location", "")).strip()
-        if location and _is_split_location(location):
-            continue
-        rack = str(row.get("Rack", "")).strip()
-        column = str(row.get("Column", "")).strip()
-        row_label = str(row.get("Row", "")).strip()
-        if location == "" or rack == "" or column == "":
-            continue
-
-        effective_row = row_label if row_label else f"LOC::{location}"
-        key = (rack, effective_row)
-        group_row_labels[key] = row_label
-        group_locations[key].append(location)
-        group_column_counts[key][f"{rack}{column}"] += 1
-
-    result: list[dict[str, object]] = []
-    for (rack, effective_row), locations_list in group_locations.items():
-        locations = sorted({str(loc) for loc in locations_list})
-        counts_map = group_column_counts.get((rack, effective_row), {})
-        column_counts = {str(k): int(v) for k, v in counts_map.items()}
-
-        result.append(
-            {
-                "Group_ID": f"RACKROW::{rack}::{effective_row}",
-                "Rack": rack,
-                "Row": group_row_labels.get((rack, effective_row), ""),
-                "Locations": locations,
-                "Column_Counts": column_counts,
-                "Capacity": len(locations),
-            }
-        )
-
-    result.sort(key=lambda group: (_to_int_default(group.get("Capacity"), 0), str(group.get("Group_ID", ""))))
-    return result
-
-
-def _allocate_layout_rack_standardized(
+def _allocate_layout_by_column(
     target_exact_counts: dict[float, int],
-    rack_row_groups: list[dict[str, object]],
-    allowed_used_height: dict[str, float],
-) -> tuple[bool, dict[float, int], dict[str, float], list[tuple[int, float]], str]:
-    remaining_groups = set(range(len(rack_row_groups)))
+    column_keys: list[str],
+    style: str,
+) -> tuple[bool, dict[float, int], dict[str, float], dict[str, list[float]], str]:
     assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
     used_height_by_column: dict[str, float] = defaultdict(float)
-    assignments: list[tuple[int, float]] = []
-    unmet_targets: dict[float, int] = {}
-
-    for slot_size in sorted(target_exact_counts.keys(), reverse=True):
-        target = int(target_exact_counts.get(slot_size, 0))
-        if target <= 0:
-            continue
-
-        covered = 0
-        while covered < target:
-            remaining_need = target - covered
-            candidates: list[tuple[int, int, float, int]] = []
-
-            for group_index in remaining_groups:
-                group = rack_row_groups[group_index]
-                capacity = _to_int_default(group.get("Capacity"), 0)
-                if capacity <= 0:
-                    continue
-
-                counts_obj = group.get("Column_Counts")
-                if not isinstance(counts_obj, dict):
-                    continue
-
-                fits = True
-                post_slack_sum = 0.0
-                for column_key, count in counts_obj.items():
-                    allowed = allowed_used_height.get(str(column_key))
-                    if allowed is None:
-                        fits = False
-                        break
-                    proposed = used_height_by_column[str(column_key)] + slot_size * _to_int_default(count, 0)
-                    if proposed > allowed + 1e-9:
-                        fits = False
-                        break
-                    post_slack_sum += allowed - proposed
-
-                if not fits:
-                    continue
-
-                # Primary objective: close remaining demand. Secondary: avoid overshoot. Tertiary: preserve slack.
-                candidates.append((abs(remaining_need - capacity), 1 if capacity > remaining_need else 0, int(post_slack_sum), group_index))
-
-            if not candidates:
-                unmet_targets[slot_size] = target - covered
-                break
-
-            candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-            chosen_index = candidates[0][3]
-            chosen_group = rack_row_groups[chosen_index]
-            chosen_capacity = _to_int_default(chosen_group.get("Capacity"), 0)
-
-            counts_obj = chosen_group.get("Column_Counts")
-            if isinstance(counts_obj, dict):
-                for column_key, count in counts_obj.items():
-                    used_height_by_column[str(column_key)] += slot_size * _to_int_default(count, 0)
-
-            assigned_exact_counts[slot_size] += chosen_capacity
-            assignments.append((chosen_index, slot_size))
-            remaining_groups.remove(chosen_index)
-            covered += chosen_capacity
-
-    success = all(assigned_exact_counts.get(slot, 0) >= int(target_exact_counts.get(slot, 0)) for slot in target_exact_counts)
-    if success:
-        return True, assigned_exact_counts, dict(used_height_by_column), assignments, "Rack-standardized allocation succeeded."
-
-    deviation = sum(abs(assigned_exact_counts.get(slot, 0) - int(target_exact_counts.get(slot, 0))) for slot in target_exact_counts)
-    unmet_text = ", ".join(f"{int(slot)}:{count}" for slot, count in sorted(unmet_targets.items(), reverse=True))
-    note = f"Rack-standardized best effort; unmet slot counts [{unmet_text}] ; total absolute deviation={deviation}."
-    return False, assigned_exact_counts, dict(used_height_by_column), assignments, note
-
-
-def _allocate_layout_for_combo(
-    target_exact_counts: dict[float, int],
-    units: list[CapacityUnit],
-    allowed_used_height: dict[str, float],
-) -> tuple[bool, dict[float, int], dict[str, float], list[tuple[int, float]], str]:
-    remaining_units = set(range(len(units)))
-    assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
-    used_height_by_column: dict[str, float] = defaultdict(float)
-    unit_assignments: list[tuple[int, float]] = []
+    counts_by_column: dict[str, int] = defaultdict(int)
+    assignments_by_column: dict[str, list[float]] = defaultdict(list)
 
     slot_sizes_desc = sorted(target_exact_counts.keys(), reverse=True)
     for slot_size in slot_sizes_desc:
         needed = int(target_exact_counts.get(slot_size, 0))
         while needed > 0:
-            candidates: list[tuple[float, int, int]] = []
-            for unit_index in remaining_units:
-                unit = units[unit_index]
-                if unit.size > needed:
+            candidates: list[tuple[float, int, str]] = []
+            for column_key in column_keys:
+                current_count = counts_by_column.get(column_key, 0)
+                next_count = current_count + 1
+                allowed_after = MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(next_count - 1, MIN_BEAMS_PER_COLUMN)
+                proposed_used = used_height_by_column.get(column_key, 0.0) + slot_size
+                if proposed_used > allowed_after + 1e-9:
                     continue
 
-                unit_columns = _unit_column_counts(unit)
-                fits = True
-                post_slack_sum = 0.0
-                for column_key, count in unit_columns.items():
-                    allowed = allowed_used_height.get(column_key)
-                    if allowed is None:
-                        fits = False
-                        break
-                    proposed = used_height_by_column[column_key] + slot_size * count
-                    if proposed > allowed + 1e-9:
-                        fits = False
-                        break
-                    post_slack_sum += allowed - proposed
+                remaining_after = allowed_after - proposed_used
+                if style == "relocation":
+                    style_term = float(current_count)
+                elif style == "material":
+                    style_term = float(slot_size)
+                elif style == "balanced":
+                    style_term = abs(remaining_after - slot_size)
+                else:
+                    style_term = float(remaining_after)
 
-                if fits:
-                    # Prefer larger unit sizes first, then best fit (lower remaining slack after placement).
-                    candidates.append((post_slack_sum, -unit.size, unit_index))
+                candidates.append((remaining_after + style_term * 1e-3, current_count, column_key))
 
             if not candidates:
-                return False, assigned_exact_counts, dict(used_height_by_column), unit_assignments, f"No allocatable unit found for slot size {slot_size:.0f} with remaining demand {needed}."
+                return False, assigned_exact_counts, dict(used_height_by_column), dict(assignments_by_column), f"No allocatable column found for slot size {slot_size:.0f} with remaining demand {needed}."
 
-            candidates.sort(key=lambda item: (item[1], item[0]))
-            chosen_index = candidates[0][2]
-            chosen_unit = units[chosen_index]
+            candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+            chosen_column = candidates[0][2]
+            assignments_by_column[chosen_column].append(slot_size)
+            used_height_by_column[chosen_column] += slot_size
+            counts_by_column[chosen_column] += 1
+            assigned_exact_counts[slot_size] += 1
+            needed -= 1
 
-            for column_key, count in _unit_column_counts(chosen_unit).items():
-                used_height_by_column[column_key] += slot_size * count
-
-            assigned_exact_counts[slot_size] += chosen_unit.size
-            unit_assignments.append((chosen_index, slot_size))
-            remaining_units.remove(chosen_index)
-            needed -= chosen_unit.size
-
-    return True, assigned_exact_counts, dict(used_height_by_column), unit_assignments, "OK"
+    assignments_by_column = {column_key: slots for column_key, slots in assignments_by_column.items() if slots}
+    used_height_by_column = {column_key: used_height_by_column[column_key] for column_key in assignments_by_column}
+    return True, assigned_exact_counts, dict(used_height_by_column), assignments_by_column, "Synthesized column allocation succeeded."
 
 
-def _generate_layout_distribution_outputs(
-    feasible_slot_rows: list[dict[str, str]],
-    units: list[CapacityUnit],
-    prepared_rows: list[dict[str, str]],
-    beam_map_rows: list[dict[str, str]],
-) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
-    location_meta, beam_by_location = _build_location_metadata(prepared_rows, beam_map_rows)
-    allowed_used_height, beam_count_by_column, _ = _build_column_capacity(prepared_rows)
-    rack_row_groups = _build_rack_row_groups(prepared_rows)
+def _normalize_beam_level(level: str) -> str:
+    token = str(level).strip()
+    match = re.match(r"^(\d{1,2})([A-Za-z]?)$", token)
+    if not match:
+        return token.lower()
+    numeric = int(match.group(1))
+    suffix = match.group(2).lower()
+    return f"{numeric:02d}{suffix}"
 
-    grouped_targets: dict[tuple[str, str, str, str], dict[float, int]] = defaultdict(dict)
-    for row in feasible_slot_rows:
-        key = (
-            str(row.get("Method", "")),
-            str(row.get("Scenario", "")),
-            str(row.get("K", "")),
-            str(row.get("SKU_Scenario", "")),
+
+def _parse_beam_coordinate_parts(coordinate: str) -> tuple[str, int, int, str] | None:
+    text = str(coordinate).strip()
+    if text == "":
+        return None
+
+    span_match = BEAM_SPAN_PATTERN.match(text)
+    if span_match:
+        return (
+            span_match.group(1),
+            int(span_match.group(2)),
+            int(span_match.group(3)),
+            _normalize_beam_level(span_match.group(4)),
         )
+
+    single_match = BEAM_SINGLE_PATTERN.match(text)
+    if single_match:
+        col = int(single_match.group(2))
+        level = _normalize_beam_level(single_match.group(3))
+        return single_match.group(1), col, col, level
+
+    return None
+
+
+def _format_beam_unit(rack: str, c0: int, c1: int, level: str) -> str:
+    if c0 == c1:
+        return f"{rack}{c0:02d}:{level}"
+    return f"{rack}[{c0:02d}-{c1:02d}]:{level}"
+
+
+def _beam_unit_columns(beam_unit: str) -> set[str]:
+    parsed = _parse_beam_coordinate_parts(beam_unit)
+    if parsed is None:
+        return set()
+    rack, c0, c1, _level = parsed
+    return {f"{rack}{col:02d}" for col in range(c0, c1 + 1)}
+
+
+def _build_current_beam_units_and_segments(
+    beam_map_rows: list[dict[str, str]],
+) -> tuple[set[str], set[tuple[str, int, int]]]:
+    beam_units: set[str] = set()
+    segments: set[tuple[str, int, int]] = set()
+
+    for row in beam_map_rows:
+        parsed = _parse_beam_coordinate_parts(str(row.get("Beam_Coordinate", "")))
+        if parsed is None:
+            continue
+        rack, c0, c1, level = parsed
+        beam_units.add(_format_beam_unit(rack, c0, c1, level))
+        segments.add((rack, c0, c1))
+
+    return beam_units, segments
+
+
+def _build_proposed_beam_units_from_layout_rows(
+    layout_rows: list[dict[str, str]],
+    segments: set[tuple[str, int, int]],
+) -> set[str]:
+    row_count_by_column: dict[str, int] = defaultdict(int)
+    for row in layout_rows:
+        rack = str(row.get("Rack", "")).strip()
+        column = str(row.get("Column", "")).strip()
+        row_index = _to_int_default(row.get("Row"), 0)
+        if rack == "" or column == "" or row_index <= 0:
+            continue
+        key = f"{rack}{column}"
+        if row_index > row_count_by_column.get(key, 0):
+            row_count_by_column[key] = row_index
+
+    proposed_units: set[str] = set()
+    for rack, c0, c1 in sorted(segments):
+        covered_columns = [f"{rack}{col:02d}" for col in range(c0, c1 + 1)]
+        max_common_rows = min((row_count_by_column.get(column_key, 0) for column_key in covered_columns), default=0)
+        for level in range(2, max_common_rows + 1):
+            proposed_units.add(_format_beam_unit(rack, c0, c1, f"{level:02d}"))
+
+    return proposed_units
+
+
+def _beam_relocations(
+    current_units: set[str],
+    proposed_units: set[str],
+) -> tuple[int, dict[str, int]]:
+    removed_units = current_units - proposed_units
+    added_units = proposed_units - current_units
+
+    # Count relocations as beams from the initial configuration that are no longer at the same coordinate.
+    relocation_total = len(removed_units)
+
+    per_column: dict[str, int] = defaultdict(int)
+    for beam_unit in removed_units:
+        for column_key in _beam_unit_columns(beam_unit):
+            per_column[column_key] += 1
+
+    return relocation_total, dict(per_column)
+
+
+def _coverage_check_for_requirements(
+    assigned_exact: dict[float, int],
+    requirement_rows: list[dict[str, str]],
+) -> tuple[bool, int]:
+    shortfall = 0
+    for row in requirement_rows:
         slot_size = _to_float(row.get("Representative_Slot_Size"))
-        exact_count = int(round(_to_float(row.get("Assigned_Locations_Exact_Size")) or 0.0))
+        required = int(round(_to_float(row.get("Min_Required_Locations_At_Or_Above_Size")) or 0.0))
         if slot_size is None:
             continue
-        grouped_targets[key][slot_size] = exact_count
+        achieved = sum(count for size, count in assigned_exact.items() if size >= slot_size)
+        if achieved < required:
+            shortfall += required - achieved
+    return shortfall == 0, shortfall
 
-    summary_rows: list[dict[str, str]] = []
-    column_rows: list[dict[str, str]] = []
-    location_rows: list[dict[str, str]] = []
 
-    for key, target_counts in grouped_targets.items():
-        method, scenario, k, sku_scenario = key
-        success, assigned_exact, used_by_column, unit_assignments, note = _allocate_layout_rack_standardized(
-            target_exact_counts=target_counts,
-            rack_row_groups=rack_row_groups,
-            allowed_used_height=allowed_used_height,
+def _material_requirements(
+    current_units: set[str],
+    proposed_units: set[str],
+) -> tuple[int, int, int]:
+    removed_units = len(current_units - proposed_units)
+    added_units = len(proposed_units - current_units)
+
+    # Additional beams are counted separately from moved beams.
+    additional_beams = added_units
+    removed_beams = removed_units
+    additional_grids = additional_beams
+    return additional_beams, additional_grids, removed_beams
+
+
+def _select_representative_layouts(candidate_layouts: list[dict[str, object]]) -> list[dict[str, object]]:
+    if not candidate_layouts:
+        return []
+
+    feasible = [layout for layout in candidate_layouts if bool(layout.get("Feasible", False))]
+    pool = feasible if feasible else candidate_layouts
+
+    selected: list[dict[str, object]] = []
+
+    def _take_best(key_func: Callable[[dict[str, object]], tuple[float, ...]]) -> None:
+        if not pool:
+            return
+        best = min(pool, key=key_func)
+        if best not in selected:
+            selected.append(best)
+
+    _take_best(lambda row: (-(_to_float(row.get("Occupancy_Rate")) or 0.0), _to_int_default(row.get("Beam_Relocations_Total"), 0)))
+    _take_best(lambda row: (_to_int_default(row.get("Beam_Relocations_Total"), 0), _to_int_default(row.get("Space_Left"), 0)))
+    _take_best(
+        lambda row: (
+            _to_int_default(row.get("Additional_Beams_Required"), 0) + _to_int_default(row.get("Additional_Grids_Required"), 0),
+            _to_int_default(row.get("Beam_Relocations_Total"), 0),
         )
+    )
 
-        assignment_by_location: dict[str, tuple[str, str, str, float]] = {}
-        slot_mix_by_column: dict[str, dict[float, int]] = defaultdict(lambda: defaultdict(int))
-        for unit_index, slot_size in unit_assignments:
-            group = rack_row_groups[unit_index]
-            locations_obj = group.get("Locations")
-            locations = locations_obj if isinstance(locations_obj, list) else []
-            group_id = str(group.get("Group_ID", ""))
+    occ_values = [(_to_float(row.get("Occupancy_Rate")) or 0.0) for row in pool]
+    reloc_values = [_to_int_default(row.get("Beam_Relocations_Total"), 0) for row in pool]
+    space_left_values = [_to_int_default(row.get("Space_Left"), 0) for row in pool]
+    material_values = [
+        _to_int_default(row.get("Additional_Beams_Required"), 0) + _to_int_default(row.get("Additional_Grids_Required"), 0)
+        for row in pool
+    ]
+    occ_min, occ_max = min(occ_values), max(occ_values)
+    reloc_min, reloc_max = min(reloc_values), max(reloc_values)
+    space_left_min, space_left_max = min(space_left_values), max(space_left_values)
+    mat_min, mat_max = min(material_values), max(material_values)
 
-            for location in locations:
-                meta = location_meta.get(location, {"Rack": "", "Column": "", "Row": ""})
-                assignment_by_location[location] = (
-                    group_id,
-                    "rack_row",
-                    beam_by_location.get(location, ""),
-                    slot_size,
-                )
-                rack = meta.get("Rack", "")
-                column = meta.get("Column", "")
-                if rack and column:
-                    slot_mix_by_column[f"{rack}{column}"][slot_size] += 1
+    def _norm(value: float, min_value: float, max_value: float) -> float:
+        if max_value == min_value:
+            return 0.0
+        return (value - min_value) / (max_value - min_value)
 
-        total_assigned = sum(assigned_exact.values())
-        total_target = sum(target_counts.values())
-        avg_fill = 0.0
-        if used_by_column:
-            avg_fill = sum((used_by_column.get(col, 0.0) / cap) for col, cap in allowed_used_height.items() if cap > 0) / max(len(allowed_used_height), 1)
-
-        summary_rows.append(
-            {
-                "Method": method,
-                "Scenario": scenario,
-                "K": k,
-                "SKU_Scenario": sku_scenario,
-                "Layout_Feasible": "YES" if success else "NO",
-                "Assigned_Locations_Total": str(total_assigned),
-                "Target_Locations_Total": str(total_target),
-                "Average_Column_Fill_Ratio": f"{avg_fill:.4f}",
-                "Notes": note,
-            }
+    _take_best(
+        lambda row: (
+            _norm(occ_max - (_to_float(row.get("Occupancy_Rate")) or 0.0), occ_min, occ_max)
+            + _norm(_to_int_default(row.get("Beam_Relocations_Total"), 0), reloc_min, reloc_max)
+            + _norm(_to_int_default(row.get("Space_Left"), 0), space_left_min, space_left_max)
+            + _norm(
+                _to_int_default(row.get("Additional_Beams_Required"), 0) + _to_int_default(row.get("Additional_Grids_Required"), 0),
+                mat_min,
+                mat_max,
+            ),
         )
+    )
 
-        for column_key, allowed in sorted(allowed_used_height.items()):
-            used = used_by_column.get(column_key, 0.0)
-            mix = slot_mix_by_column.get(column_key, {})
-            mix_text = "|".join(
-                f"{int(slot)}:{count}" for slot, count in sorted(mix.items())
-            )
-            column_rows.append(
-                {
-                    "Method": method,
-                    "Scenario": scenario,
-                    "K": k,
-                    "SKU_Scenario": sku_scenario,
-                    "Rack_Column": column_key,
-                    "Beam_Count_Used": str(beam_count_by_column.get(column_key, 0)),
-                    "Allowed_Used_Height_cm": f"{allowed:.3f}",
-                    "Assigned_Used_Height_cm": f"{used:.3f}",
-                    "Fill_Ratio": f"{(used / allowed) if allowed > 0 else 0.0:.4f}",
-                    "Remaining_Height_cm": f"{max(allowed - used, 0.0):.3f}",
-                    "Slot_Size_Distribution": mix_text,
-                }
-            )
+    for row in sorted(
+        pool,
+        key=lambda r: (
+            -(_to_float(r.get("Occupancy_Rate")) or 0.0),
+            _to_int_default(r.get("Beam_Relocations_Total"), 0),
+            _to_int_default(r.get("Space_Left"), 0),
+            _to_int_default(r.get("Additional_Beams_Required"), 0) + _to_int_default(r.get("Additional_Grids_Required"), 0),
+        ),
+    ):
+        if row not in selected:
+            selected.append(row)
+        if len(selected) >= MAX_REPRESENTATIVE_LAYOUTS:
+            break
 
-        for location, (unit_id, unit_type, beam_coordinate, slot_size) in sorted(assignment_by_location.items()):
-            meta = location_meta.get(location, {"Rack": "", "Column": "", "Row": ""})
-            location_rows.append(
-                {
-                    "Method": method,
-                    "Scenario": scenario,
-                    "K": k,
-                    "SKU_Scenario": sku_scenario,
-                    "Location": location,
-                    "Rack": meta.get("Rack", ""),
-                    "Column": meta.get("Column", ""),
-                    "Row": meta.get("Row", ""),
-                    "Beam_Coordinate": beam_coordinate,
-                    "Assignment_Unit_ID": unit_id,
-                    "Assignment_Unit_Type": unit_type,
-                    "Assigned_Slot_Size_cm": f"{slot_size:.0f}",
-                }
-            )
-
-    return summary_rows, column_rows, location_rows
+    return selected
 
 
-def _load_capacity_units(prepared_rows: list[dict[str, str]]) -> tuple[list[dict[str, object]], dict[str, int]]:
-    """
-    Build allocatable capacity units.
-    - Beam-supported locations are coupled by Beam_Coordinate (assigned as indivisible blocks).
-    - Non-beam locations are single-location units.
-    - Doorgang locations are excluded from capacity.
-    """
-    beam_map_rows = _read_csv(INPUT_LOCATION_BEAM_MAP)
-    prepared_by_location = {
-        str(row.get("Location", "")).strip(): row
-        for row in prepared_rows
-        if str(row.get("Location", "")).strip()
-    }
+def _is_dominated_configuration(candidate: dict[str, object], others: list[dict[str, object]]) -> bool:
+    cand_occ = _to_float(candidate.get("Proxy_Occupancy_Rate")) or 0.0
+    cand_reloc = _to_int_default(candidate.get("Proxy_Beam_Relocations"), 0)
+    cand_space_left = _to_int_default(candidate.get("Proxy_Space_Left"), 0)
 
-    grouped_locations: dict[str, list[str]] = defaultdict(list)
-    for map_row in beam_map_rows:
-        location = str(map_row.get("Location", "")).strip()
-        if location == "" or location not in prepared_by_location:
+    for other in others:
+        if other is candidate:
             continue
+        other_occ = _to_float(other.get("Proxy_Occupancy_Rate")) or 0.0
+        other_reloc = _to_int_default(other.get("Proxy_Beam_Relocations"), 0)
+        other_space_left = _to_int_default(other.get("Proxy_Space_Left"), 0)
 
-        prepared_row = prepared_by_location[location]
-        location_type = str(prepared_row.get("Location Type", "")).strip().lower()
-        if location_type == "doorgang":
-            continue
+        if (
+            other_occ >= cand_occ
+            and other_reloc <= cand_reloc
+            and other_space_left <= cand_space_left
+            and (other_occ > cand_occ or other_reloc < cand_reloc or other_space_left < cand_space_left)
+        ):
+            return True
 
-        beam_supported = str(map_row.get("Beam_Supported", "")).strip().upper() == "YES"
-        has_grid = str(map_row.get("Has_Grid", "")).strip().upper() == "YES"
-        beam_coordinate = str(map_row.get("Beam_Coordinate", "")).strip()
-
-        if beam_supported and has_grid and beam_coordinate:
-            unit_id = f"BEAM::{beam_coordinate}"
-        else:
-            unit_id = f"LOC::{location}"
-        grouped_locations[unit_id].append(location)
-
-    units: list[dict[str, object]] = []
-    rack_column_capacity: dict[str, int] = defaultdict(int)
-
-    for unit_id, locations in grouped_locations.items():
-        heights = []
-        rack_column_counts: dict[str, int] = defaultdict(int)
-
-        for location in locations:
-            row = prepared_by_location[location]
-            location_height = _to_float(row.get("Location height"))
-            if location_height is not None:
-                heights.append(location_height)
-
-            rack = str(row.get("Rack", "")).strip()
-            column = str(row.get("Column", "")).strip()
-            if rack and column:
-                rack_column_key = f"{rack}{column}"
-                rack_column_counts[rack_column_key] += 1
-                rack_column_capacity[rack_column_key] += 1
-
-        if not heights:
-            continue
-
-        # Use the minimum location height in the unit as the safe assignable bound.
-        units.append(
-            {
-                "Unit_ID": unit_id,
-                "Height": min(heights),
-                "Capacity": len(locations),
-                "Locations": sorted(locations),
-                "Rack_Column_Counts": dict(rack_column_counts),
-                "Is_Beam_Coupled": unit_id.startswith("BEAM::"),
-            }
-        )
-
-    units.sort(key=lambda row: (_to_float(row.get("Height")) or 0.0, _to_int_default(row.get("Capacity"), 0)))
-    return units, dict(rack_column_capacity)
+    return False
 
 
-def _cumulative_count_at_or_above(counts_by_slot_size: dict[float, int], slot_sizes: list[float], slot_size: float) -> int:
-    return sum(counts_by_slot_size.get(candidate, 0) for candidate in slot_sizes if candidate >= slot_size)
-
-
-def _attempt_constructive_allocation(
-    units: list[dict[str, object]],
-    slot_sizes: list[float],
-    min_required_by_slot_size: dict[float, int],
-) -> tuple[bool, dict[float, int], list[tuple[int, float]], str]:
-    assigned_counts = {slot_size: 0 for slot_size in slot_sizes}
-    assigned_units: list[tuple[int, float]] = []
-    remaining_indices = set(range(len(units)))
-
-    for slot_size in sorted(slot_sizes, reverse=True):
-        already_covered = _cumulative_count_at_or_above(assigned_counts, slot_sizes, slot_size)
-        needed = max(0, min_required_by_slot_size.get(slot_size, 0) - already_covered)
-        if needed <= 0:
-            continue
-
-        eligible = [
-            index
-            for index in remaining_indices
-        ]
-        eligible.sort(
-            key=lambda index: (
-                _to_int_default(units[index].get("Capacity"), 0),
-            )
-        )
-
-        covered = 0
-        for index in eligible:
-            assigned_counts[slot_size] += _to_int_default(units[index].get("Capacity"), 0)
-            assigned_units.append((index, slot_size))
-            remaining_indices.remove(index)
-            covered += _to_int_default(units[index].get("Capacity"), 0)
-            if covered >= needed:
-                break
-
-        if covered < needed:
-            return False, assigned_counts, assigned_units, f"Insufficient capacity for slot size >= {slot_size:.0f}"
-
-    for slot_size in slot_sizes:
-        if _cumulative_count_at_or_above(assigned_counts, slot_sizes, slot_size) < min_required_by_slot_size.get(slot_size, 0):
-            return False, assigned_counts, assigned_units, f"Coverage check failed at slot {slot_size:.0f}"
-
-    return True, assigned_counts, assigned_units, "OK"
-
-
-def _generate_feasible_solutions(
-    slot_size_constraint_rows: list[dict[str, str]],
-    model_rows: list[dict[str, str]],
-    units: list[dict[str, object]],
-    rack_column_capacity: dict[str, int],
-) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
-    model_index = {
-        (
-            str(row.get("Method", "")),
-            str(row.get("Scenario", "")),
-            str(row.get("K", "")),
-            str(row.get("SKU_Scenario", "")),
-        ): row
-        for row in model_rows
-    }
-
-    grouped_constraints: dict[tuple[str, str, str, str], list[dict[str, str]]] = defaultdict(list)
-    for row in slot_size_constraint_rows:
-        key = (
-            str(row.get("Method", "")),
-            str(row.get("Scenario", "")),
-            str(row.get("K", "")),
-            str(row.get("SKU_Scenario", "")),
-        )
-        grouped_constraints[key].append(row)
-
-    summary_rows: list[dict[str, str]] = []
-    slot_solution_rows: list[dict[str, str]] = []
-    rack_column_rows: list[dict[str, str]] = []
-
-    total_capacity = sum(_to_int_default(unit.get("Capacity"), 0) for unit in units)
-
-    for key, constraint_rows in grouped_constraints.items():
-        method, scenario, k, sku_scenario = key
-
-        slot_rows_sorted = sorted(
-            constraint_rows,
-            key=lambda row: _to_float(row.get("Representative_Slot_Size")) or 0.0,
-        )
-        slot_sizes = [
-            (_to_float(row.get("Representative_Slot_Size")) or 0.0)
-            for row in slot_rows_sorted
-        ]
-        min_required_by_slot_size = {
-            (_to_float(row.get("Representative_Slot_Size")) or 0.0): int(round(_to_float(row.get("Min_Required_Locations_At_Or_Above_Size")) or 0.0))
-            for row in slot_rows_sorted
-        }
-
-        success, assigned_counts, assigned_units, note = _attempt_constructive_allocation(
-            units=units,
-            slot_sizes=slot_sizes,
-            min_required_by_slot_size=min_required_by_slot_size,
-        )
-
-        used_rack_columns: dict[str, int] = defaultdict(int)
-        for unit_index, _slot_size in assigned_units:
-            unit = units[unit_index]
-            rack_column_counts = unit.get("Rack_Column_Counts", {})
-            if isinstance(rack_column_counts, dict):
-                for rack_column, count in rack_column_counts.items():
-                    used_rack_columns[str(rack_column)] += int(count)
-
-        total_assigned = sum(assigned_counts.values())
-        summary_rows.append(
-            {
-                "Method": method,
-                "Scenario": scenario,
-                "K": k,
-                "SKU_Scenario": sku_scenario,
-                "Feasible": "YES" if success else "NO",
-                "Assigned_Total_Locations": str(total_assigned),
-                "Available_Total_Locations": str(total_capacity),
-                "Assigned_Beam_Coupled_Units": str(sum(1 for unit_index, _ in assigned_units if bool(units[unit_index].get("Is_Beam_Coupled")))),
-                "Assigned_Units_Total": str(len(assigned_units)),
-                "Notes": note,
-            }
-        )
-
-        for slot_size in slot_sizes:
-            min_required = min_required_by_slot_size.get(slot_size, 0)
-            cumulative_assigned = _cumulative_count_at_or_above(assigned_counts, slot_sizes, slot_size)
-            slot_solution_rows.append(
-                {
-                    "Method": method,
-                    "Scenario": scenario,
-                    "K": k,
-                    "SKU_Scenario": sku_scenario,
-                    "Representative_Slot_Size": f"{slot_size:.0f}",
-                    "Assigned_Locations_At_Exact_Size": str(assigned_counts.get(slot_size, 0)),
-                    "Min_Required_Locations_At_Or_Above_Size": str(min_required),
-                    "Assigned_Locations_At_Or_Above_Size": str(cumulative_assigned),
-                    "Slack_At_Or_Above_Size": str(cumulative_assigned - min_required),
-                    "Coverage_Constraint_Met": "YES" if cumulative_assigned >= min_required else "NO",
-                }
-            )
-
-        for rack_column, capacity in sorted(rack_column_capacity.items()):
-            used = used_rack_columns.get(rack_column, 0)
-            rack_column_rows.append(
-                {
-                    "Method": method,
-                    "Scenario": scenario,
-                    "K": k,
-                    "SKU_Scenario": sku_scenario,
-                    "Rack_Column": rack_column,
-                    "Used_Locations": str(used),
-                    "Capacity_Locations": str(capacity),
-                    "Within_Capacity": "YES" if used <= capacity else "NO",
-                }
-            )
-
-    return summary_rows, slot_solution_rows, rack_column_rows
 
 
 def _build_sku_count_scenarios(scenario_rows: list[dict[str, str]]) -> dict[str, int]:
@@ -1101,13 +716,166 @@ def _emit_static_check_messages(
         print(f"WARNING: Column-height violations found ({violating_count}). Sample columns: {sample}{suffix}")
 
 
+def _derive_exact_min_counts(requirement_rows: list[dict[str, str]]) -> dict[float, int]:
+    slot_sizes = sorted(
+        {
+            value
+            for row in requirement_rows
+            if (value := _to_float(row.get("Representative_Slot_Size"))) is not None
+        }
+    )
+    cumulative = {
+        slot_size: int(
+            round(
+                _to_float(
+                    next(
+                        row
+                        for row in requirement_rows
+                        if _to_float(row.get("Representative_Slot_Size")) == slot_size
+                    ).get("Min_Required_Locations_At_Or_Above_Size")
+                )
+                or 0.0
+            )
+        )
+        for slot_size in slot_sizes
+    }
+
+    exact: dict[float, int] = {}
+    for index, slot_size in enumerate(slot_sizes):
+        next_higher = slot_sizes[index + 1] if index + 1 < len(slot_sizes) else None
+        next_cumulative = cumulative.get(next_higher, 0) if next_higher is not None else 0
+        exact[slot_size] = max(cumulative[slot_size] - next_cumulative, 0)
+
+    return exact
+
+
+def _group_fits_slot(
+    group: dict[str, object],
+    slot_size: float,
+    used_height_by_column: dict[str, float],
+    allowed_used_height: dict[str, float],
+) -> bool:
+    counts_obj = group.get("Column_Counts")
+    if not isinstance(counts_obj, dict):
+        return False
+
+    for column_key, count in counts_obj.items():
+        allowed = allowed_used_height.get(str(column_key))
+        if allowed is None:
+            return False
+        proposed = used_height_by_column.get(str(column_key), 0.0) + slot_size * _to_int_default(count, 0)
+        if proposed > allowed + 1e-9:
+            return False
+    return True
+
+
+def _apply_group_assignment(
+    group: dict[str, object],
+    slot_size: float,
+    used_height_by_column: dict[str, float],
+) -> None:
+    counts_obj = group.get("Column_Counts")
+    if not isinstance(counts_obj, dict):
+        return
+    for column_key, count in counts_obj.items():
+        key = str(column_key)
+        used_height_by_column[key] = used_height_by_column.get(key, 0.0) + slot_size * _to_int_default(count, 0)
+
+
+def _can_promote_group(
+    group: dict[str, object],
+    from_slot: float,
+    to_slot: float,
+    used_height_by_column: dict[str, float],
+    allowed_used_height: dict[str, float],
+) -> bool:
+    counts_obj = group.get("Column_Counts")
+    if not isinstance(counts_obj, dict):
+        return False
+
+    for column_key, count in counts_obj.items():
+        key = str(column_key)
+        allowed = allowed_used_height.get(key)
+        if allowed is None:
+            return False
+        count_int = _to_int_default(count, 0)
+        proposed = used_height_by_column.get(key, 0.0) - from_slot * count_int + to_slot * count_int
+        if proposed > allowed + 1e-9:
+            return False
+    return True
+
+
+def _promote_groups_to_fill_height(
+    assignments: list[tuple[int, float]],
+    assigned_exact: dict[float, int],
+    rack_row_groups: list[dict[str, object]],
+    used_height_by_column: dict[str, float],
+    allowed_used_height: dict[str, float],
+    slot_sizes: list[float],
+) -> None:
+    assignment_map = {group_index: slot for group_index, slot in assignments}
+
+    changed = True
+    while changed:
+        changed = False
+        current_counts = assigned_exact.copy()
+        ordered_groups = sorted(
+            assignment_map.items(),
+            key=lambda item: (item[1], -_to_int_default(rack_row_groups[item[0]].get("Capacity"), 0)),
+        )
+
+        best_choice: tuple[int, float, float] | None = None
+        for group_index, current_slot in ordered_groups:
+            group = rack_row_groups[group_index]
+            current_pos = slot_sizes.index(current_slot)
+            for target_slot in reversed(slot_sizes[current_pos + 1 :]):
+                if current_counts.get(target_slot, 0) > current_counts.get(current_slot, 0):
+                    continue
+                if not _can_promote_group(group, current_slot, target_slot, used_height_by_column, allowed_used_height):
+                    continue
+
+                delta_height = target_slot - current_slot
+                balance_score = abs((current_counts.get(current_slot, 0) - _to_int_default(group.get("Capacity"), 0)) - current_counts.get(target_slot, 0))
+                choice = (group_index, target_slot, delta_height)
+                if best_choice is None or choice[2] > best_choice[2] or (choice[2] == best_choice[2] and balance_score < 0):
+                    best_choice = choice
+                break
+
+        if best_choice is None:
+            break
+
+        group_index, target_slot, _delta = best_choice
+        current_slot = assignment_map[group_index]
+        group = rack_row_groups[group_index]
+        counts_obj = group.get("Column_Counts")
+        if not isinstance(counts_obj, dict):
+            continue
+
+        for column_key, count in counts_obj.items():
+            key = str(column_key)
+            count_int = _to_int_default(count, 0)
+            used_height_by_column[key] = used_height_by_column.get(key, 0.0) - current_slot * count_int + target_slot * count_int
+
+        capacity = _to_int_default(group.get("Capacity"), 0)
+        assigned_exact[current_slot] = max(0, assigned_exact.get(current_slot, 0) - capacity)
+        assigned_exact[target_slot] = assigned_exact.get(target_slot, 0) + capacity
+
+        assignment_map[group_index] = target_slot
+        for idx, (existing_group, _) in enumerate(assignments):
+            if existing_group == group_index:
+                assignments[idx] = (group_index, target_slot)
+                break
+
+        changed = True
+
+
+
+
 def build_configuration_model_constraints() -> Path:
     prepared_rows = _read_csv(INPUT_PREPARED)
     scenario_rows = _read_csv(INPUT_SCENARIOS)
     beam_map_rows = _read_csv(ROOT / "Output" / "01_Data_Preparation" / "Beam_Grid_Mapping" / "Location_Beam_Map.csv")
     sku_count_scenarios = _build_sku_count_scenarios(scenario_rows)
-    capacity_units = _build_capacity_units(prepared_rows, beam_map_rows)
-
     static_rows, invalid_location_rows, violating_column_rows = _static_checks(prepared_rows)
     _emit_static_check_messages(invalid_location_rows, violating_column_rows)
     model_rows: list[dict[str, str]] = []
@@ -1119,11 +887,7 @@ def build_configuration_model_constraints() -> Path:
         model_rows.extend(method_rows)
         slot_size_constraint_rows.extend(method_slot_rows)
 
-    # Construct feasible location-count solutions per Method/Scenario/K/SKU_Scenario.
-    model_row_by_key = {
-        (row.get("Method", ""), row.get("Scenario", ""), row.get("K", ""), row.get("SKU_Scenario", "")): row
-        for row in model_rows
-    }
+    # Build requirement groups for scenario-wise evaluation.
     requirement_groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = defaultdict(list)
     for row in slot_size_constraint_rows:
         key = (
@@ -1134,59 +898,444 @@ def build_configuration_model_constraints() -> Path:
         )
         requirement_groups[key].append(row)
 
-    feasible_summary_rows: list[dict[str, str]] = []
-    feasible_slot_rows: list[dict[str, str]] = []
+    # STEP 1: Build candidate slot-size configurations from all combinations.
+    # Dedupe only exact duplicates (same method, K, slot sizes, and required exact distribution).
+    config_map: dict[tuple[str, str, tuple[int, ...], tuple[int, ...]], dict[str, object]] = {}
+    for row in model_rows:
+        method = str(row.get("Method", ""))
+        scenario = str(row.get("Scenario", ""))
+        k = str(row.get("K", ""))
+        sku_scenario = str(row.get("SKU_Scenario", ""))
+        source_key = (method, scenario, k, sku_scenario)
+        req_rows = requirement_groups.get(source_key, [])
+        if not req_rows:
+            continue
 
-    for key, requirement_rows in requirement_groups.items():
-        method, scenario, k, sku_scenario = key
+        min_exact_counts_raw = _derive_exact_min_counts(req_rows)
+        slot_sizes = sorted(min_exact_counts_raw.keys())
+        if not slot_sizes:
+            continue
 
-        feasible, assigned_by_slot, achieved_at_or_above, unit_usage = _build_feasible_solution_for_combo(
-            requirement_rows,
-            capacity_units,
+        signature = tuple(int(round(value)) for value in slot_sizes)
+        distribution_signature = tuple(_to_int_default(min_exact_counts_raw.get(size), 0) for size in slot_sizes)
+        dedupe_key = (method, k, signature, distribution_signature)
+
+        if dedupe_key not in config_map:
+            config_map[dedupe_key] = {
+                "Config_ID": f"CFG_{len(config_map) + 1:03d}",
+                "Method": method,
+                "K": k,
+                "Slot_Sizes": signature,
+                "Min_Exact_Distribution": distribution_signature,
+                "Representative_Source": source_key,
+                "Sources": [],
+            }
+
+        sources_obj = config_map[dedupe_key].get("Sources")
+        if isinstance(sources_obj, list):
+            sources_obj.append(f"{method}|{scenario}|K={k}")
+
+    candidate_configs = list(config_map.values())
+
+    # STEP 1 continued: quick proxy scoring for dominated-configuration removal.
+    layout_columns = _build_layout_columns(prepared_rows)
+    current_beam_units, beam_segments = _build_current_beam_units_and_segments(beam_map_rows)
+    total_physical_locations = len(
+        [
+            row
+            for row in prepared_rows
+            if str(row.get("Location Type", "")).strip().lower() != "doorgang"
+            and not _is_split_location(str(row.get("Location", "")).strip())
+        ]
+    )
+
+    for cfg in candidate_configs:
+        slot_sizes_obj = cfg.get("Slot_Sizes")
+        distribution_obj = cfg.get("Min_Exact_Distribution")
+        slot_sizes = [float(value) for value in slot_sizes_obj] if isinstance(slot_sizes_obj, tuple) else []
+        distribution = list(distribution_obj) if isinstance(distribution_obj, tuple) else []
+        min_exact_counts = {
+            slot_sizes[index]: _to_int_default(distribution[index], 0)
+            for index in range(min(len(slot_sizes), len(distribution)))
+        }
+
+        feasible_proxy, assigned_proxy, proxy_used_by_column, proxy_assignments, _ = _allocate_layout_by_column(
+            target_exact_counts=min_exact_counts,
+            column_keys=layout_columns,
+            style="balanced",
+        )
+        proxy_layout_rows = _build_generated_layout_location_rows(
+            layout_id=f"PROXY::{cfg.get('Config_ID', '')}",
+            config_id=str(cfg.get("Config_ID", "")),
+            style="balanced",
+            column_assignments=proxy_assignments,
+        )
+        proposed_beam_units = _build_proposed_beam_units_from_layout_rows(proxy_layout_rows, beam_segments)
+        proxy_relocations, _ = _beam_relocations(current_beam_units, proposed_beam_units)
+        assigned_total = sum(assigned_proxy.values())
+        required_locations_total = sum(min_exact_counts.values())
+        proxy_total_used_height = sum(proxy_used_by_column.values())
+        proxy_occupancy_rate = (assigned_total / max(total_physical_locations, 1))
+        proxy_space_left = sum(
+            max(
+                (MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(len(slots) - 1, MIN_BEAMS_PER_COLUMN)) - proxy_used_by_column.get(column_key, 0.0),
+                0.0,
+            )
+            for column_key, slots in proxy_assignments.items()
+        )
+        required_equals_assigned = assigned_total == required_locations_total
+
+        cfg["Proxy_Feasible"] = feasible_proxy and required_equals_assigned
+        cfg["Proxy_Assigned_Total"] = assigned_total
+        cfg["Proxy_Required_Total"] = required_locations_total
+        cfg["Proxy_Used_Height_Total"] = proxy_total_used_height
+        cfg["Proxy_Beam_Relocations"] = proxy_relocations
+        cfg["Proxy_Occupancy_Rate"] = proxy_occupancy_rate
+        cfg["Proxy_Space_Left"] = proxy_space_left
+
+    nondominated_configs = [cfg for cfg in candidate_configs if not _is_dominated_configuration(cfg, candidate_configs)]
+
+    def _cfg_sort_key(cfg: dict[str, object]) -> tuple[int, int, float, int]:
+        feasible_priority = 0 if bool(cfg.get("Proxy_Feasible", False)) else 1
+        reloc = _to_int_default(cfg.get("Proxy_Beam_Relocations"), 0)
+        occupancy = -(_to_float(cfg.get("Proxy_Occupancy_Rate")) or 0.0)
+        space_left = _to_int_default(cfg.get("Proxy_Space_Left"), 0)
+        return (feasible_priority, reloc, occupancy, space_left)
+
+    def _best_by_group(configs: list[dict[str, object]], group_key: str) -> list[dict[str, object]]:
+        grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+        for cfg in configs:
+            grouped[str(cfg.get(group_key, ""))].append(cfg)
+        picked: list[dict[str, object]] = []
+        for group_value in sorted(grouped.keys()):
+            picked.append(min(grouped[group_value], key=_cfg_sort_key))
+        return picked
+
+    mandatory_configs: list[dict[str, object]] = []
+    for cfg in _best_by_group(candidate_configs, "Method") + _best_by_group(candidate_configs, "K"):
+        if cfg not in mandatory_configs:
+            mandatory_configs.append(cfg)
+
+    shortlist_target = max(MAX_CONFIGURATION_CANDIDATES, len(mandatory_configs))
+    shortlisted_configs = list(mandatory_configs)
+    for cfg in sorted(nondominated_configs, key=_cfg_sort_key):
+        if cfg in shortlisted_configs:
+            continue
+        shortlisted_configs.append(cfg)
+        if len(shortlisted_configs) >= shortlist_target:
+            break
+
+    candidate_configuration_rows: list[dict[str, str]] = []
+    for cfg in candidate_configs:
+        slot_sizes_tuple = cfg.get("Slot_Sizes", tuple())
+        slot_sizes = list(slot_sizes_tuple) if isinstance(slot_sizes_tuple, tuple) else []
+        distribution_tuple = cfg.get("Min_Exact_Distribution", tuple())
+        min_exact_distribution = distribution_tuple if isinstance(distribution_tuple, tuple) else tuple()
+        sources = cfg.get("Sources", [])
+        source_count = len(sources) if isinstance(sources, list) else 0
+        candidate_configuration_rows.append(
+            {
+                "Config_ID": str(cfg.get("Config_ID", "")),
+                "Method": str(cfg.get("Method", "")),
+                "K": str(cfg.get("K", "")),
+                "Slot_Sizes": ",".join(str(size) for size in slot_sizes),
+                "Min_Exact_Distribution": ",".join(str(value) for value in min_exact_distribution),
+                "Source_Combination_Count": str(source_count),
+                "Selection_Status": "SHORTLISTED" if cfg in shortlisted_configs else "PRUNED",
+                "Prune_Reason": (
+                    "Dominated or lower-ranked in shortlist"
+                    if cfg not in shortlisted_configs
+                    else ""
+                ),
+                "Mandatory_Coverage_Selected": "YES" if cfg in mandatory_configs else "NO",
+                "Source_Sample": ";".join((sources[:5] if isinstance(sources, list) else [])),
+            }
         )
 
-        total_assigned = sum(assigned_by_slot.values())
+    # STEP 2: generate feasible rack layouts for shortlisted configurations.
 
-        for requirement_row in sorted(requirement_rows, key=lambda row: _to_float(row.get("Representative_Slot_Size")) or 0.0):
-            slot_size = _to_float(requirement_row.get("Representative_Slot_Size"))
-            if slot_size is None:
-                continue
-            min_required = int(round(_to_float(requirement_row.get("Min_Required_Locations_At_Or_Above_Size")) or 0.0))
-            achieved = achieved_at_or_above.get(slot_size, 0)
+    candidate_layout_rows: list[dict[str, str]] = []
+    candidate_layout_location_rows: list[dict[str, str]] = []
+    candidate_layout_column_rows: list[dict[str, str]] = []
+    scenario_evaluation_rows: list[dict[str, str]] = []
 
-            feasible_slot_rows.append(
+    candidate_layouts: list[dict[str, object]] = []
+    layout_counter = 1
+    for cfg in shortlisted_configs:
+        rep_source = cfg.get("Representative_Source")
+        if not isinstance(rep_source, tuple) or len(rep_source) != 4:
+            continue
+
+        requirement_rows = requirement_groups.get(rep_source, [])
+        if not requirement_rows:
+            continue
+
+        min_exact_counts = _derive_exact_min_counts(requirement_rows)
+        slot_sizes = sorted(min_exact_counts.keys())
+
+        for style in CANDIDATE_LAYOUT_STYLES:
+            layout_id = f"LAY_{layout_counter:03d}"
+            layout_counter += 1
+
+            feasible_layout, assigned_exact, used_by_column, column_assignments, note = _allocate_layout_by_column(
+                target_exact_counts=min_exact_counts,
+                column_keys=layout_columns,
+                style=style,
+            )
+
+            generated_location_rows = _build_generated_layout_location_rows(
+                layout_id=layout_id,
+                config_id=str(cfg.get("Config_ID", "")),
+                style=style,
+                column_assignments=column_assignments,
+            )
+            proposed_beam_units = _build_proposed_beam_units_from_layout_rows(generated_location_rows, beam_segments)
+            relocation_total, relocation_by_column = _beam_relocations(current_beam_units, proposed_beam_units)
+            additional_beams, additional_grids, removed_beams = _material_requirements(current_beam_units, proposed_beam_units)
+
+            assigned_total = sum(assigned_exact.values())
+            total_used_height = sum(used_by_column.values())
+            total_allowed_height = sum(
+                MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(len(slots) - 1, MIN_BEAMS_PER_COLUMN)
+                for slots in column_assignments.values()
+            )
+            required_locations_total = sum(min_exact_counts.values())
+            required_equals_assigned = assigned_total == required_locations_total
+            occupancy_rate = (assigned_total / max(total_physical_locations, 1))
+            space_left = sum(
+                max(
+                    (MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(len(slots) - 1, MIN_BEAMS_PER_COLUMN)) - used_by_column.get(column_key, 0.0),
+                    0.0,
+                )
+                for column_key, slots in column_assignments.items()
+            )
+            layout_feasible_status = feasible_layout and required_equals_assigned
+            candidate_layouts.append(
                 {
+                    "Layout_ID": layout_id,
+                    "Config_ID": str(cfg.get("Config_ID", "")),
+                    "Style": style,
+                    "Feasible": layout_feasible_status,
+                    "Assigned_Exact": assigned_exact,
+                    "Assignments": column_assignments,
+                    "Used_By_Column": used_by_column,
+                    "Total_Used_Height": total_used_height,
+                    "Total_Allowed_Height": total_allowed_height,
+                    "Beam_Relocations_Total": relocation_total,
+                    "Beam_Relocations_By_Column": relocation_by_column,
+                    "Additional_Beams_Required": additional_beams,
+                    "Additional_Grids_Required": additional_grids,
+                    "Removed_Beams": removed_beams,
+                    "Required_Locations_Total": required_locations_total,
+                    "Assigned_Locations_Total": assigned_total,
+                    "Occupancy_Rate_Base": occupancy_rate,
+                    "Space_Left": space_left,
+                    "Notes": note,
+                }
+            )
+
+            candidate_layout_rows.append(
+                {
+                    "Layout_ID": layout_id,
+                    "Config_ID": str(cfg.get("Config_ID", "")),
+                    "Style": style,
+                    "Layout_Feasible": "YES" if layout_feasible_status else "NO",
+                    "Required_Locations_Total": str(required_locations_total),
+                    "Assigned_Locations_Total": str(assigned_total),
+                    "Total_Physical_Locations": str(total_physical_locations),
+                    "Assigned_Used_Height_Total": f"{total_used_height:.3f}",
+                    "Total_Allowed_Height": f"{total_allowed_height:.3f}",
+                    "Occupancy_Rate": f"{occupancy_rate:.6f}",
+                    "Space_Left": str(space_left),
+                    "Beam_Relocations_Total": str(relocation_total),
+                    "Additional_Beams_Required": str(additional_beams),
+                    "Additional_Grids_Required": str(additional_grids),
+                    "Slot_Size_Distribution": "|".join(
+                        f"{int(slot)}:{count}" for slot, count in sorted(assigned_exact.items())
+                    ),
+                    "Notes": note,
+                }
+            )
+
+            slot_mix_by_column: dict[str, dict[float, int]] = defaultdict(lambda: defaultdict(int))
+            for row in generated_location_rows:
+                rack = str(row.get("Rack", "")).strip()
+                column = str(row.get("Column", "")).strip()
+                if not rack or not column:
+                    continue
+                slot = _to_float(row.get("Assigned_Slot_Size_cm"))
+                if slot is None:
+                    continue
+                slot_mix_by_column[f"{rack}{column}"][slot] += 1
+
+            for column_key, slots in sorted(column_assignments.items()):
+                used = used_by_column.get(column_key, 0.0)
+                beam_count = max(len(slots) - 1, MIN_BEAMS_PER_COLUMN)
+                allowed = MAX_USED_HEIGHT_BASE - beam_count * BEAM_HEIGHT
+                mix = slot_mix_by_column.get(column_key, {})
+                candidate_layout_column_rows.append(
+                    {
+                        "Layout_ID": layout_id,
+                        "Config_ID": str(cfg.get("Config_ID", "")),
+                        "Style": style,
+                        "Rack_Column": column_key,
+                        "Beam_Count_Used": str(beam_count),
+                        "Allowed_Used_Height_cm": f"{allowed:.3f}",
+                        "Assigned_Used_Height_cm": f"{used:.3f}",
+                        "Remaining_Height_cm": f"{max(allowed - used, 0.0):.3f}",
+                        "Fill_Ratio": f"{(used / allowed) if allowed > 0 else 0.0:.4f}",
+                        "Beam_Relocations_In_Column": str(relocation_by_column.get(column_key, 0)),
+                        "Slot_Size_Distribution": "|".join(
+                            f"{int(slot_size)}:{count}" for slot_size, count in sorted(mix.items())
+                        ),
+                    }
+                )
+
+            candidate_layout_location_rows.extend(generated_location_rows)
+
+    # STEP 3: keep a limited set of representative candidate layouts.
+    representative_layouts = _select_representative_layouts(candidate_layouts)
+    representative_ids = {str(layout.get("Layout_ID", "")) for layout in representative_layouts}
+
+    candidate_layout_rows = [
+        row for row in candidate_layout_rows if str(row.get("Layout_ID", "")) in representative_ids
+    ]
+    candidate_layout_column_rows = [
+        row for row in candidate_layout_column_rows if str(row.get("Layout_ID", "")) in representative_ids
+    ]
+    candidate_layout_location_rows = [
+        row for row in candidate_layout_location_rows if str(row.get("Layout_ID", "")) in representative_ids
+    ]
+
+    # STEP 4: evaluate each representative layout against all scenario combinations.
+    aggregate_metrics: dict[str, dict[str, float]] = {}
+    for layout in representative_layouts:
+        layout_id = str(layout.get("Layout_ID", ""))
+        assigned_exact = layout.get("Assigned_Exact", {})
+        if not isinstance(assigned_exact, dict):
+            continue
+
+        pass_count = 0
+        total_count = 0
+        occupancy_values: list[float] = []
+        space_left_values: list[float] = []
+        total_shortfall = 0
+
+        for key, requirement_rows in requirement_groups.items():
+            method, scenario, k, sku_scenario = key
+            sku_count = _to_int_default(next((row.get("SKU_Count") for row in requirement_rows), 0), 0)
+            coverage_satisfied, shortfall = _coverage_check_for_requirements(assigned_exact, requirement_rows)
+            assigned_locations_total = _to_int_default(layout.get("Assigned_Locations_Total"), 0)
+            occupancy = (sku_count / max(assigned_locations_total, 1))
+            demand_assignment_ratio = (sku_count / max(assigned_locations_total, 1))
+            demand_match = sku_count == assigned_locations_total
+            is_satisfied = coverage_satisfied and demand_match
+            scenario_shortfall = shortfall + abs(sku_count - assigned_locations_total)
+            space_left = _to_float(layout.get("Space_Left")) or 0.0
+
+            scenario_evaluation_rows.append(
+                {
+                    "Layout_ID": layout_id,
+                    "Config_ID": str(layout.get("Config_ID", "")),
+                    "Style": str(layout.get("Style", "")),
                     "Method": method,
                     "Scenario": scenario,
                     "K": k,
                     "SKU_Scenario": sku_scenario,
-                    "Representative_Slot_Size": f"{slot_size:.0f}",
-                    "Assigned_Locations_Exact_Size": str(assigned_by_slot.get(slot_size, 0)),
-                    "Min_Required_Locations_At_Or_Above_Size": str(min_required),
-                    "Achieved_Locations_At_Or_Above_Size": str(achieved),
-                    "Constraint_Satisfied": "YES" if achieved >= min_required else "NO",
+                    "SKU_Count": str(sku_count),
+                    "Constraint_Satisfied": "YES" if is_satisfied else "NO",
+                    "Total_Shortfall": str(scenario_shortfall),
+                    "Occupancy_Rate": f"{occupancy:.6f}",
+                    "Space_Left": str(int(space_left)),
+                    "Demand_Assignment_Ratio": f"{demand_assignment_ratio:.6f}",
+                    "Demand_Assignment_Exact_Match": "YES" if demand_match else "NO",
+                    "Beam_Relocations_Total": str(_to_int_default(layout.get("Beam_Relocations_Total"), 0)),
+                    "Additional_Beams_Required": str(_to_int_default(layout.get("Additional_Beams_Required"), 0)),
+                    "Additional_Grids_Required": str(_to_int_default(layout.get("Additional_Grids_Required"), 0)),
                 }
             )
 
-        feasible_summary_rows.append(
+            total_count += 1
+            pass_count += 1 if is_satisfied else 0
+            total_shortfall += scenario_shortfall
+            occupancy_values.append(occupancy)
+            space_left_values.append(space_left)
+
+        mean_occupancy = (sum(occupancy_values) / len(occupancy_values)) if occupancy_values else 0.0
+        worst_occupancy = max(occupancy_values) if occupancy_values else 0.0
+        mean_space_left = (sum(space_left_values) / len(space_left_values)) if space_left_values else 0.0
+        worst_space_left = max(space_left_values) if space_left_values else 0.0
+        robustness = (pass_count / total_count) if total_count > 0 else 0.0
+        aggregate_metrics[layout_id] = {
+            "Mean_Occupancy_Rate": mean_occupancy,
+            "Worst_Occupancy_Rate": worst_occupancy,
+            "Mean_Space_Left": mean_space_left,
+            "Worst_Space_Left": worst_space_left,
+            "Robustness": robustness,
+            "Scenario_Pass_Count": float(pass_count),
+            "Scenario_Total_Count": float(total_count),
+            "Total_Shortfall": float(total_shortfall),
+        }
+
+    aggregate_layout_metrics = {
+        layout_id: metrics
+        for layout_id, metrics in aggregate_metrics.items()
+    }
+
+    for row in candidate_layout_rows:
+        layout_id = str(row.get("Layout_ID", ""))
+        metrics = aggregate_layout_metrics.get(layout_id)
+        if not metrics:
+            continue
+        row["Mean_Occupancy_Rate"] = f"{metrics.get('Mean_Occupancy_Rate', 0.0):.6f}"
+        row["Worst_Occupancy_Rate"] = f"{metrics.get('Worst_Occupancy_Rate', 0.0):.6f}"
+        row["Mean_Space_Left"] = f"{metrics.get('Mean_Space_Left', 0.0):.6f}"
+        row["Worst_Space_Left"] = f"{metrics.get('Worst_Space_Left', 0.0):.6f}"
+
+    final_ranking_rows: list[dict[str, str]] = []
+    # STEP 5: final ranking over representative layouts.
+    ranked_layouts = sorted(
+        representative_layouts,
+        key=lambda layout: (
+            0 if bool(layout.get("Feasible", False)) else 1,
+            -(aggregate_metrics.get(str(layout.get("Layout_ID", "")), {}).get("Robustness", 0.0)),
+            -(aggregate_metrics.get(str(layout.get("Layout_ID", "")), {}).get("Mean_Occupancy_Rate", 0.0)),
+            _to_int_default(layout.get("Space_Left"), 0),
+            aggregate_metrics.get(str(layout.get("Layout_ID", "")), {}).get("Total_Shortfall", 0.0),
+            _to_int_default(layout.get("Beam_Relocations_Total"), 0),
+            _to_int_default(layout.get("Additional_Beams_Required"), 0) + _to_int_default(layout.get("Additional_Grids_Required"), 0),
+            -_to_int_default(layout.get("Assigned_Locations_Total"), 0),
+        ),
+    )
+    finalists = ranked_layouts[:FINAL_LAYOUT_COUNT]
+    finalist_ids = {str(layout.get("Layout_ID", "")) for layout in finalists}
+
+    for rank, layout in enumerate(ranked_layouts, start=1):
+        layout_id = str(layout.get("Layout_ID", ""))
+        metrics = aggregate_metrics.get(layout_id, {})
+        final_ranking_rows.append(
             {
-                "Method": method,
-                "Scenario": scenario,
-                "K": k,
-                "SKU_Scenario": sku_scenario,
-                "Feasible": "YES" if feasible else "NO",
-                "Total_Assigned_Locations": str(total_assigned),
-                "Beam_Units_Used": str(unit_usage.get("beam", 0)),
-                "Floor_Units_Used": str(unit_usage.get("floor", 0)),
+                "Rank": str(rank),
+                "Selection": "FINAL" if layout_id in finalist_ids else "NON_FINAL",
+                "Layout_ID": layout_id,
+                "Config_ID": str(layout.get("Config_ID", "")),
+                "Style": str(layout.get("Style", "")),
+                "Layout_Feasible": "YES" if bool(layout.get("Feasible", False)) else "NO",
+                "Robustness": f"{metrics.get('Robustness', 0.0):.6f}",
+                "Scenario_Pass_Count": str(int(metrics.get("Scenario_Pass_Count", 0.0))),
+                "Scenario_Total_Count": str(int(metrics.get("Scenario_Total_Count", 0.0))),
+                "Mean_Occupancy_Rate": f"{metrics.get('Mean_Occupancy_Rate', 0.0):.6f}",
+                "Worst_Occupancy_Rate": f"{metrics.get('Worst_Occupancy_Rate', 0.0):.6f}",
+                "Mean_Space_Left": f"{metrics.get('Mean_Space_Left', 0.0):.6f}",
+                "Worst_Space_Left": f"{metrics.get('Worst_Space_Left', 0.0):.6f}",
+                "Total_Shortfall": str(int(metrics.get("Total_Shortfall", 0.0))),
+                "Beam_Relocations_Total": str(_to_int_default(layout.get("Beam_Relocations_Total"), 0)),
+                "Additional_Beams_Required": str(_to_int_default(layout.get("Additional_Beams_Required"), 0)),
+                "Additional_Grids_Required": str(_to_int_default(layout.get("Additional_Grids_Required"), 0)),
+                "Assigned_Locations_Total": str(_to_int_default(layout.get("Assigned_Locations_Total"), 0)),
+                "Notes": str(layout.get("Notes", "")),
             }
         )
-
-    layout_summary_rows, layout_column_rows, layout_location_rows = _generate_layout_distribution_outputs(
-        feasible_slot_rows=feasible_slot_rows,
-        units=capacity_units,
-        prepared_rows=prepared_rows,
-        beam_map_rows=beam_map_rows,
-    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     CONSTRAINT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1194,10 +1343,7 @@ def build_configuration_model_constraints() -> Path:
     LAYOUT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     static_file = CONSTRAINT_OUTPUT_DIR / "Constraint_Static_Checks.csv"
-    with static_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(target, fieldnames=["Constraint", "Status", "Details"])
-        writer.writeheader()
-        writer.writerows(static_rows)
+    _write_csv_clean(static_file, ["Constraint", "Status", "Details"], static_rows)
 
     # Clean up legacy detail outputs that are now replaced by console messages.
     for stale_file in (
@@ -1205,130 +1351,172 @@ def build_configuration_model_constraints() -> Path:
         OUTPUT_DIR / "Constraint_Violating_Columns_Detail.csv",
         CONSTRAINT_OUTPUT_DIR / "Constraint_Invalid_Location_Codes.csv",
         CONSTRAINT_OUTPUT_DIR / "Constraint_Violating_Columns_Detail.csv",
+        FEASIBLE_OUTPUT_DIR / "Feasible_Slot_Size_Counts_By_Method_Scenario_K_v2.csv",
+        FEASIBLE_OUTPUT_DIR / "Feasible_Solution_Summary_By_Method_Scenario_K_v2.csv",
+        LAYOUT_OUTPUT_DIR / "Layout_Distribution_By_Location_v2.csv",
+        LAYOUT_OUTPUT_DIR / "Layout_Distribution_By_Rack_Column_v2.csv",
+        LAYOUT_OUTPUT_DIR / "Layout_Distribution_Summary_By_Method_Scenario_K_v2.csv",
     ):
         if stale_file.exists():
             stale_file.unlink()
 
     slot_size_constraints_file = CONSTRAINT_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
-    with slot_size_constraints_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=[
-                "Method",
-                "Scenario",
-                "K",
-                "SKU_Scenario",
-                "SKU_Count",
-                "Representative_Slot_Size",
-                "Cluster_Count_Percentage",
-                "Assigned_SKUs_At_Representative_Size",
-                "Decision_Variable",
-                "Cumulative_Assigned_SKUs_At_Or_Above_Size",
-                "Min_Required_Locations_At_Or_Above_Size",
-                "Coverage_Constraint",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(slot_size_constraint_rows)
+    _write_csv_clean(
+        slot_size_constraints_file,
+        [
+            "Method",
+            "Scenario",
+            "K",
+            "SKU_Scenario",
+            "SKU_Count",
+            "Representative_Slot_Size",
+            "Cluster_Count_Percentage",
+            "Assigned_SKUs_At_Representative_Size",
+            "Decision_Variable",
+            "Cumulative_Assigned_SKUs_At_Or_Above_Size",
+            "Min_Required_Locations_At_Or_Above_Size",
+            "Coverage_Constraint",
+        ],
+        slot_size_constraint_rows,
+    )
 
-    feasible_slot_file = FEASIBLE_OUTPUT_DIR / "Feasible_Slot_Size_Counts_By_Method_Scenario_K_v2.csv"
-    with feasible_slot_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=[
-                "Method",
-                "Scenario",
-                "K",
-                "SKU_Scenario",
-                "Representative_Slot_Size",
-                "Assigned_Locations_Exact_Size",
-                "Min_Required_Locations_At_Or_Above_Size",
-                "Achieved_Locations_At_Or_Above_Size",
-                "Constraint_Satisfied",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(feasible_slot_rows)
+    candidate_configs_file = CONSTRAINT_OUTPUT_DIR / "Candidate_Configurations.csv"
+    _write_csv_clean(
+        candidate_configs_file,
+        [
+            "Config_ID",
+            "Method",
+            "K",
+            "Slot_Sizes",
+            "Min_Exact_Distribution",
+            "Source_Combination_Count",
+            "Selection_Status",
+            "Prune_Reason",
+            "Mandatory_Coverage_Selected",
+            "Source_Sample",
+        ],
+        candidate_configuration_rows,
+    )
 
-    feasible_summary_file = FEASIBLE_OUTPUT_DIR / "Feasible_Solution_Summary_By_Method_Scenario_K_v2.csv"
-    with feasible_summary_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=[
-                "Method",
-                "Scenario",
-                "K",
-                "SKU_Scenario",
-                "Feasible",
-                "Total_Assigned_Locations",
-                "Beam_Units_Used",
-                "Floor_Units_Used",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(feasible_summary_rows)
+    scenario_eval_file = FEASIBLE_OUTPUT_DIR / "Candidate_Layout_Scenario_Evaluation.csv"
+    _write_csv_clean(
+        scenario_eval_file,
+        [
+            "Layout_ID",
+            "Config_ID",
+            "Style",
+            "Method",
+            "Scenario",
+            "K",
+            "SKU_Scenario",
+            "SKU_Count",
+            "Constraint_Satisfied",
+            "Total_Shortfall",
+            "Occupancy_Rate",
+            "Space_Left",
+            "Demand_Assignment_Ratio",
+            "Demand_Assignment_Exact_Match",
+            "Beam_Relocations_Total",
+            "Additional_Beams_Required",
+            "Additional_Grids_Required",
+        ],
+        scenario_evaluation_rows,
+    )
 
-    layout_summary_file = LAYOUT_OUTPUT_DIR / "Layout_Distribution_Summary_By_Method_Scenario_K_v2.csv"
-    with layout_summary_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=[
-                "Method",
-                "Scenario",
-                "K",
-                "SKU_Scenario",
-                "Layout_Feasible",
-                "Assigned_Locations_Total",
-                "Target_Locations_Total",
-                "Average_Column_Fill_Ratio",
-                "Notes",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(layout_summary_rows)
+    final_ranking_file = FEASIBLE_OUTPUT_DIR / "Final_Layout_Ranking.csv"
+    _write_csv_clean(
+        final_ranking_file,
+        [
+            "Rank",
+            "Selection",
+            "Layout_ID",
+            "Config_ID",
+            "Style",
+            "Layout_Feasible",
+            "Robustness",
+            "Scenario_Pass_Count",
+            "Scenario_Total_Count",
+            "Mean_Occupancy_Rate",
+            "Worst_Occupancy_Rate",
+            "Mean_Space_Left",
+            "Worst_Space_Left",
+            "Total_Shortfall",
+            "Beam_Relocations_Total",
+            "Additional_Beams_Required",
+            "Additional_Grids_Required",
+            "Assigned_Locations_Total",
+            "Notes",
+        ],
+        final_ranking_rows,
+    )
 
-    layout_column_file = LAYOUT_OUTPUT_DIR / "Layout_Distribution_By_Rack_Column_v2.csv"
-    with layout_column_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=[
-                "Method",
-                "Scenario",
-                "K",
-                "SKU_Scenario",
-                "Rack_Column",
-                "Beam_Count_Used",
-                "Allowed_Used_Height_cm",
-                "Assigned_Used_Height_cm",
-                "Fill_Ratio",
-                "Remaining_Height_cm",
-                "Slot_Size_Distribution",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(layout_column_rows)
+    candidate_layout_summary_file = LAYOUT_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
+    _write_csv_clean(
+        candidate_layout_summary_file,
+        [
+            "Layout_ID",
+            "Config_ID",
+            "Style",
+            "Layout_Feasible",
+            "Required_Locations_Total",
+            "Assigned_Locations_Total",
+            "Total_Physical_Locations",
+            "Mean_Occupancy_Rate",
+            "Worst_Occupancy_Rate",
+            "Space_Left",
+            "Beam_Relocations_Total",
+            "Additional_Beams_Required",
+            "Additional_Grids_Required",
+            "Slot_Size_Distribution",
+            "Notes",
+        ],
+        candidate_layout_rows,
+    )
 
-    layout_location_file = LAYOUT_OUTPUT_DIR / "Layout_Distribution_By_Location_v2.csv"
-    with layout_location_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=[
-                "Method",
-                "Scenario",
-                "K",
-                "SKU_Scenario",
-                "Location",
-                "Rack",
-                "Column",
-                "Row",
-                "Beam_Coordinate",
-                "Assignment_Unit_ID",
-                "Assignment_Unit_Type",
-                "Assigned_Slot_Size_cm",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(layout_location_rows)
+    finalist_column_rows = [
+        row for row in candidate_layout_column_rows if str(row.get("Layout_ID", "")) in finalist_ids
+    ]
+    finalist_location_rows = [
+        row for row in candidate_layout_location_rows if str(row.get("Layout_ID", "")) in finalist_ids
+    ]
+
+    final_layout_column_file = LAYOUT_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
+    _write_csv_clean(
+        final_layout_column_file,
+        [
+            "Layout_ID",
+            "Config_ID",
+            "Style",
+            "Rack_Column",
+            "Beam_Count_Used",
+            "Allowed_Used_Height_cm",
+            "Assigned_Used_Height_cm",
+            "Remaining_Height_cm",
+            "Fill_Ratio",
+            "Beam_Relocations_In_Column",
+            "Slot_Size_Distribution",
+        ],
+        finalist_column_rows,
+    )
+
+    final_layout_location_file = LAYOUT_OUTPUT_DIR / "Final_Layout_By_Location.csv"
+    _write_csv_clean(
+        final_layout_location_file,
+        [
+            "Layout_ID",
+            "Config_ID",
+            "Style",
+            "Location",
+            "Rack",
+            "Column",
+            "Row",
+            "Beam_Coordinate",
+            "Assignment_Unit_ID",
+            "Assignment_Unit_Type",
+            "Assigned_Slot_Size_cm",
+        ],
+        finalist_location_rows,
+    )
 
     model_file = CONSTRAINT_OUTPUT_DIR / "Constraint_Model_By_Method_Scenario_K.csv"
     fields = list(model_rows[0].keys()) if model_rows else [
@@ -1337,10 +1525,7 @@ def build_configuration_model_constraints() -> Path:
         "Slot_Sizes", "Rack_Column_Division", "Location_Coding", "Beam_Coupling_Constraint", "Doorgang_Fixed_Heights",
     ]
 
-    with model_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(target, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(model_rows)
+    _write_csv_clean(model_file, fields, model_rows)
 
     return OUTPUT_DIR
 
