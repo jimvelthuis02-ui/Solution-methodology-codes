@@ -44,6 +44,7 @@ def _format_number(value: float | None) -> str:
 
 
 def _round_up_to_next_4_or_9(value: float) -> float:
+    # Align generated slot sizes to operationally allowed endings (..4 / ..9).
     candidate = math.ceil(value)
     while candidate % 10 not in (4, 9):
         candidate += 1
@@ -51,6 +52,7 @@ def _round_up_to_next_4_or_9(value: float) -> float:
 
 
 def _read_input_rows() -> list[dict[str, str]]:
+    """Load Stage 2 scenario heights used for slot-size generation."""
     if not INPUT_FILE.exists():
         raise FileNotFoundError(f"Missing input file: {INPUT_FILE}")
 
@@ -72,6 +74,7 @@ def _scenario_values(rows: list[dict[str, str]], scenario_column: str) -> list[t
 
 
 def _natural_cut_starts(numeric: list[float], k: int) -> list[int]:
+    # Build bucket boundaries close to ideal quantiles while respecting value changes.
     n = len(numeric)
     transitions = [j for j in range(1, n) if numeric[j] != numeric[j - 1]]
     cut_starts: list[int] = [0]
@@ -93,6 +96,7 @@ def _natural_cut_starts(numeric: list[float], k: int) -> list[int]:
 
 
 def generate_quantile_model() -> Path:
+    """Generate quantile-based slot-size configurations for each scenario and K."""
     rows = _read_input_rows()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -133,6 +137,7 @@ def generate_quantile_model() -> Path:
 
         for scenario_column in SCENARIO_COLUMNS:
             scenario_label = SCENARIO_LABELS[scenario_column]
+            # Sort once so contiguous slices represent quantile-style clusters.
             scenario_values = sorted(_scenario_values(rows, scenario_column), key=lambda item: item[1])
             numeric = [value for _, value in scenario_values]
 
@@ -152,6 +157,7 @@ def generate_quantile_model() -> Path:
                     bucket_values = [value for _, value in bucket]
                     lower_bound = min(bucket_values)
                     upper_bound = max(bucket_values)
+                    # Representative slot size is derived from upper bound + safety clearance.
                     slot_size = _round_up_to_next_4_or_9(upper_bound + CLEARANCE_CM)
                     mean_value = sum(bucket_values) / len(bucket_values)
                     cluster_id = index + 1

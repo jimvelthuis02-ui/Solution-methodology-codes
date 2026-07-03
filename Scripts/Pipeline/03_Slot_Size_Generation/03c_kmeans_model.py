@@ -66,6 +66,7 @@ def _format_number(value: float | None) -> str:
 
 
 def _round_up_to_next_4_or_9(value: float) -> float:
+    # Align generated slot sizes to operationally allowed endings (..4 / ..9).
     candidate = math.ceil(value)
     while candidate % 10 not in (4, 9):
         candidate += 1
@@ -73,6 +74,7 @@ def _round_up_to_next_4_or_9(value: float) -> float:
 
 
 def _read_input_rows() -> list[dict[str, str]]:
+    """Load Stage 2 scenario heights used for slot-size generation."""
     if not INPUT_FILE.exists():
         raise FileNotFoundError(f"Missing input file: {INPUT_FILE}")
     with INPUT_FILE.open("r", newline="", encoding="utf-8-sig") as source:
@@ -93,6 +95,7 @@ def _scenario_values(rows: list[dict[str, str]], scenario_column: str) -> list[t
 
 
 def _percentile_linear(values: list[float], percentile: float) -> float:
+    # Linear interpolation percentile to seed deterministic initial centroids.
     if not values:
         raise ValueError("Cannot compute percentile from an empty list.")
     if len(values) == 1:
@@ -112,11 +115,13 @@ def _percentile_linear(values: list[float], percentile: float) -> float:
 
 
 def _initial_kmeans_centroids(values: list[float], k: int) -> list[float]:
+    # Spread initial centroids across the empirical distribution.
     sorted_values = sorted(values)
     return [_percentile_linear(sorted_values, (index + 0.5) / k) for index in range(k)]
 
 
 def _kmeans_clusters(values: list[float], k: int, max_iterations: int = 100) -> list[Cluster]:
+    """Run 1D k-means and return non-empty clusters ordered by minimum value."""
     sorted_values = sorted(values)
     centroids = _initial_kmeans_centroids(sorted_values, k)
 
@@ -128,6 +133,7 @@ def _kmeans_clusters(values: list[float], k: int, max_iterations: int = 100) -> 
 
         empty_indices = [index for index, cluster in enumerate(assignments) if not cluster]
         if empty_indices:
+            # Rebalance empty clusters by moving values from the largest populated cluster.
             populated = sorted([cluster for cluster in assignments if cluster], key=len, reverse=True)
             for empty_index in empty_indices:
                 donor = populated[0]
@@ -149,6 +155,7 @@ def _kmeans_clusters(values: list[float], k: int, max_iterations: int = 100) -> 
 
 
 def _assignments(values: list[tuple[str, float]], clusters: list[Cluster]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    # Create summary rows and assign each location to a cluster interval.
     summary_rows: list[dict[str, object]] = []
     assignment_rows: list[dict[str, object]] = []
 
@@ -199,6 +206,7 @@ def _assignments(values: list[tuple[str, float]], clusters: list[Cluster]) -> tu
 
 
 def generate_kmeans_model() -> Path:
+    """Generate k-means slot-size configurations for each scenario and K."""
     rows = _read_input_rows()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -228,6 +236,7 @@ def generate_kmeans_model() -> Path:
                 total_count = len(values)
 
                 for row in summary_rows:
+                    cluster_count = _to_float(row.get("Cluster Count")) or 0.0
                     summary_writer.writerow(
                         {
                             "Scenario": scenario_label,
@@ -235,7 +244,7 @@ def generate_kmeans_model() -> Path:
                             "K": k,
                             "Cluster ID": row["Cluster ID"],
                             "Cluster Count": row["Cluster Count"],
-                            "Cluster Count Percentage": f"{(_to_float(row.get('Cluster Count')) / total_count) * 100:.2f}%",
+                            "Cluster Count Percentage": f"{(cluster_count / total_count) * 100:.2f}%",
                             "Lower Bound": _format_number(_to_float(row.get("Lower Bound"))),
                             "Upper Bound": _format_number(_to_float(row.get("Upper Bound"))),
                             "Representative Slot Size": _format_number(_to_float(row.get("Representative Slot Size"))),

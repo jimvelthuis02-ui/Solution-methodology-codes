@@ -74,6 +74,8 @@ def _location_sort_key(row: dict[str, str]) -> tuple[int, str, str]:
 
 
 def _segment_bounds(max_col: int) -> list[tuple[int, int]]:
+    # Segment columns according to the warehouse beam structure:
+    # first segment spans 0-3, remaining segments span groups of 3.
     if max_col < 0:
         return []
 
@@ -93,6 +95,7 @@ def _segment_bounds(max_col: int) -> list[tuple[int, int]]:
 
 
 def _is_row_without_beam_support(row_label: str) -> bool:
+    # Row 1 / 1a are floor-level positions and are treated as non-beam support.
     match = ROW_ORDER_PATTERN.match(row_label.strip())
     if match is None:
         return False
@@ -102,6 +105,7 @@ def _is_row_without_beam_support(row_label: str) -> bool:
 
 
 def prepare_location_data() -> Path:
+    """Read raw location workbook and write a cleaned CSV with Delta height."""
     source_file = INPUT_DIR / "Location details.xlsx"
     if not source_file.exists():
         raise FileNotFoundError("Missing source file: Input files/Locations/Location details.xlsx")
@@ -144,6 +148,7 @@ def prepare_location_data() -> Path:
 
 
 def _read_prepared_rows() -> list[dict[str, str]]:
+    """Load the prepared location CSV emitted by `prepare_location_data`."""
     if not PREPARED_OUTPUT_FILE.exists():
         raise FileNotFoundError(f"Missing input file: {PREPARED_OUTPUT_FILE}")
     with PREPARED_OUTPUT_FILE.open("r", newline="", encoding="utf-8-sig") as source:
@@ -154,6 +159,7 @@ def _read_prepared_rows() -> list[dict[str, str]]:
 
 
 def build_beam_grid_map() -> Path:
+    """Build beam segments, location-to-beam mapping, and beam height coordinates."""
     rows = _read_prepared_rows()
     BEAM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -161,6 +167,7 @@ def build_beam_grid_map() -> Path:
     rack_columns: dict[str, set[int]] = defaultdict(set)
     row_index: dict[tuple[str, int, str], dict[str, str]] = {}
 
+    # Index rows by (rack, column, row) to support fast beam lookups.
     for row in rows:
         rack = str(row.get("Rack", "")).strip()
         column_num = _to_int(row.get("Column"))
@@ -174,6 +181,7 @@ def build_beam_grid_map() -> Path:
     location_map: list[dict[str, str]] = []
     beam_for_location: dict[tuple[str, int, str], dict[str, str]] = {}
 
+    # Discover beam segments per rack and row, applying forced/disabled overrides.
     for rack in sorted(rack_columns):
         max_col = max(rack_columns[rack]) if rack_columns[rack] else -1
         segments = _segment_bounds(max_col)
@@ -213,6 +221,8 @@ def build_beam_grid_map() -> Path:
                 if not supported_cols:
                     continue
 
+                # `span_cells` represents effective supported width. If a segment is
+                # partially blocked (e.g., doorgang), we use supported cells only.
                 structural_span_cells = seg_end - seg_start + 1
                 supported_span_cells = len(supported_cols)
                 terminal_column_missing = seg_end == 21 and seg_end not in supported_cols
@@ -244,11 +254,13 @@ def build_beam_grid_map() -> Path:
                         "Spanned_Locations": str(span_cells),
                     }
 
+    # Copy beam assignment to alias coordinates that must behave identically.
     for target_key, source_key in BEAM_ALIASES.items():
         beam_data = beam_for_location.get(source_key)
         if beam_data is not None:
             beam_for_location[target_key] = dict(beam_data)
 
+    # Generate location-level map with beam flags and mapped beam coordinate.
     for (rack, col_num), rack_rows in sorted(grouped.items()):
         column_str = f"{col_num:02d}"
         ordered_rows = sorted(rack_rows, key=_location_sort_key)
@@ -281,6 +293,7 @@ def build_beam_grid_map() -> Path:
     beam_height_lookup: dict[str, tuple[str, str, float, float]] = {}
     row_height_reference: dict[tuple[str, str], tuple[float, float]] = {}
 
+    # Estimate beam height envelopes by accumulating location heights below each row.
     for beam_segment in beam_segments:
         rack = str(beam_segment.get("Rack", "")).strip()
         row_label = str(beam_segment.get("Row", "")).strip()
@@ -320,6 +333,7 @@ def build_beam_grid_map() -> Path:
             beam_height_lookup[beam_coordinate] = (rack, row_label, beam_bottom_cm, beam_top_cm)
 
     beam_height_rows: list[dict[str, str]] = []
+    # Build final beam-height rows, falling back to row-level references when needed.
     for beam_segment in beam_segments:
         rack = str(beam_segment.get("Rack", "")).strip()
         row_label = str(beam_segment.get("Row", "")).strip()
@@ -414,6 +428,7 @@ def build_beam_grid_map() -> Path:
 
 
 if __name__ == "__main__":
+    # Stage 01 entrypoint: prepare location table, then derive beam/grid mappings.
     output_path = prepare_location_data()
     beam_output_path = build_beam_grid_map()
     print(f"Data preparation complete. Output written to: {output_path}")

@@ -38,6 +38,7 @@ def build_sku_count_scenarios(rows: list[dict[str, str]]) -> dict[str, int]:
 
 
 def _to_float(value: object | None) -> float | None:
+    # Parse numeric CSV values safely; blank/invalid values are treated as missing.
     if value is None:
         return None
     text = str(value).strip()
@@ -50,16 +51,19 @@ def _to_float(value: object | None) -> float | None:
 
 
 def _format(value: float | None) -> str:
+    # Keep numeric output formatting consistent across scenario columns.
     return "" if value is None else f"{value:.3f}"
 
 
 def _eligible(row: dict[str, str]) -> bool:
+    # Exclude non-storage lanes and zero-height items from scenario generation.
     item_height = _to_float(row.get(ITEM_HEIGHT_COLUMN))
     location_type = str(row.get(LOCATION_TYPE_COLUMN, "")).strip().lower()
     return not (item_height == 0.0 or location_type == "doorgang")
 
 
 def generate_weighted_delta_scenarios() -> Path:
+    """Generate six item-height scenarios per eligible location using weighted delta rules."""
     if not INPUT_FILE.exists():
         raise FileNotFoundError(f"Missing input file: {INPUT_FILE}")
 
@@ -95,6 +99,7 @@ def generate_weighted_delta_scenarios() -> Path:
         writer = csv.DictWriter(target, fieldnames=output_fields)
         writer.writeheader()
 
+        # Write one scenario row per eligible location.
         for row in rows:
             if not _eligible(row):
                 continue
@@ -124,6 +129,7 @@ def generate_weighted_delta_scenarios() -> Path:
                 )
                 continue
 
+            # Skip rows without the inputs needed to calculate weighted scenarios.
             if slot_height is None or delta is None:
                 continue
 
@@ -147,15 +153,16 @@ def generate_weighted_delta_scenarios() -> Path:
 
             # Locations with delta >= 5: weighted deltas with clearance constraint (ratchet)
             # Scenarios 1-5 freeze when clearance drops below 5; Scenario 6 always uses slot_height - 5
-            scenario_values = [item_height]  # Scenario 1
+            scenario_values = [item_height]  # Scenario 1 baseline
 
+            # Build scenarios 2-5 with incremental delta application and ratchet freeze.
             for weight in [0.2, 0.4, 0.6, 0.8]:  # Scenarios 2-5
                 candidate = item_height + weight * delta
                 clearance = slot_height - candidate
                 if clearance >= 5:
                     scenario_values.append(candidate)
                 else:
-                    # Freeze at previous scenario value
+                    # Once clearance drops below 5 cm, keep the previous feasible value.
                     scenario_values.append(scenario_values[-1])
 
             # Scenario 6: always apply slot_height - 5 (no freezing)

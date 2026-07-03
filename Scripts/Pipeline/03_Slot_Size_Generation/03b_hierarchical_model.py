@@ -66,6 +66,7 @@ def _format_number(value: float | None) -> str:
 
 
 def _round_up_to_next_4_or_9(value: float) -> float:
+    # Align generated slot sizes to operationally allowed endings (..4 / ..9).
     candidate = math.ceil(value)
     while candidate % 10 not in (4, 9):
         candidate += 1
@@ -73,6 +74,7 @@ def _round_up_to_next_4_or_9(value: float) -> float:
 
 
 def _read_input_rows() -> list[dict[str, str]]:
+    """Load Stage 2 scenario heights used for slot-size generation."""
     if not INPUT_FILE.exists():
         raise FileNotFoundError(f"Missing input file: {INPUT_FILE}")
     with INPUT_FILE.open("r", newline="", encoding="utf-8-sig") as source:
@@ -93,6 +95,7 @@ def _scenario_values(rows: list[dict[str, str]], scenario_column: str) -> list[t
 
 
 def _ward_merge_cost(cluster_a: Cluster, cluster_b: Cluster) -> float:
+    # Ward criterion: increase in within-cluster variance if two clusters are merged.
     size_a = cluster_a.size
     size_b = cluster_b.size
     mean_a = cluster_a.mean_value
@@ -101,6 +104,7 @@ def _ward_merge_cost(cluster_a: Cluster, cluster_b: Cluster) -> float:
 
 
 def _hierarchical_clusters(values: list[float], k: int) -> list[Cluster]:
+    """Build `k` clusters by iteratively merging adjacent clusters with lowest Ward cost."""
     clusters = [Cluster([value]) for value in sorted(values)]
     if len(clusters) <= k:
         return clusters
@@ -121,6 +125,7 @@ def _hierarchical_clusters(values: list[float], k: int) -> list[Cluster]:
 
 
 def _assignments(values: list[tuple[str, float]], clusters: list[Cluster]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    # Create summary rows and assign each location to a cluster interval.
     summary_rows: list[dict[str, object]] = []
     assignment_rows: list[dict[str, object]] = []
 
@@ -171,6 +176,7 @@ def _assignments(values: list[tuple[str, float]], clusters: list[Cluster]) -> tu
 
 
 def generate_hierarchical_model() -> Path:
+    """Generate hierarchical-clustering slot-size configurations for each scenario and K."""
     rows = _read_input_rows()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -3,29 +3,30 @@ from collections import defaultdict
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
 
-from stage_pipeline_common import load_legacy_pipeline
+import run_ordered_pipeline as common
 
 
-legacy = load_legacy_pipeline()
-ROBUSTNESS_SUMMARY_FILE = legacy.FEASIBLE_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
-LAYOUT_SUMMARY_FILE = legacy.LAYOUT_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
-LAYOUT_BY_COLUMN_FILE = legacy.LAYOUT_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column.csv"
-LAYOUT_BY_LOCATION_FILE = legacy.LAYOUT_OUTPUT_DIR / "Candidate_Layout_By_Location.csv"
-OUTPUT_FILE = legacy.FEASIBLE_OUTPUT_DIR / "Final_Layout_Ranking.csv"
-FINAL_LAYOUT_BY_COLUMN_FILE = legacy.LAYOUT_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
-FINAL_LAYOUT_BY_LOCATION_FILE = legacy.LAYOUT_OUTPUT_DIR / "Final_Layout_By_Location.csv"
+ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
+LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
+LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column.csv"
+LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location.csv"
+OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_Ranking.csv"
+FINAL_LAYOUT_BY_COLUMN_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
+FINAL_LAYOUT_BY_LOCATION_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
 FINAL_LAYOUT_COUNT = 6
 
 
-def _read_csv(path: object) -> list[dict[str, str]]:
-    return legacy._read_csv(path)
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    # Keep CSV read behavior consistent with shared pipeline helpers.
+    return common._read_csv(path)
 
 
 def _layout_map() -> dict[str, dict[str, str]]:
+    """Load Stage 6 layout summary rows keyed by layout ID."""
     layouts: dict[str, dict[str, str]] = {}
     if LAYOUT_SUMMARY_FILE.exists():
         for row in _read_csv(LAYOUT_SUMMARY_FILE):
@@ -34,17 +35,20 @@ def _layout_map() -> dict[str, dict[str, str]]:
 
 
 def _robustness_rows() -> list[dict[str, str]]:
+    """Load Stage 7 robustness summary rows."""
     if not ROBUSTNESS_SUMMARY_FILE.exists():
         raise FileNotFoundError(f"Missing robustness summary file: {ROBUSTNESS_SUMMARY_FILE}")
     return _read_csv(ROBUSTNESS_SUMMARY_FILE)
 
 
 def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    """Rank candidate layouts and export top finalists with detailed breakdowns."""
     robustness_rows = _robustness_rows()
     layouts = _layout_map()
 
     ranking_rows: list[dict[str, str]] = []
     joined_rows: list[dict[str, str]] = []
+    # Join Stage 6 layout metadata with Stage 7 robustness metrics.
     for row in robustness_rows:
         layout_id = str(row.get("Layout_ID", "")).strip()
         if not layout_id:
@@ -55,15 +59,17 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
         joined_rows.append(merged)
 
     joined_rows.sort(
+        # Ranking priority: feasibility, robustness, utilization/occupancy,
+        # implementation effort, remaining space, and assignment coverage.
         key=lambda row: (
             0 if str(row.get("Layout_Feasible", "")).strip().upper() == "YES" else 1,
-            -(legacy._to_float(row.get("Robustness")) or 0.0),
-            -(legacy._to_float(row.get("Mean_Utilization_Rate")) or 0.0),
-            -(legacy._to_float(row.get("Mean_Occupancy_Rate")) or 0.0),
-            legacy._to_int_default(row.get("Beam_Relocations_Total"), 0),
-            legacy._to_int_default(row.get("Additional_Beams_Required"), 0) + legacy._to_int_default(row.get("Additional_Grids_Required"), 0),
-            legacy._to_float(row.get("Space_Left")) or 0.0,
-            -legacy._to_int_default(row.get("Assigned_Locations_Total"), 0),
+            -(common._to_float(row.get("Robustness")) or 0.0),
+            -(common._to_float(row.get("Mean_Utilization_Rate")) or 0.0),
+            -(common._to_float(row.get("Mean_Occupancy_Rate")) or 0.0),
+            common._to_int_default(row.get("Beam_Relocations_Total"), 0),
+            common._to_int_default(row.get("Additional_Beams_Required"), 0) + common._to_int_default(row.get("Additional_Grids_Required"), 0),
+            common._to_float(row.get("Space_Left")) or 0.0,
+            -common._to_int_default(row.get("Assigned_Locations_Total"), 0),
         )
     )
 
@@ -79,23 +85,24 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
                 "Config_ID": str(row.get("Config_ID", "")),
                 "Style": str(row.get("Style", "")),
                 "Layout_Feasible": str(row.get("Layout_Feasible", "")),
-                "Robustness": f"{legacy._to_float(row.get('Robustness')) or 0.0:.6f}",
-                "Scenario_Pass_Count": str(legacy._to_int_default(row.get("Scenario_Pass_Count"), 0)),
-                "Scenario_Total_Count": str(legacy._to_int_default(row.get("Scenario_Total_Count"), 0)),
-                "Mean_Occupancy_Rate": f"{legacy._to_float(row.get('Mean_Occupancy_Rate')) or 0.0:.6f}",
-                "Worst_Occupancy_Rate": f"{legacy._to_float(row.get('Worst_Occupancy_Rate')) or 0.0:.6f}",
-                "Mean_Utilization_Rate": f"{legacy._to_float(row.get('Mean_Utilization_Rate')) or 0.0:.6f}",
-                "Worst_Utilization_Rate": f"{legacy._to_float(row.get('Worst_Utilization_Rate')) or 0.0:.6f}",
-                "Space_Left": f"{legacy._to_float(row.get('Space_Left')) or 0.0:.3f}",
-                "Beam_Relocations_Total": str(legacy._to_int_default(row.get("Beam_Relocations_Total"), 0)),
-                "Additional_Beams_Required": str(legacy._to_int_default(row.get("Additional_Beams_Required"), 0)),
-                "Additional_Grids_Required": str(legacy._to_int_default(row.get("Additional_Grids_Required"), 0)),
-                "Assigned_Locations_Total": str(legacy._to_int_default(row.get("Assigned_Locations_Total"), 0)),
+                "Robustness": f"{common._to_float(row.get('Robustness')) or 0.0:.6f}",
+                "Scenario_Pass_Count": str(common._to_int_default(row.get("Scenario_Pass_Count"), 0)),
+                "Scenario_Total_Count": str(common._to_int_default(row.get("Scenario_Total_Count"), 0)),
+                "Mean_Occupancy_Rate": f"{common._to_float(row.get('Mean_Occupancy_Rate')) or 0.0:.6f}",
+                "Worst_Occupancy_Rate": f"{common._to_float(row.get('Worst_Occupancy_Rate')) or 0.0:.6f}",
+                "Mean_Utilization_Rate": f"{common._to_float(row.get('Mean_Utilization_Rate')) or 0.0:.6f}",
+                "Worst_Utilization_Rate": f"{common._to_float(row.get('Worst_Utilization_Rate')) or 0.0:.6f}",
+                "Space_Left": f"{common._to_float(row.get('Space_Left')) or 0.0:.3f}",
+                "Beam_Relocations_Total": str(common._to_int_default(row.get("Beam_Relocations_Total"), 0)),
+                "Additional_Beams_Required": str(common._to_int_default(row.get("Additional_Beams_Required"), 0)),
+                "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
+                "Assigned_Locations_Total": str(common._to_int_default(row.get("Assigned_Locations_Total"), 0)),
                 "Notes": str(row.get("Notes", "")),
             }
         )
 
-    legacy._write_csv_clean(
+    # Write full ranking table with final/non-final selection labels.
+    common._write_csv_clean(
         OUTPUT_FILE,
         [
             "Rank",
@@ -122,18 +129,20 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
     )
 
     finalist_column_rows: list[dict[str, str]] = []
+    # Export only finalist rows for column-level details.
     if LAYOUT_BY_COLUMN_FILE.exists():
         for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
             if str(row.get("Layout_ID", "")).strip() in finalist_ids:
                 finalist_column_rows.append(row)
 
     finalist_location_rows: list[dict[str, str]] = []
+    # Export only finalist rows for location-level assignments.
     if LAYOUT_BY_LOCATION_FILE.exists():
         for row in _read_csv(LAYOUT_BY_LOCATION_FILE):
             if str(row.get("Layout_ID", "")).strip() in finalist_ids:
                 finalist_location_rows.append(row)
 
-    legacy._write_csv_clean(
+    common._write_csv_clean(
         FINAL_LAYOUT_BY_COLUMN_FILE,
         [
             "Layout_ID",
@@ -151,7 +160,7 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
         finalist_column_rows,
     )
 
-    legacy._write_csv_clean(
+    common._write_csv_clean(
         FINAL_LAYOUT_BY_LOCATION_FILE,
         [
             "Layout_ID",
@@ -173,6 +182,7 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
 
 
 if __name__ == "__main__":
+    # Stage 8 entrypoint: produce final ranking and finalist layout extracts.
     ranking_rows, finalist_column_rows, finalist_location_rows = build_final_selection()
     print(
         "Final selection complete. "
