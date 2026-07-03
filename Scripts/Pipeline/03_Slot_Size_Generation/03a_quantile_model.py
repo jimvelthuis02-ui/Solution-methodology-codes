@@ -100,8 +100,8 @@ def generate_quantile_model() -> Path:
     rows = _read_input_rows()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    summary_file = OUTPUT_DIR / "Slot_Size_Configuration_Summary.csv"
-    assignments_file = OUTPUT_DIR / "Slot_Size_Configuration_Assignments.csv"
+    summary_file = OUTPUT_DIR / "Quantile_Slot_Size_Configuration_Summary.csv"
+    assignments_file = OUTPUT_DIR / "Quantile_Slot_Size_Configuration_Assignments.csv"
 
     summary_fields = [
         "Scenario",

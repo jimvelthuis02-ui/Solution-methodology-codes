@@ -180,8 +180,8 @@ def generate_hierarchical_model() -> Path:
     rows = _read_input_rows()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    summary_file = OUTPUT_DIR / "Slot_Size_Configuration_Summary.csv"
-    assignments_file = OUTPUT_DIR / "Slot_Size_Configuration_Assignments.csv"
+    summary_file = OUTPUT_DIR / "Hierarchical_Slot_Size_Configuration_Summary.csv"
+    assignments_file = OUTPUT_DIR / "Hierarchical_Slot_Size_Configuration_Assignments.csv"
 
     summary_fields = ["Scenario", "Method", "K", "Cluster ID", "Cluster Count", "Cluster Count Percentage", "Lower Bound", "Upper Bound", "Representative Slot Size", "Mean Item Height"]
     assignment_fields = ["Scenario", "Method", "K", "Location", "Scenario Value", "Assigned Cluster", "Cluster Lower Bound", "Cluster Upper Bound", "Representative Slot Size"]
