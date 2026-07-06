@@ -2,6 +2,7 @@ import csv
 import math
 import re
 import runpy
+from functools import lru_cache
 from collections import defaultdict
 from pathlib import Path
 
@@ -25,13 +26,14 @@ SKU_SCENARIO_FACTORS = {
     "Base_Count": 1.0,
     "High_Count": 1.1,
 }
-CANDIDATE_LAYOUT_STYLES = ("utilization", "relocation", "balanced", "future_flexibility")
+CANDIDATE_LAYOUT_STYLES = ("implementation",)
 
 COLUMN_MAX_HEIGHT = 770.0
 TOP_BEAM_HEIGHT = 16.0
 MAX_USED_HEIGHT_BASE = COLUMN_MAX_HEIGHT - TOP_BEAM_HEIGHT
 MIN_BEAMS_PER_COLUMN = 3
 BEAM_HEIGHT = 16.0
+BEAM_RELOCATION_TOLERANCE_CM = 1.0
 
 LOCATION_CODE_PATTERN = re.compile(r"^([A-Z])(\d{2})(\d{2})([A-Za-z]+)?$")
 BEAM_SPAN_PATTERN = re.compile(r"^([A-Z])\[(\d{2})-(\d{2})\]:([0-9]{1,2}[A-Za-z]?)$")
@@ -165,15 +167,31 @@ def _build_generated_layout_location_rows(
     config_id: str,
     style: str,
     column_assignments: dict[str, list[float]],
+    segments: set[tuple[str, int, int]] | None = None,
 ) -> list[dict[str, str]]:
     # Expand column-level slot assignments into synthetic location rows.
     location_rows: list[dict[str, str]] = []
+    segment_by_column: dict[str, tuple[str, int, int]] = {}
+
+    if segments:
+        for rack, c0, c1 in segments:
+            for col in range(c0, c1 + 1):
+                segment_by_column[f"{rack}{col:02d}"] = (rack, c0, c1)
 
     for column_key in sorted(column_assignments.keys()):
         rack = column_key[0]
         column = column_key[1:]
-        ordered_slots = sorted(column_assignments[column_key], reverse=True)
+        segment = segment_by_column.get(column_key)
+        ordered_slots = list(column_assignments[column_key])
         for row_index, slot_size in enumerate(ordered_slots, start=1):
+            if row_index <= 1:
+                beam_coordinate = ""
+            elif segment is None:
+                beam_coordinate = f"{rack}{column}:{row_index:02d}"
+            else:
+                seg_rack, seg_c0, seg_c1 = segment
+                beam_coordinate = f"{seg_rack}[{seg_c0:02d}-{seg_c1:02d}]:{row_index:02d}"
+
             location_rows.append(
                 {
                     "Layout_ID": layout_id,
@@ -183,7 +201,7 @@ def _build_generated_layout_location_rows(
                     "Rack": rack,
                     "Column": column,
                     "Row": f"{row_index:02d}",
-                    "Beam_Coordinate": "" if row_index <= 1 else f"{rack}{column}:{row_index:02d}",
+                    "Beam_Coordinate": beam_coordinate,
                     "Assignment_Unit_ID": f"COL::{column_key}::{row_index:02d}",
                     "Assignment_Unit_Type": "rack_column",
                     "Assigned_Slot_Size_cm": f"{slot_size:.0f}",
@@ -251,7 +269,7 @@ def _allocate_layout_by_column(
 
         if selected_style == "relocation":
             ranked = sorted(candidates, key=lambda c: (float(c["relocation_proxy"]), str(c["column_key"])))
-            keep = max(1, len(ranked) // 5)
+            keep = max(1, len(ranked) // 3)
             return ranked[:keep]
 
         if selected_style == "balanced":
@@ -296,7 +314,14 @@ def _allocate_layout_by_column(
                 remaining_after = allowed_after - proposed_used
                 projected_fill = proposed_used / max(allowed_after, 1e-9)
                 beam_pref = float(beam_preference.get(column_key, 0)) if isinstance(beam_preference, dict) else 0.0
-                relocation_proxy = (0.0 if current_count > 0 else 1.0) + (1.0 / (beam_pref + 1.0))
+                target_depth = max(int(round(beam_pref)) + 1, 1)
+                # Relocation effort proxy: stay close to existing beam-derived depth and
+                # avoid columns without beam support.
+                relocation_proxy = (
+                    abs((current_count + 1) - target_depth)
+                    + (0.0 if beam_pref > 0 else 2.0)
+                    + (0.0 if current_count > 0 else 0.5)
+                )
 
                 rack_key = column_key[0]
                 rack_load_after = rack_loads_before.get(rack_key, 0) + 1
@@ -423,9 +448,71 @@ def _beam_unit_columns(beam_unit: str) -> set[str]:
     return {f"{rack}{col:02d}" for col in range(c0, c1 + 1)}
 
 
+def _beam_level_index(level: str) -> int | None:
+    normalized = _normalize_beam_level(level)
+    match = re.match(r"^(\d{2})", normalized)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _column_slot_sizes_from_rows(
+    rows: list[dict[str, str]],
+    slot_size_field: str,
+) -> dict[str, dict[int, float]]:
+    # Build per-column slot heights by row index from row-level datasets.
+    slot_sizes: dict[str, dict[int, float]] = defaultdict(dict)
+    for row in rows:
+        rack = str(row.get("Rack", "")).strip()
+        column = str(row.get("Column", "")).strip()
+        row_index = _to_int_default(row.get("Row"), 0)
+        slot_size = _to_float(row.get(slot_size_field))
+        if rack == "" or column == "" or row_index <= 0 or slot_size is None:
+            continue
+        slot_sizes[f"{rack}{column}"][row_index] = float(slot_size)
+    return dict(slot_sizes)
+
+
+def _beam_unit_heights_from_slot_sizes(
+    beam_units: set[str],
+    slot_sizes_by_column: dict[str, dict[int, float]],
+) -> dict[str, float]:
+    # Estimate physical beam elevations (cm) from stacked slot heights below each beam level.
+    heights: dict[str, float] = {}
+    for beam_unit in beam_units:
+        parsed = _parse_beam_coordinate_parts(beam_unit)
+        if parsed is None:
+            continue
+        _rack, _c0, _c1, level = parsed
+        level_index = _beam_level_index(level)
+        if level_index is None or level_index <= 1:
+            heights[beam_unit] = 0.0
+            continue
+
+        column_heights: list[float] = []
+        for column_key in _beam_unit_columns(beam_unit):
+            row_slot_sizes = slot_sizes_by_column.get(column_key, {})
+            cumulative = 0.0
+            for row_idx in range(1, level_index):
+                slot_size = row_slot_sizes.get(row_idx)
+                if slot_size is None:
+                    cumulative = 0.0
+                    break
+                cumulative += float(slot_size)
+            if cumulative > 0.0:
+                column_heights.append(cumulative)
+
+        if column_heights:
+            heights[beam_unit] = sum(column_heights) / len(column_heights)
+
+    return heights
+
+
 def _build_current_beam_units_and_segments(
     beam_map_rows: list[dict[str, str]],
-) -> tuple[set[str], set[tuple[str, int, int]]]:
+    prepared_rows: list[dict[str, str]] | None = None,
+    beam_height_rows: list[dict[str, str]] | None = None,
+) -> tuple[set[str], set[tuple[str, int, int]], dict[str, float]]:
     # Build baseline beam units and horizontal segment definitions from Stage 1 map.
     beam_units: set[str] = set()
     segments: set[tuple[str, int, int]] = set()
@@ -438,13 +525,39 @@ def _build_current_beam_units_and_segments(
         beam_units.add(_format_beam_unit(rack, c0, c1, level))
         segments.add((rack, c0, c1))
 
-    return beam_units, segments
+    if beam_height_rows is not None:
+        mapped_heights: dict[str, list[float]] = defaultdict(list)
+        for row in beam_height_rows:
+            parsed = _parse_beam_coordinate_parts(str(row.get("Beam_Coordinate", "")))
+            if parsed is None:
+                continue
+            rack, c0, c1, level = parsed
+            unit = _format_beam_unit(rack, c0, c1, level)
+            bottom = _to_float(row.get("Beam_Bottom_cm"))
+            if bottom is None:
+                continue
+            mapped_heights[unit].append(float(bottom))
+
+        direct_heights = {
+            unit: (sum(values) / len(values))
+            for unit, values in mapped_heights.items()
+            if values
+        }
+        return beam_units, segments, direct_heights
+
+    if prepared_rows is None:
+        return beam_units, segments, {}
+
+    slot_sizes_by_column = _column_slot_sizes_from_rows(prepared_rows, "Location height")
+    beam_heights = _beam_unit_heights_from_slot_sizes(beam_units, slot_sizes_by_column)
+
+    return beam_units, segments, beam_heights
 
 
 def _build_proposed_beam_units_from_layout_rows(
     layout_rows: list[dict[str, str]],
     segments: set[tuple[str, int, int]],
-) -> set[str]:
+) -> tuple[set[str], dict[str, float]]:
     # Infer proposed beam units by common row depth across each structural segment.
     row_count_by_column: dict[str, int] = defaultdict(int)
     for row in layout_rows:
@@ -464,20 +577,181 @@ def _build_proposed_beam_units_from_layout_rows(
         for level in range(2, max_common_rows + 1):
             proposed_units.add(_format_beam_unit(rack, c0, c1, f"{level:02d}"))
 
-    return proposed_units
+    slot_sizes_by_column = _column_slot_sizes_from_rows(layout_rows, "Assigned_Slot_Size_cm")
+    proposed_heights = _beam_unit_heights_from_slot_sizes(proposed_units, slot_sizes_by_column)
+
+    return proposed_units, proposed_heights
+
+
+def _best_slot_order_for_targets(
+    slot_sizes: list[float],
+    target_heights: list[float],
+) -> list[float]:
+    # Order slots to maximize prefix-height matches against baseline beam heights.
+    if len(slot_sizes) <= 1 or not target_heights:
+        return list(slot_sizes)
+
+    rounded_slots = [int(round(value)) for value in slot_sizes]
+    unique_sizes = sorted(set(rounded_slots))
+    initial_counts = tuple(rounded_slots.count(size) for size in unique_sizes)
+    total_sum = sum(rounded_slots)
+
+    def _prefix_score(prefix_height: int) -> tuple[int, float]:
+        min_delta = min(abs(prefix_height - float(target)) for target in target_heights)
+        matched = 1 if min_delta <= BEAM_RELOCATION_TOLERANCE_CM else 0
+        return matched, min_delta
+
+    @lru_cache(maxsize=None)
+    def _solve(remaining_counts: tuple[int, ...]) -> tuple[int, float, tuple[int, ...]]:
+        remaining_total = sum(remaining_counts)
+        if remaining_total <= 0:
+            return 0, 0.0, ()
+
+        remaining_sum = sum(count * size for count, size in zip(remaining_counts, unique_sizes))
+        current_prefix = total_sum - remaining_sum
+
+        best_matches = -1
+        best_distance = float("inf")
+        best_sequence: tuple[int, ...] = ()
+
+        for idx, size in enumerate(unique_sizes):
+            count = remaining_counts[idx]
+            if count <= 0:
+                continue
+
+            next_counts = list(remaining_counts)
+            next_counts[idx] -= 1
+            next_counts_tuple = tuple(next_counts)
+
+            next_prefix = current_prefix + size
+            inc_match, inc_distance = _prefix_score(next_prefix)
+            sub_matches, sub_distance, sub_sequence = _solve(next_counts_tuple)
+
+            candidate_matches = inc_match + sub_matches
+            candidate_distance = inc_distance + sub_distance
+            candidate_sequence = (size,) + sub_sequence
+
+            if candidate_matches > best_matches:
+                best_matches = candidate_matches
+                best_distance = candidate_distance
+                best_sequence = candidate_sequence
+                continue
+
+            if candidate_matches == best_matches:
+                if candidate_distance < best_distance - 1e-9:
+                    best_distance = candidate_distance
+                    best_sequence = candidate_sequence
+                    continue
+                if abs(candidate_distance - best_distance) <= 1e-9 and candidate_sequence > best_sequence:
+                    best_sequence = candidate_sequence
+
+        return best_matches, best_distance, best_sequence
+
+    _matches, _distance, order = _solve(initial_counts)
+    return [float(value) for value in order] if order else list(slot_sizes)
+
+
+def _optimize_column_slot_order_for_beam_preservation(
+    column_assignments: dict[str, list[float]],
+    segments: set[tuple[str, int, int]],
+    baseline_beam_heights: dict[str, float],
+) -> dict[str, list[float]]:
+    # Reorder each column's slot stack to preserve as many baseline beam heights
+    # as possible within the column's structural segment.
+    if not column_assignments:
+        return {}
+
+    segment_targets: dict[tuple[str, int, int], list[float]] = defaultdict(list)
+    for beam_unit, height in baseline_beam_heights.items():
+        parsed = _parse_beam_coordinate_parts(beam_unit)
+        if parsed is None:
+            continue
+        rack, c0, c1, _level = parsed
+        segment_targets[(rack, c0, c1)].append(float(height))
+
+    for segment in segment_targets:
+        segment_targets[segment] = sorted(segment_targets[segment])
+
+    column_segment: dict[str, tuple[str, int, int]] = {}
+    for rack, c0, c1 in segments:
+        for col in range(c0, c1 + 1):
+            column_segment[f"{rack}{col:02d}"] = (rack, c0, c1)
+
+    optimized: dict[str, list[float]] = {}
+    for column_key, slots in column_assignments.items():
+        segment = column_segment.get(column_key)
+        targets = segment_targets.get(segment, []) if segment is not None else []
+        optimized[column_key] = _best_slot_order_for_targets(list(slots), targets)
+
+    return optimized
 
 
 def _beam_relocations(
     current_units: set[str],
     proposed_units: set[str],
+    current_unit_heights: dict[str, float],
+    proposed_unit_heights: dict[str, float],
 ) -> tuple[int, dict[str, int]]:
-    # Relocations are counted as beams present now but absent in proposal.
-    removed_units = current_units - proposed_units
+    # Count relocations from physical beam height shifts within each segment.
+    # Matching by segment and nearest height prevents false zeros when row-count
+    # is unchanged but slot-height geometry changes.
+    by_segment_current: dict[tuple[str, int, int], list[tuple[str, float]]] = defaultdict(list)
+    by_segment_proposed: dict[tuple[str, int, int], list[tuple[str, float]]] = defaultdict(list)
 
-    relocation_total = len(removed_units)
+    for unit in current_units:
+        parsed = _parse_beam_coordinate_parts(unit)
+        if parsed is None:
+            continue
+        rack, c0, c1, _level = parsed
+        height = current_unit_heights.get(unit)
+        if height is None:
+            continue
+        by_segment_current[(rack, c0, c1)].append((unit, float(height)))
+
+    for unit in proposed_units:
+        parsed = _parse_beam_coordinate_parts(unit)
+        if parsed is None:
+            continue
+        rack, c0, c1, _level = parsed
+        height = proposed_unit_heights.get(unit)
+        if height is None:
+            continue
+        by_segment_proposed[(rack, c0, c1)].append((unit, float(height)))
+
+    relocated_units: set[str] = set()
+
+    all_segments = set(by_segment_current.keys()) | set(by_segment_proposed.keys())
+    for segment in all_segments:
+        current_segment = sorted(by_segment_current.get(segment, []), key=lambda item: item[1])
+        proposed_segment = sorted(by_segment_proposed.get(segment, []), key=lambda item: item[1])
+
+        i = 0
+        j = 0
+        while i < len(current_segment) and j < len(proposed_segment):
+            _current_unit, current_height = current_segment[i]
+            _proposed_unit, proposed_height = proposed_segment[j]
+            delta = current_height - proposed_height
+            if abs(delta) <= BEAM_RELOCATION_TOLERANCE_CM:
+                i += 1
+                j += 1
+            elif delta < -BEAM_RELOCATION_TOLERANCE_CM:
+                # Current baseline beam is too low to match any later proposed
+                # beam (which are sorted increasingly), so it must be relocated.
+                relocated_units.add(current_segment[i][0])
+                i += 1
+            else:
+                # Proposed beam is too low for the current baseline beam; advance
+                # proposed pointer to seek a potential match at a higher elevation.
+                j += 1
+
+        while i < len(current_segment):
+            relocated_units.add(current_segment[i][0])
+            i += 1
+
+    relocation_total = len(relocated_units)
 
     per_column: dict[str, int] = defaultdict(int)
-    for beam_unit in removed_units:
+    for beam_unit in relocated_units:
         for column_key in _beam_unit_columns(beam_unit):
             per_column[column_key] += 1
 
@@ -489,12 +763,21 @@ def _material_requirements(
     proposed_units: set[str],
 ) -> tuple[int, int, int]:
     # Material deltas between current and proposed beam sets.
-    removed_units = len(current_units - proposed_units)
-    added_units = len(proposed_units - current_units)
+    removed_set = current_units - proposed_units
+    added_set = proposed_units - current_units
+    removed_units = len(removed_set)
+    added_units = len(added_set)
+
+    def _grid_span_count(beam_unit: str) -> int:
+        parsed = _parse_beam_coordinate_parts(beam_unit)
+        if parsed is None:
+            return 1
+        _rack, c0, c1, _level = parsed
+        return max((c1 - c0) + 1, 1)
 
     additional_beams = added_units
     removed_beams = removed_units
-    additional_grids = additional_beams
+    additional_grids = sum(_grid_span_count(unit) for unit in added_set)
     return additional_beams, additional_grids, removed_beams
 
 

@@ -97,13 +97,14 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
             continue
 
         assigned_locations_total = common._to_int_default(
-            layout.get("Assigned_Locations_Total") or layout.get("Required_Locations_Total"),
+            layout.get("Total_Locations") or layout.get("Required_Locations_Total"),
             0,
         )
-        total_physical_locations = common._to_int_default(
-            layout.get("Total_Physical_Locations") or layout.get("Assigned_Locations_Total") or layout.get("Required_Locations_Total"),
-            0,
-        )
+        # Stage 7 utilization uses the vertical-space utilization already computed in Stage 6.
+        vertical_space_utilization = common._to_float(layout.get("Space_Utilization"))
+        if vertical_space_utilization is None:
+            pct_used = common._to_float(layout.get("Percentage_Rack_Height_Used")) or 0.0
+            vertical_space_utilization = pct_used / 100.0
         beam_relocations_total = common._to_int_default(layout.get("Beam_Relocations_Total"), 0)
         additional_beams = common._to_int_default(layout.get("Additional_Beams_Required"), 0)
         additional_grids = common._to_int_default(layout.get("Additional_Grids_Required"), 0)
@@ -112,6 +113,8 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
         occupancy_values: list[float] = []
         utilization_values: list[float] = []
         capacity_margin_values: list[int] = []
+        capacity_ratio_values: list[float] = []
+        normalized_slack_values: list[float] = []
         slot_gap_values: list[int] = []
         satisfied_count = 0
         total_count = 0
@@ -120,9 +123,10 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
 
         for sku_scenario, sku_count in SKU_SCENARIOS.items():
             occupancy = sku_count / max(assigned_locations_total, 1)
-            utilization = sku_count / max(total_physical_locations, 1)
+            utilization = vertical_space_utilization
             capacity_margin = assigned_locations_total - sku_count
             capacity_ratio = assigned_locations_total / max(sku_count, 1)
+            normalized_slack = capacity_margin / max(assigned_locations_total, 1)
             layout_feasible_flag = str(layout.get("Layout_Feasible", "YES")).strip().upper() == "YES"
 
             required_by_size = scenario_requirements.get((str(layout.get("Config_ID", "")), sku_scenario), {})
@@ -146,7 +150,6 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
                 {
                     "Layout_ID": layout_id,
                     "Config_ID": str(layout.get("Config_ID", "")),
-                    "Style": str(layout.get("Style", "")),
                     "SKU_Scenario": sku_scenario,
                     "SKU_Count": str(sku_count),
                     "Constraint_Satisfied": "YES" if constraint_satisfied else "NO",
@@ -154,18 +157,15 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
                     "Utilization_Rate": f"{utilization:.6f}",
                     "Capacity_Margin": str(capacity_margin),
                     "Capacity_Ratio": f"{capacity_ratio:.6f}",
-                    "Slot_Coverage_Pass": "YES" if slot_coverage_pass else "NO",
-                    "Worst_Slot_Coverage_Gap": str(worst_gap),
-                    "Space_Left": f"{space_left:.3f}",
-                    "Beam_Relocations_Total": str(beam_relocations_total),
-                    "Additional_Beams_Required": str(additional_beams),
-                    "Additional_Grids_Required": str(additional_grids),
+                    "Normalized_Slack": f"{normalized_slack:.6f}",
                 }
             )
 
             occupancy_values.append(occupancy)
             utilization_values.append(utilization)
             capacity_margin_values.append(capacity_margin)
+            capacity_ratio_values.append(capacity_ratio)
+            normalized_slack_values.append(normalized_slack)
             slot_gap_values.append(worst_gap)
             total_count += 1
             if constraint_satisfied:
@@ -176,14 +176,14 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
             {
                 "Layout_ID": layout_id,
                 "Config_ID": str(layout.get("Config_ID", "")),
-                "Style": str(layout.get("Style", "")),
                 "Layout_Feasible": str(layout.get("Layout_Feasible", "")),
                 "Mean_Occupancy_Rate": f"{(sum(occupancy_values) / len(occupancy_values)) if occupancy_values else 0.0:.6f}",
                 "Worst_Occupancy_Rate": f"{max(occupancy_values) if occupancy_values else 0.0:.6f}",
                 "Mean_Utilization_Rate": f"{(sum(utilization_values) / len(utilization_values)) if utilization_values else 0.0:.6f}",
                 "Worst_Utilization_Rate": f"{max(utilization_values) if utilization_values else 0.0:.6f}",
                 "Worst_Capacity_Margin": str(min(capacity_margin_values) if capacity_margin_values else 0),
-                "Worst_Slot_Coverage_Gap": str(max(slot_gap_values) if slot_gap_values else 0),
+                "Minimum_Capacity_Ratio": f"{min(capacity_ratio_values) if capacity_ratio_values else 0.0:.6f}",
+                "Minimum_Normalized_Slack": f"{min(normalized_slack_values) if normalized_slack_values else 0.0:.6f}",
                 "Robustness": f"{(satisfied_count / total_count) if total_count else 0.0:.6f}",
                 "Scenario_Pass_Count": str(satisfied_count),
                 "Scenario_Total_Count": str(total_count),
@@ -200,7 +200,6 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
         [
             "Layout_ID",
             "Config_ID",
-            "Style",
             "SKU_Scenario",
             "SKU_Count",
             "Constraint_Satisfied",
@@ -208,12 +207,7 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
             "Utilization_Rate",
             "Capacity_Margin",
             "Capacity_Ratio",
-            "Slot_Coverage_Pass",
-            "Worst_Slot_Coverage_Gap",
-            "Space_Left",
-            "Beam_Relocations_Total",
-            "Additional_Beams_Required",
-            "Additional_Grids_Required",
+            "Normalized_Slack",
         ],
         scenario_rows,
     )
@@ -224,14 +218,14 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
         [
             "Layout_ID",
             "Config_ID",
-            "Style",
             "Layout_Feasible",
             "Mean_Occupancy_Rate",
             "Worst_Occupancy_Rate",
             "Mean_Utilization_Rate",
             "Worst_Utilization_Rate",
             "Worst_Capacity_Margin",
-            "Worst_Slot_Coverage_Gap",
+            "Minimum_Capacity_Ratio",
+            "Minimum_Normalized_Slack",
             "Robustness",
             "Scenario_Pass_Count",
             "Scenario_Total_Count",

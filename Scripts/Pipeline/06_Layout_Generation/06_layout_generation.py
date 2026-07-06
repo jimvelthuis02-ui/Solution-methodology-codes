@@ -15,9 +15,11 @@ INPUT_CONFIG_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
 INPUT_CAPACITY_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
 INPUT_PREPARED = common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv"
 INPUT_LOCATION_BEAM_MAP = common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Location_Beam_Map.csv"
+INPUT_BEAM_HEIGHT_COORDS = common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Beam_Height_Coordinates.csv"
 LAYOUT_OUTPUT_DIR = common.STAGE6_OUTPUT_DIR
 PRE_ROBUST_LAYOUT_LIMIT = 8
-STYLE_PRIORITY = ("utilization", "relocation", "balanced", "future_flexibility")
+IMPLEMENTATION_STYLE = "implementation"
+STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
 
 SummaryRow: TypeAlias = dict[str, str]
 DetailRows: TypeAlias = list[dict[str, str]]
@@ -147,12 +149,7 @@ def _beam_preference_by_column(current_beam_units: set[str]) -> dict[str, int]:
 
 
 def _column_order_for_style(column_keys: list[str], used_by_column: dict[str, float], style: str) -> list[str]:
-    if style == "relocation":
-        return sorted(column_keys)
-    if style == "future_flexibility":
-        return sorted(column_keys, key=lambda key: (used_by_column.get(key, 0.0), key))
-    if style == "balanced":
-        return sorted(column_keys, key=lambda key: (abs(used_by_column.get(key, 0.0)), key))
+    _ = style
     return sorted(column_keys, key=lambda key: (-used_by_column.get(key, 0.0), key))
 
 
@@ -160,11 +157,12 @@ def _expand_layout_capacity(
     column_assignments: dict[str, list[float]],
     used_by_column: dict[str, float],
     column_keys: list[str],
-    min_slot_size: float,
+    slot_sizes: list[float],
     style: str,
+    beam_preference: dict[str, int],
 ) -> tuple[dict[str, list[float]], dict[str, float]]:
-    # Fill remaining feasible height with the smallest slot size so each layout
-    # carries its own physical capacity independent of SKU scenarios.
+    # Fill remaining feasible height with a balanced mix across configured slot
+    # sizes so additional capacity does not collapse to only the smallest slots.
     expanded_assignments: dict[str, list[float]] = {
         column_key: list(column_assignments.get(column_key, []))
         for column_key in column_keys
@@ -173,20 +171,60 @@ def _expand_layout_capacity(
         column_key: float(used_by_column.get(column_key, 0.0))
         for column_key in column_keys
     }
+    candidate_slot_sizes = sorted(
+        {
+            float(size)
+            for size in slot_sizes
+            if common._to_float(size) is not None and float(size) > 0.0
+        },
+        reverse=True,
+    )
+    if not candidate_slot_sizes:
+        compact_assignments = {
+            column_key: slots
+            for column_key, slots in expanded_assignments.items()
+            if slots
+        }
+        compact_used = {
+            column_key: expanded_used[column_key]
+            for column_key in compact_assignments
+        }
+        return compact_assignments, compact_used
+
+    added_counts: dict[float, int] = {slot_size: 0 for slot_size in candidate_slot_sizes}
 
     while True:
         placed = False
-        for column_key in _column_order_for_style(column_keys, expanded_used, style):
-            current_count = len(expanded_assignments[column_key])
-            next_count = current_count + 1
-            allowed_after = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(next_count - 1, common.MIN_BEAMS_PER_COLUMN)
-            proposed_used = expanded_used[column_key] + min_slot_size
-            if proposed_used > allowed_after + 1e-9:
-                continue
+        tried_slot_sizes: set[float] = set()
+        _ = beam_preference
+        expansion_columns = _column_order_for_style(column_keys, expanded_used, style)
 
-            expanded_assignments[column_key].append(min_slot_size)
-            expanded_used[column_key] = proposed_used
-            placed = True
+        # Place one slot at a time, always picking the currently least-used slot
+        # size (ties -> larger size first) to keep expansion close to equal mix.
+        while len(tried_slot_sizes) < len(candidate_slot_sizes):
+            remaining_sizes = [size for size in candidate_slot_sizes if size not in tried_slot_sizes]
+            target_size = min(remaining_sizes, key=lambda size: (added_counts.get(size, 0), -size))
+
+            placed_target = False
+            for column_key in expansion_columns:
+                current_count = len(expanded_assignments[column_key])
+                next_count = current_count + 1
+                allowed_after = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(next_count - 1, common.MIN_BEAMS_PER_COLUMN)
+                proposed_used = expanded_used[column_key] + target_size
+                if proposed_used > allowed_after + 1e-9:
+                    continue
+
+                expanded_assignments[column_key].append(target_size)
+                expanded_used[column_key] = proposed_used
+                added_counts[target_size] = added_counts.get(target_size, 0) + 1
+                placed_target = True
+                placed = True
+                break
+
+            if placed_target:
+                break
+
+            tried_slot_sizes.add(target_size)
 
         if not placed:
             break
@@ -239,14 +277,32 @@ def _pre_robust_sort_key(summary_row: dict[str, str]) -> tuple[int, int, int, fl
     )
 
 
+def _percent_diff(value_a: float, value_b: float) -> float:
+    scale = max(abs(value_a), abs(value_b), 1e-9)
+    return abs(value_a - value_b) / scale
+
+
+def _kpi_winner(util_value: float, reloc_value: float, higher_is_better: bool) -> str:
+    if abs(util_value - reloc_value) <= 1e-9:
+        return "tie"
+    if higher_is_better:
+        return "utilization" if util_value > reloc_value else "relocation"
+    return "utilization" if util_value < reloc_value else "relocation"
+
+
 def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     """Generate candidate layouts and emit summary, column, and location-level outputs."""
     prepared_rows = _read_csv(INPUT_PREPARED)
     beam_map_rows = _read_csv(INPUT_LOCATION_BEAM_MAP)
+    beam_height_rows = _read_csv(INPUT_BEAM_HEIGHT_COORDS)
     configs = _shortlisted_configs()
     capacity_rows = _capacity_rows_by_config()
     layout_columns = common._build_layout_columns(prepared_rows)
-    current_beam_units, beam_segments = common._build_current_beam_units_and_segments(beam_map_rows)
+    current_beam_units, beam_segments, current_beam_heights = common._build_current_beam_units_and_segments(
+        beam_map_rows,
+        prepared_rows,
+        beam_height_rows,
+    )
     beam_preference = _beam_preference_by_column(current_beam_units)
     total_physical_locations = len(
         [
@@ -277,201 +333,147 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
 
         config_slot_sizes = _slot_sizes_from_capacity(rows)
         style_candidates: list[StyleCandidate] = []
+        style = IMPLEMENTATION_STYLE
+        layout_id = f"LAY_{layout_counter:03d}"
+        layout_counter += 1
 
-        for style in common.CANDIDATE_LAYOUT_STYLES:
-            layout_id = f"LAY_{layout_counter:03d}"
-            layout_counter += 1
+        # Allocate slot sizes to rack-columns for a single implementation layout.
+        feasible_layout, assigned_exact, used_by_column, column_assignments, note, allocation_diagnostics = common._allocate_layout_by_column(
+            target_exact_counts=base_exact_counts,
+            column_keys=layout_columns,
+            style=style,
+            style_context={"beam_preference": beam_preference},
+        )
 
-            # Allocate slot sizes to rack-columns under style-specific ordering rules.
-            feasible_layout, assigned_exact, used_by_column, column_assignments, note, allocation_diagnostics = common._allocate_layout_by_column(
-                target_exact_counts=base_exact_counts,
-                column_keys=layout_columns,
-                style=style,
-                style_context={"beam_preference": beam_preference},
-            )
+        expansion_slot_sizes = sorted(float(slot_size) for slot_size in base_exact_counts)
+        column_assignments, used_by_column = _expand_layout_capacity(
+            column_assignments=column_assignments,
+            used_by_column=used_by_column,
+            column_keys=layout_columns,
+            slot_sizes=expansion_slot_sizes,
+            style=style,
+            beam_preference=beam_preference,
+        )
 
-            min_slot_size = min(base_exact_counts)
-            column_assignments, used_by_column = _expand_layout_capacity(
-                column_assignments=column_assignments,
-                used_by_column=used_by_column,
-                column_keys=layout_columns,
-                min_slot_size=min_slot_size,
-                style=style,
-            )
+        column_assignments = common._optimize_column_slot_order_for_beam_preservation(
+            column_assignments,
+            beam_segments,
+            current_beam_heights,
+        )
 
-            generated_location_rows = common._build_generated_layout_location_rows(
-                layout_id=layout_id,
-                config_id=config_id,
-                style=style,
-                column_assignments=column_assignments,
-            )
-            layout_signature = _layout_signature(generated_location_rows)
-            proposed_beam_units = common._build_proposed_beam_units_from_layout_rows(generated_location_rows, beam_segments)
-            relocation_total, relocation_by_column = common._beam_relocations(current_beam_units, proposed_beam_units)
-            additional_beams, additional_grids, removed_beams = common._material_requirements(current_beam_units, proposed_beam_units)
-            _ = removed_beams
+        generated_location_rows = common._build_generated_layout_location_rows(
+            layout_id=layout_id,
+            config_id=config_id,
+            style=style,
+            column_assignments=column_assignments,
+            segments=beam_segments,
+        )
+        layout_signature = _layout_signature(generated_location_rows)
+        proposed_beam_units, proposed_beam_heights = common._build_proposed_beam_units_from_layout_rows(
+            generated_location_rows,
+            beam_segments,
+        )
+        relocation_total, relocation_by_column = common._beam_relocations(
+            current_beam_units,
+            proposed_beam_units,
+            current_beam_heights,
+            proposed_beam_heights,
+        )
+        additional_beams, additional_grids, removed_beams = common._material_requirements(current_beam_units, proposed_beam_units)
+        _ = removed_beams
 
-            # Compute utilization and change-effort KPIs for ranking downstream.
-            assigned_total = len(generated_location_rows)
-            # Layout-created capacity is the number of generated physical locations.
-            layout_physical_locations = assigned_total
-            required_locations_total = sum(base_exact_counts.values())
-            total_used_height = sum(used_by_column.values())
-            total_allowed_height = sum(
-                common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(len(slots) - 1, common.MIN_BEAMS_PER_COLUMN)
-                for slots in column_assignments.values()
-            )
-            space_left = sum(
-                max(
-                    (common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(len(slots) - 1, common.MIN_BEAMS_PER_COLUMN))
-                    - used_by_column.get(column_key, 0.0),
-                    0.0,
+        # Compute utilization and implementation-effort KPIs per configuration.
+        assigned_total = len(generated_location_rows)
+        layout_physical_locations = assigned_total
+        required_locations_total = sum(base_exact_counts.values())
+        total_used_height = sum(used_by_column.values())
+        total_allowed_height = sum(
+            common.MAX_USED_HEIGHT_BASE
+            - common.BEAM_HEIGHT * max(len(column_assignments.get(column_key, [])) - 1, common.MIN_BEAMS_PER_COLUMN)
+            for column_key in layout_columns
+        )
+        space_utilization = (total_used_height / total_allowed_height) if total_allowed_height > 0 else 0.0
+        capacity_margin = assigned_total - required_locations_total
+        required_beam_moves = relocation_total
+        pct_rack_height_used = space_utilization * 100.0
+        space_left = sum(
+            max(
+                (
+                    common.MAX_USED_HEIGHT_BASE
+                    - common.BEAM_HEIGHT * max(len(column_assignments.get(column_key, [])) - 1, common.MIN_BEAMS_PER_COLUMN)
                 )
-                for column_key, slots in column_assignments.items()
+                - used_by_column.get(column_key, 0.0),
+                0.0,
             )
+            for column_key in layout_columns
+        )
 
-            summary_row = {
+        summary_row = {
                 "Layout_ID": layout_id,
                 "Config_ID": config_id,
-                "Style": style,
                 "Layout_Feasible": "YES" if feasible_layout else "NO",
                 "Required_Locations_Total": str(required_locations_total),
-                "Assigned_Locations_Total": str(assigned_total),
-                "Total_Physical_Locations": str(layout_physical_locations),
-                "Existing_Physical_Locations": str(total_physical_locations),
+                "Total_Locations": str(assigned_total),
+                "Capacity_Margin": str(capacity_margin),
                 "Assigned_Used_Height_Total": f"{total_used_height:.3f}",
                 "Total_Allowed_Height": f"{total_allowed_height:.3f}",
                 "Space_Left": f"{space_left:.3f}",
                 "Beam_Relocations_Total": str(relocation_total),
                 "Additional_Beams_Required": str(additional_beams),
                 "Additional_Grids_Required": str(additional_grids),
+                "Percentage_Rack_Height_Used": f"{pct_rack_height_used:.2f}",
                 "Worst_Case_Exact_Counts": "|".join(f"{int(size)}:{count}" for size, count in sorted(base_exact_counts.items())),
                 "Slot_Composition_Signature": "|".join(f"{int(size)}:{count}" for size, count in sorted(base_exact_counts.items())),
                 "Layout_Slot_Size_Distribution": _slot_distribution_signature(column_assignments),
                 "Layout_Slot_Size_Cumulative_Coverage": _cumulative_coverage_signature(column_assignments),
                 "Source_Slot_Sizes": ",".join(f"{int(size)}" for size in config_slot_sizes),
-                "Allocation_Decisions_Total": str(int(allocation_diagnostics.get("Allocation_Decisions_Total", 0.0))),
                 "Feasible_Columns_Considered_Total": str(int(allocation_diagnostics.get("Feasible_Columns_Considered_Total", 0.0))),
                 "Feasible_Columns_Min": str(int(allocation_diagnostics.get("Feasible_Columns_Min", 0.0))),
                 "Feasible_Columns_Max": str(int(allocation_diagnostics.get("Feasible_Columns_Max", 0.0))),
                 "Feasible_Columns_Average": f"{allocation_diagnostics.get('Feasible_Columns_Average', 0.0):.3f}",
-                "Candidates_Rejected_By_Style_Total": str(int(allocation_diagnostics.get("Candidates_Rejected_By_Style_Total", 0.0))),
-                "Decisions_Influenced_By_Style": str(int(allocation_diagnostics.get("Decisions_Influenced_By_Style", 0.0))),
-                "Forced_By_Feasibility_Count": str(int(allocation_diagnostics.get("Forced_By_Feasibility_Count", 0.0))),
-                "Notes": note,
             }
 
-            # Capture per-column slot mix and beam movement details.
-            slot_mix_by_column: dict[str, dict[float, int]] = defaultdict(lambda: defaultdict(int))
-            for row in generated_location_rows:
-                rack = str(row.get("Rack", "")).strip()
-                column = str(row.get("Column", "")).strip()
-                slot = common._to_float(row.get("Assigned_Slot_Size_cm"))
-                if rack and column and slot is not None:
-                    slot_mix_by_column[f"{rack}{column}"][slot] += 1
+        # Capture per-column slot mix and beam movement details.
+        slot_mix_by_column: dict[str, dict[float, int]] = defaultdict(lambda: defaultdict(int))
+        for row in generated_location_rows:
+            rack = str(row.get("Rack", "")).strip()
+            column = str(row.get("Column", "")).strip()
+            slot = common._to_float(row.get("Assigned_Slot_Size_cm"))
+            if rack and column and slot is not None:
+                slot_mix_by_column[f"{rack}{column}"][slot] += 1
 
-            style_column_rows: list[dict[str, str]] = []
-            for column_key, slots in sorted(column_assignments.items()):
-                used = used_by_column.get(column_key, 0.0)
-                beam_count = max(len(slots) - 1, common.MIN_BEAMS_PER_COLUMN)
-                allowed = common.MAX_USED_HEIGHT_BASE - beam_count * common.BEAM_HEIGHT
-                mix = slot_mix_by_column.get(column_key, {})
-                style_column_rows.append(
-                    {
-                        "Layout_ID": layout_id,
-                        "Config_ID": config_id,
-                        "Style": style,
-                        "Rack_Column": column_key,
-                        "Beam_Count_Used": str(beam_count),
-                        "Allowed_Used_Height_cm": f"{allowed:.3f}",
-                        "Assigned_Used_Height_cm": f"{used:.3f}",
-                        "Remaining_Height_cm": f"{max(allowed - used, 0.0):.3f}",
-                        "Fill_Ratio": f"{(used / allowed) if allowed > 0 else 0.0:.4f}",
-                        "Beam_Relocations_In_Column": str(relocation_by_column.get(column_key, 0)),
-                        "Slot_Size_Distribution": "|".join(
-                            f"{int(slot_size)}:{count}" for slot_size, count in sorted(mix.items())
-                        ),
-                    }
-                )
+        style_column_rows: list[dict[str, str]] = []
+        for column_key, slots in sorted(column_assignments.items()):
+            used = used_by_column.get(column_key, 0.0)
+            beam_count = max(len(slots) - 1, common.MIN_BEAMS_PER_COLUMN)
+            allowed = common.MAX_USED_HEIGHT_BASE - beam_count * common.BEAM_HEIGHT
+            mix = slot_mix_by_column.get(column_key, {})
+            style_column_rows.append(
+                {
+                    "Layout_ID": layout_id,
+                    "Config_ID": config_id,
+                    "Rack_Column": column_key,
+                    "Beam_Count_Used": str(beam_count),
+                    "Allowed_Used_Height_cm": f"{allowed:.3f}",
+                    "Assigned_Used_Height_cm": f"{used:.3f}",
+                    "Remaining_Height_cm": f"{max(allowed - used, 0.0):.3f}",
+                    "Fill_Ratio": f"{(used / allowed) if allowed > 0 else 0.0:.4f}",
+                    "Beam_Relocations_In_Column": str(relocation_by_column.get(column_key, 0)),
+                    "Slot_Size_Distribution": "|".join(
+                        f"{int(slot_size)}:{count}" for slot_size, count in sorted(mix.items())
+                    ),
+                }
+            )
 
-            style_candidates.append((summary_row, generated_location_rows, style_column_rows, layout_signature))
+        style_candidates.append((summary_row, generated_location_rows, style_column_rows, layout_signature))
 
         if not style_candidates:
             continue
 
-        unique_signatures = {candidate[3] for candidate in style_candidates}
-        diversity_label = "NO_STYLE_DIFFERENCE" if len(unique_signatures) == 1 else "STYLE_DIFFERENCE_FOUND"
-
-        by_style_summary: dict[str, dict[str, str]] = {
-            str(candidate[0].get("Style", "")): candidate[0]
-            for candidate in style_candidates
-        }
-        style_keys = list(by_style_summary.keys())
-
-        for summary, _loc, _col, signature in style_candidates:
-            style_name = str(summary.get("Style", ""))
-            similarity_values: list[tuple[str, float]] = []
-            for other_summary, _other_loc, _other_col, other_signature in style_candidates:
-                other_style = str(other_summary.get("Style", ""))
-                if other_style == style_name:
-                    continue
-                similarity_values.append((other_style, _signature_similarity(signature, other_signature)))
-
-            if similarity_values:
-                closest_style, max_similarity = max(similarity_values, key=lambda item: item[1])
-            else:
-                closest_style, max_similarity = "", 1.0
-
-            summary["Optimization_Diversity"] = diversity_label
-            summary["Style_Selection_Reason"] = "Style-specific candidate filtering and objective rules applied"
-            summary["Similarity_To_Closest_Style"] = f"{max_similarity:.4f}"
-            summary["Closest_Style"] = closest_style
-            summary["Convergence_Flag"] = "YES" if max_similarity >= 0.95 else "NO"
-            summary["Convergence_Reason"] = (
-                "Feasibility constraints and style filters converged to nearly identical decisions"
-                if max_similarity >= 0.95
-                else ""
-            )
+        for summary, _loc, _col, _signature in style_candidates:
             summary["Pre_Robustness_Status"] = "PENDING"
             summary["Pre_Robustness_Rank"] = ""
             summary["Pre_Robustness_Prune_Reason"] = ""
-
-        reloc_values = [common._to_int_default(summary.get("Beam_Relocations_Total"), 0) for summary in by_style_summary.values()]
-        beam_values = [common._to_int_default(summary.get("Additional_Beams_Required"), 0) for summary in by_style_summary.values()]
-        fill_values = [common._to_float(summary.get("Assigned_Used_Height_Total")) or 0.0 for summary in by_style_summary.values()]
-        margin_values = [
-            (common._to_int_default(summary.get("Assigned_Locations_Total"), 0) - common._to_int_default(summary.get("Required_Locations_Total"), 0))
-            for summary in by_style_summary.values()
-        ]
-
-        def _relative_diff(values: list[float | int]) -> float:
-            if not values:
-                return 0.0
-            vmax = max(float(v) for v in values)
-            vmin = min(float(v) for v in values)
-            if abs(vmax) < 1e-9:
-                return 0.0
-            return (vmax - vmin) / abs(vmax)
-
-        reloc_diff = _relative_diff(reloc_values)
-        beam_diff = _relative_diff(beam_values)
-        fill_diff = _relative_diff(fill_values)
-        margin_diff = _relative_diff(margin_values)
-        diversity_targets_met = (
-            reloc_diff >= 0.10
-            and beam_diff >= 0.10
-            and fill_diff >= 0.05
-            and margin_diff >= 0.05
-        )
-        diversity_reason = "" if diversity_targets_met else "Style KPIs remain close; constraints and feasible sets dominate"
-
-        for summary in by_style_summary.values():
-            summary["Diversity_Beam_Relocations_Diff_Pct"] = f"{reloc_diff * 100:.2f}"
-            summary["Diversity_Added_Beams_Diff_Pct"] = f"{beam_diff * 100:.2f}"
-            summary["Diversity_Fill_Diff_Pct"] = f"{fill_diff * 100:.2f}"
-            summary["Diversity_Capacity_Margin_Diff_Pct"] = f"{margin_diff * 100:.2f}"
-            summary["Diversity_Targets_Met"] = "YES" if diversity_targets_met else "NO"
-            summary["Diversity_Targets_Reason"] = diversity_reason
 
         config_style_bundles.append((config_id, style_candidates))
 
@@ -525,54 +527,40 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 candidate_layout_rows.append({key: str(value) for key, value in summary.items()})
 
     # Write layout-level KPIs.
+    summary_fieldnames = [
+        "Layout_ID",
+        "Config_ID",
+        "Pre_Robustness_Status",
+        "Pre_Robustness_Rank",
+        "Pre_Robustness_Prune_Reason",
+        "Layout_Feasible",
+        "Required_Locations_Total",
+        "Total_Locations",
+        "Capacity_Margin",
+        "Assigned_Used_Height_Total",
+        "Total_Allowed_Height",
+        "Space_Left",
+        "Beam_Relocations_Total",
+        "Additional_Beams_Required",
+        "Additional_Grids_Required",
+        "Percentage_Rack_Height_Used",
+        "Worst_Case_Exact_Counts",
+        "Layout_Slot_Size_Distribution",
+        "Layout_Slot_Size_Cumulative_Coverage",
+        "Source_Slot_Sizes",
+        "Feasible_Columns_Considered_Total",
+        "Feasible_Columns_Min",
+        "Feasible_Columns_Max",
+        "Feasible_Columns_Average",
+    ]
+    summary_output_rows = [
+        {field: str(row.get(field, "")) for field in summary_fieldnames}
+        for row in candidate_layout_rows
+    ]
     _write_csv_preserve(
         LAYOUT_OUTPUT_DIR / "Candidate_Layout_Summary.csv",
-        [
-            "Layout_ID",
-            "Config_ID",
-            "Style",
-            "Optimization_Diversity",
-            "Style_Selection_Reason",
-            "Pre_Robustness_Status",
-            "Pre_Robustness_Rank",
-            "Pre_Robustness_Prune_Reason",
-            "Layout_Feasible",
-            "Required_Locations_Total",
-            "Assigned_Locations_Total",
-            "Total_Physical_Locations",
-            "Existing_Physical_Locations",
-            "Assigned_Used_Height_Total",
-            "Total_Allowed_Height",
-            "Space_Left",
-            "Beam_Relocations_Total",
-            "Additional_Beams_Required",
-            "Additional_Grids_Required",
-            "Worst_Case_Exact_Counts",
-            "Slot_Composition_Signature",
-            "Layout_Slot_Size_Distribution",
-            "Layout_Slot_Size_Cumulative_Coverage",
-            "Source_Slot_Sizes",
-            "Allocation_Decisions_Total",
-            "Feasible_Columns_Considered_Total",
-            "Feasible_Columns_Min",
-            "Feasible_Columns_Max",
-            "Feasible_Columns_Average",
-            "Candidates_Rejected_By_Style_Total",
-            "Decisions_Influenced_By_Style",
-            "Forced_By_Feasibility_Count",
-            "Similarity_To_Closest_Style",
-            "Closest_Style",
-            "Convergence_Flag",
-            "Convergence_Reason",
-            "Diversity_Beam_Relocations_Diff_Pct",
-            "Diversity_Added_Beams_Diff_Pct",
-            "Diversity_Fill_Diff_Pct",
-            "Diversity_Capacity_Margin_Diff_Pct",
-            "Diversity_Targets_Met",
-            "Diversity_Targets_Reason",
-            "Notes",
-        ],
-        candidate_layout_rows,
+        summary_fieldnames,
+        summary_output_rows,
     )
 
     # Write rack-column level breakdown.
@@ -581,7 +569,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         [
             "Layout_ID",
             "Config_ID",
-            "Style",
             "Rack_Column",
             "Beam_Count_Used",
             "Allowed_Used_Height_cm",
@@ -600,14 +587,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         [
             "Layout_ID",
             "Config_ID",
-            "Style",
             "Location",
             "Rack",
             "Column",
             "Row",
             "Beam_Coordinate",
-            "Assignment_Unit_ID",
-            "Assignment_Unit_Type",
             "Assigned_Slot_Size_cm",
         ],
         candidate_layout_location_rows,

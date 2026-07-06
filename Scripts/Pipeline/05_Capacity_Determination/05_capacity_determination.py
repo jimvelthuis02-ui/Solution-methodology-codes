@@ -90,7 +90,6 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
                 "Required_Locations_Total": str(exact_total),
                 "Exact_Count_Distribution": "|".join(f"{int(size)}:{count}" for size, count in sorted(exact_required_by_size.items())),
                 "Relative_Slot_Size_Distribution": config.get("Relative_Slot_Size_Distribution", ""),
-                "Occupancy_Buffer_Logic": "SKU scenarios provide the capacity buffer for downstream layout generation",
             }
         )
 
@@ -107,10 +106,8 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
                     "Representative_Slot_Size": f"{slot_size:.0f}",
                     "Cluster_Count_Percentage": f"{(distributions[ordered_sizes.index(slot_size)] * 100):.2f}%",
                     "Assigned_SKUs_At_Representative_Size": str(allocated_counts[ordered_sizes.index(slot_size)]),
-                    "Decision_Variable": common._slot_size_variable_name(slot_size),
                     "Cumulative_Assigned_SKUs_At_Or_Above_Size": str(cumulative_required_by_size[slot_size]),
                     "Min_Required_Locations_At_Or_Above_Size": str(cumulative_required_by_size[slot_size]),
-                    "Coverage_Constraint": f"{common._slot_size_variable_name(slot_size)} >= {cumulative_required_by_size[slot_size]}",
                     "Required_Locations_Total": str(exact_total),
                 }
             )
@@ -143,7 +140,6 @@ def build_capacity_determination() -> tuple[list[dict[str, str]], list[dict[str,
             "Required_Locations_Total",
             "Exact_Count_Distribution",
             "Relative_Slot_Size_Distribution",
-            "Occupancy_Buffer_Logic",
         ],
         summary_rows,
     )
@@ -161,10 +157,8 @@ def build_capacity_determination() -> tuple[list[dict[str, str]], list[dict[str,
             "Representative_Slot_Size",
             "Cluster_Count_Percentage",
             "Assigned_SKUs_At_Representative_Size",
-            "Decision_Variable",
             "Cumulative_Assigned_SKUs_At_Or_Above_Size",
             "Min_Required_Locations_At_Or_Above_Size",
-            "Coverage_Constraint",
             "Required_Locations_Total",
         ],
         count_rows,
