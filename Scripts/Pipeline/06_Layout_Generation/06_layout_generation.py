@@ -264,6 +264,117 @@ def _cumulative_coverage_signature(column_assignments: dict[str, list[float]]) -
     return "|".join(f"{size}:{cumulative[size]}" for size in sorted(cumulative.keys()))
 
 
+def _slot_signatures_from_location_rows(location_rows: list[dict[str, str]]) -> tuple[str, str]:
+    # Recompute slot-distribution signatures directly from location-level rows.
+    exact_counts: dict[int, int] = defaultdict(int)
+    for row in location_rows:
+        slot_size = common._to_float(row.get("Assigned_Slot_Size_cm"))
+        if slot_size is None:
+            continue
+        exact_counts[int(round(slot_size))] += 1
+
+    distribution = "|".join(f"{size}:{count}" for size, count in sorted(exact_counts.items()))
+
+    running = 0
+    cumulative: dict[int, int] = {}
+    for size in sorted(exact_counts.keys(), reverse=True):
+        running += exact_counts[size]
+        cumulative[size] = running
+    cumulative_signature = "|".join(f"{size}:{cumulative[size]}" for size in sorted(cumulative.keys()))
+
+    return distribution, cumulative_signature
+
+
+def _build_top_filled_layout_set(
+    summary_rows: list[dict[str, str]],
+    column_rows: list[dict[str, str]],
+    location_rows: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    # Create a separate variant where each column's remaining height is added
+    # to its top location so no practical column space is left unused.
+    remaining_by_layout_column: dict[tuple[str, str], float] = {}
+    for row in column_rows:
+        layout_id = str(row.get("Layout_ID", "")).strip()
+        rack_column = str(row.get("Rack_Column", "")).strip()
+        remaining = common._to_float(row.get("Remaining_Height_cm")) or 0.0
+        if layout_id and rack_column:
+            remaining_by_layout_column[(layout_id, rack_column)] = max(remaining, 0.0)
+
+    grouped_locations: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in location_rows:
+        layout_id = str(row.get("Layout_ID", "")).strip()
+        rack = str(row.get("Rack", "")).strip()
+        column = str(row.get("Column", "")).strip()
+        if not layout_id or not rack or not column:
+            continue
+        grouped_locations[(layout_id, f"{rack}{column}")].append(dict(row))
+
+    top_filled_location_rows: list[dict[str, str]] = []
+    space_added_by_layout: dict[str, float] = defaultdict(float)
+    for (layout_id, rack_column), rows in grouped_locations.items():
+        rows_sorted = sorted(rows, key=lambda item: common._to_int_default(item.get("Row"), 0))
+        remaining = remaining_by_layout_column.get((layout_id, rack_column), 0.0)
+        if rows_sorted and remaining > 1e-9:
+            top_row = rows_sorted[-1]
+            top_slot = common._to_float(top_row.get("Assigned_Slot_Size_cm")) or 0.0
+            top_row["Assigned_Slot_Size_cm"] = f"{(top_slot + remaining):.0f}"
+            space_added_by_layout[layout_id] += remaining
+        top_filled_location_rows.extend(rows_sorted)
+
+    top_filled_location_rows = sorted(
+        top_filled_location_rows,
+        key=lambda row: (
+            str(row.get("Layout_ID", "")),
+            str(row.get("Rack", "")),
+            str(row.get("Column", "")),
+            common._to_int_default(row.get("Row"), 0),
+        ),
+    )
+
+    top_filled_column_rows: list[dict[str, str]] = []
+    for row in column_rows:
+        updated = dict(row)
+        layout_id = str(updated.get("Layout_ID", "")).strip()
+        rack_column = str(updated.get("Rack_Column", "")).strip()
+        remaining = remaining_by_layout_column.get((layout_id, rack_column), 0.0)
+
+        assigned_used = common._to_float(updated.get("Assigned_Used_Height_cm")) or 0.0
+        allowed = common._to_float(updated.get("Allowed_Used_Height_cm")) or 0.0
+        new_used = assigned_used + remaining
+
+        updated["Assigned_Used_Height_cm"] = f"{new_used:.3f}"
+        updated["Remaining_Height_cm"] = "0.000"
+        updated["Fill_Ratio"] = f"{(new_used / allowed) if allowed > 0 else 0.0:.4f}"
+        top_filled_column_rows.append(updated)
+
+    location_rows_by_layout: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in top_filled_location_rows:
+        location_rows_by_layout[str(row.get("Layout_ID", "")).strip()].append(row)
+
+    top_filled_summary_rows: list[dict[str, str]] = []
+    for row in summary_rows:
+        layout_id = str(row.get("Layout_ID", "")).strip()
+        if layout_id not in location_rows_by_layout:
+            continue
+
+        updated = dict(row)
+        total_used = common._to_float(updated.get("Assigned_Used_Height_Total")) or 0.0
+        total_allowed = common._to_float(updated.get("Total_Allowed_Height")) or 0.0
+        added = space_added_by_layout.get(layout_id, 0.0)
+        new_total_used = total_used + added
+
+        dist_sig, cum_sig = _slot_signatures_from_location_rows(location_rows_by_layout[layout_id])
+
+        updated["Assigned_Used_Height_Total"] = f"{new_total_used:.3f}"
+        updated["Space_Left"] = "0.000"
+        updated["Percentage_Rack_Height_Used"] = f"{((new_total_used / total_allowed) * 100.0) if total_allowed > 0 else 0.0:.2f}"
+        updated["Layout_Slot_Size_Distribution"] = dist_sig
+        updated["Layout_Slot_Size_Cumulative_Coverage"] = cum_sig
+        top_filled_summary_rows.append(updated)
+
+    return top_filled_summary_rows, top_filled_column_rows, top_filled_location_rows
+
+
 def _pre_robust_sort_key(summary_row: dict[str, str]) -> tuple[int, int, int, float, int, int]:
     feasible_penalty = 0 if str(summary_row.get("Layout_Feasible", "")).strip().upper() == "YES" else 1
     additional_beams = common._to_int_default(summary_row.get("Additional_Beams_Required"), 0)
@@ -297,12 +408,15 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     beam_height_rows = _read_csv(INPUT_BEAM_HEIGHT_COORDS)
     configs = _shortlisted_configs()
     capacity_rows = _capacity_rows_by_config()
+    doorgang_thresholds_by_rack = common._doorgang_thresholds_by_rack(prepared_rows)
+    fixed_doorgang_slot_by_column = common._fixed_doorgang_slot_by_column(prepared_rows)
     layout_columns = common._build_layout_columns(prepared_rows)
     current_beam_units, beam_segments, current_beam_heights = common._build_current_beam_units_and_segments(
         beam_map_rows,
         prepared_rows,
         beam_height_rows,
     )
+    initial_beam_count, initial_grid_count = common._initial_beam_grid_counts(prepared_rows, current_beam_units)
     beam_preference = _beam_preference_by_column(current_beam_units)
     total_physical_locations = len(
         [
@@ -342,7 +456,13 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             target_exact_counts=base_exact_counts,
             column_keys=layout_columns,
             style=style,
-            style_context={"beam_preference": beam_preference},
+            style_context={
+                "beam_preference": beam_preference,
+                "fixed_prefix_by_column": {
+                    column_key: [float(height)]
+                    for column_key, height in fixed_doorgang_slot_by_column.items()
+                },
+            },
         )
 
         expansion_slot_sizes = sorted(float(slot_size) for slot_size in base_exact_counts)
@@ -359,6 +479,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             column_assignments,
             beam_segments,
             current_beam_heights,
+            fixed_prefix_by_column={
+                column_key: [float(height)]
+                for column_key, height in fixed_doorgang_slot_by_column.items()
+                if column_key in column_assignments
+            },
         )
 
         generated_location_rows = common._build_generated_layout_location_rows(
@@ -367,6 +492,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             style=style,
             column_assignments=column_assignments,
             segments=beam_segments,
+            doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
         )
         layout_signature = _layout_signature(generated_location_rows)
         proposed_beam_units, proposed_beam_heights = common._build_proposed_beam_units_from_layout_rows(
@@ -379,8 +505,12 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             current_beam_heights,
             proposed_beam_heights,
         )
-        additional_beams, additional_grids, removed_beams = common._material_requirements(current_beam_units, proposed_beam_units)
-        _ = removed_beams
+        required_beams, required_grids, additional_beams, additional_grids = common._material_requirements(
+            initial_beam_count,
+            initial_grid_count,
+            proposed_beam_units,
+            generated_location_rows,
+        )
 
         # Compute utilization and implementation-effort KPIs per configuration.
         assigned_total = len(generated_location_rows)
@@ -419,7 +549,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 "Total_Allowed_Height": f"{total_allowed_height:.3f}",
                 "Space_Left": f"{space_left:.3f}",
                 "Beam_Relocations_Total": str(relocation_total),
+                "Initial_Beams_Total": str(initial_beam_count),
+                "Required_Beams_Total": str(required_beams),
                 "Additional_Beams_Required": str(additional_beams),
+                "Initial_Grids_Total": str(initial_grid_count),
+                "Required_Grids_Total": str(required_grids),
                 "Additional_Grids_Required": str(additional_grids),
                 "Percentage_Rack_Height_Used": f"{pct_rack_height_used:.2f}",
                 "Worst_Case_Exact_Counts": "|".join(f"{int(size)}:{count}" for size, count in sorted(base_exact_counts.items())),
@@ -541,7 +675,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "Total_Allowed_Height",
         "Space_Left",
         "Beam_Relocations_Total",
+        "Initial_Beams_Total",
+        "Required_Beams_Total",
         "Additional_Beams_Required",
+        "Initial_Grids_Total",
+        "Required_Grids_Total",
         "Additional_Grids_Required",
         "Percentage_Rack_Height_Used",
         "Worst_Case_Exact_Counts",
@@ -592,9 +730,57 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             "Column",
             "Row",
             "Beam_Coordinate",
+            "Beam_Height_Range_cm",
             "Assigned_Slot_Size_cm",
         ],
         candidate_layout_location_rows,
+    )
+
+    # Write a separate practical variant where each column's residual space is
+    # absorbed by its highest assigned location.
+    top_filled_summary_rows, top_filled_column_rows, top_filled_location_rows = _build_top_filled_layout_set(
+        summary_output_rows,
+        candidate_layout_column_rows,
+        candidate_layout_location_rows,
+    )
+
+    _write_csv_preserve(
+        LAYOUT_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv",
+        summary_fieldnames,
+        [{field: str(row.get(field, "")) for field in summary_fieldnames} for row in top_filled_summary_rows],
+    )
+
+    common._write_csv_clean(
+        LAYOUT_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column_TopFilled.csv",
+        [
+            "Layout_ID",
+            "Config_ID",
+            "Rack_Column",
+            "Beam_Count_Used",
+            "Allowed_Used_Height_cm",
+            "Assigned_Used_Height_cm",
+            "Remaining_Height_cm",
+            "Fill_Ratio",
+            "Beam_Relocations_In_Column",
+            "Slot_Size_Distribution",
+        ],
+        top_filled_column_rows,
+    )
+
+    common._write_csv_clean(
+        LAYOUT_OUTPUT_DIR / "Candidate_Layout_By_Location_TopFilled.csv",
+        [
+            "Layout_ID",
+            "Config_ID",
+            "Location",
+            "Rack",
+            "Column",
+            "Row",
+            "Beam_Coordinate",
+            "Beam_Height_Range_cm",
+            "Assigned_Slot_Size_cm",
+        ],
+        top_filled_location_rows,
     )
 
     return candidate_layout_rows, candidate_layout_column_rows, candidate_layout_location_rows

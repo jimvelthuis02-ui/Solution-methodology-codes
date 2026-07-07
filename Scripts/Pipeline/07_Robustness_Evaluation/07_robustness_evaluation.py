@@ -16,7 +16,7 @@ ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustnes
 CAPACITY_CONSTRAINT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
 
 
-SKU_SCENARIOS = common._build_sku_count_scenarios([])
+OCCUPIED_LOCATION_SCENARIOS = common._build_occupied_location_count_scenarios([])
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -121,7 +121,7 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
 
         layout_slot_counts = _parse_slot_distribution(str(layout.get("Layout_Slot_Size_Distribution", "")))
 
-        for sku_scenario, sku_count in SKU_SCENARIOS.items():
+        for sku_scenario, sku_count in OCCUPIED_LOCATION_SCENARIOS.items():
             occupancy = sku_count / max(assigned_locations_total, 1)
             utilization = vertical_space_utilization
             capacity_margin = assigned_locations_total - sku_count

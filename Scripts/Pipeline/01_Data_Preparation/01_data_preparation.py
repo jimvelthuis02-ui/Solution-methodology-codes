@@ -358,8 +358,18 @@ def build_beam_grid_map() -> Path:
                 "Grid_Count": str(grid_counts_by_beam.get(beam_coordinate, 0)),
                 "Beam_Bottom_cm": f"{beam_bottom_cm:.2f}",
                 "Beam_Top_cm": f"{beam_top_cm:.2f}",
+                "Beam_Height_Range_cm": f"{beam_bottom_cm:.0f}-{beam_top_cm:.0f}",
             }
         )
+
+    beam_range_by_coordinate = {
+        str(row.get("Beam_Coordinate", "")).strip(): str(row.get("Beam_Height_Range_cm", "")).strip()
+        for row in beam_height_rows
+        if str(row.get("Beam_Coordinate", "")).strip()
+    }
+    for row in location_map:
+        beam_coordinate = str(row.get("Beam_Coordinate", "")).strip()
+        row["Beam_Height_Range_cm"] = beam_range_by_coordinate.get(beam_coordinate, "")
 
     beam_file = BEAM_OUTPUT_DIR / "Beam_Segments.csv"
     location_file = BEAM_OUTPUT_DIR / "Location_Beam_Map.csv"
@@ -388,6 +398,7 @@ def build_beam_grid_map() -> Path:
             "Beam_Supported",
             "Has_Grid",
             "Beam_Coordinate",
+            "Beam_Height_Range_cm",
             "Spanned_Locations",
         ]
         writer = csv.DictWriter(target, fieldnames=fieldnames)
@@ -403,6 +414,7 @@ def build_beam_grid_map() -> Path:
             "Grid_Count",
             "Beam_Bottom_cm",
             "Beam_Top_cm",
+            "Beam_Height_Range_cm",
         ]
         writer = csv.DictWriter(target, fieldnames=fieldnames)
         writer.writeheader()
