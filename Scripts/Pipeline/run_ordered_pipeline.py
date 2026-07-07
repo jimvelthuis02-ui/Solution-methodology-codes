@@ -32,6 +32,7 @@ COLUMN_MAX_HEIGHT = 770.0
 TOP_BEAM_HEIGHT = 16.0
 MAX_USED_HEIGHT_BASE = COLUMN_MAX_HEIGHT - TOP_BEAM_HEIGHT
 MIN_BEAMS_PER_COLUMN = 3
+MIN_LOCATIONS_PER_COLUMN = 4
 BEAM_HEIGHT = 16.0
 BEAM_RELOCATION_TOLERANCE_CM = 0.0
 
@@ -372,6 +373,8 @@ def _allocate_layout_by_column(
         return list(candidates)
 
     slot_sizes_desc = sorted(target_exact_counts.keys(), reverse=True)
+    smallest_slot_size = min(slot_sizes_desc) if slot_sizes_desc else 0.0
+    minimum_locations = max(int(MIN_LOCATIONS_PER_COLUMN), 1)
     for slot_size in slot_sizes_desc:
         needed = int(target_exact_counts.get(slot_size, 0))
         while needed > 0:
@@ -389,6 +392,16 @@ def _allocate_layout_by_column(
                 proposed_used = used_height_by_column.get(column_key, 0.0) + slot_size
                 if proposed_used > allowed_after + 1e-9:
                     continue
+
+                # Keep room to reach minimum locations in this column by allowing
+                # the remaining mandatory slots at the smallest available size.
+                remaining_to_min = max(minimum_locations - next_count, 0)
+                if remaining_to_min > 0 and smallest_slot_size > 0.0:
+                    future_count = next_count + remaining_to_min
+                    future_allowed = MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(future_count - 1, MIN_BEAMS_PER_COLUMN)
+                    future_used = proposed_used + (remaining_to_min * smallest_slot_size)
+                    if future_used > future_allowed + 1e-9:
+                        continue
 
                 remaining_after = allowed_after - proposed_used
                 projected_fill = proposed_used / max(allowed_after, 1e-9)
@@ -791,9 +804,10 @@ def _beam_relocations(
     proposed_units: set[str],
     current_unit_heights: dict[str, float],
     proposed_unit_heights: dict[str, float],
-) -> tuple[int, dict[str, int]]:
-    # Count relocations from physical beam height shifts within each segment.
-    # Any non-zero height delta is treated as a relocation.
+) -> tuple[int, dict[str, int], dict[str, int], dict[str, int]]:
+    # Count beam changes by segment: relocated, removed, and added.
+    # Relocations are unmatched baseline beams that can be paired with unmatched
+    # proposed beams in the same segment; leftovers are removals/additions.
     by_segment_current: dict[tuple[str, int, int], list[tuple[str, float]]] = defaultdict(list)
     by_segment_proposed: dict[tuple[str, int, int], list[tuple[str, float]]] = defaultdict(list)
 
@@ -818,6 +832,8 @@ def _beam_relocations(
         by_segment_proposed[(rack, c0, c1)].append((unit, float(height)))
 
     relocated_units: set[str] = set()
+    removed_units: set[str] = set()
+    added_units: set[str] = set()
 
     all_segments = set(by_segment_current.keys()) | set(by_segment_proposed.keys())
     for segment in all_segments:
@@ -826,35 +842,52 @@ def _beam_relocations(
 
         i = 0
         j = 0
+        unmatched_current: list[str] = []
+        unmatched_proposed: list[str] = []
         while i < len(current_segment) and j < len(proposed_segment):
-            _current_unit, current_height = current_segment[i]
-            _proposed_unit, proposed_height = proposed_segment[j]
+            current_unit, current_height = current_segment[i]
+            proposed_unit, proposed_height = proposed_segment[j]
             delta = current_height - proposed_height
             if abs(delta) <= 1e-9:
                 i += 1
                 j += 1
             elif delta < 0.0:
-                # Current baseline beam is too low to match any later proposed
-                # beam (which are sorted increasingly), so it must be relocated.
-                relocated_units.add(current_segment[i][0])
+                unmatched_current.append(current_unit)
                 i += 1
             else:
-                # Proposed beam is too low for the current baseline beam; advance
-                # proposed pointer to seek a potential match at a higher elevation.
+                unmatched_proposed.append(proposed_unit)
                 j += 1
 
         while i < len(current_segment):
-            relocated_units.add(current_segment[i][0])
+            unmatched_current.append(current_segment[i][0])
             i += 1
+        while j < len(proposed_segment):
+            unmatched_proposed.append(proposed_segment[j][0])
+            j += 1
+
+        relocations_in_segment = min(len(unmatched_current), len(unmatched_proposed))
+        relocated_units.update(unmatched_current[:relocations_in_segment])
+        removed_units.update(unmatched_current[relocations_in_segment:])
+        added_units.update(unmatched_proposed[relocations_in_segment:])
 
     relocation_total = len(relocated_units)
 
-    per_column: dict[str, int] = defaultdict(int)
+    per_column_relocated: dict[str, int] = defaultdict(int)
     for beam_unit in relocated_units:
         for column_key in _beam_unit_columns(beam_unit):
-            per_column[column_key] += 1
+            per_column_relocated[column_key] += 1
 
-    return relocation_total, dict(per_column)
+    per_column_removed: dict[str, int] = defaultdict(int)
+    for beam_unit in removed_units:
+        for column_key in _beam_unit_columns(beam_unit):
+            per_column_removed[column_key] += 1
+
+    per_column_added: dict[str, int] = defaultdict(int)
+    for beam_unit in added_units:
+        for column_key in _beam_unit_columns(beam_unit):
+            per_column_added[column_key] += 1
+
+    return relocation_total, dict(per_column_relocated), dict(per_column_removed), dict(per_column_added)
 
 
 def _initial_beam_grid_counts(
