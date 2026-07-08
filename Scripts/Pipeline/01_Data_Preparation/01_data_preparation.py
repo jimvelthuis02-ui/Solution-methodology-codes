@@ -339,6 +339,8 @@ def build_beam_grid_map() -> Path:
         row_label = str(beam_segment.get("Row", "")).strip()
         beam_coordinate = str(beam_segment.get("Beam_Coordinate", "")).strip()
         spanned_locations = str(beam_segment.get("Spanned_Locations", "")).strip()
+        column_start = str(beam_segment.get("Column_Start", "")).strip()
+        column_end = str(beam_segment.get("Column_End", "")).strip()
 
         direct_height = beam_height_lookup.get(beam_coordinate)
         if direct_height is not None:
@@ -353,6 +355,8 @@ def build_beam_grid_map() -> Path:
             {
                 "Beam_Coordinate": beam_coordinate,
                 "Rack": rack,
+                "Column_Start": column_start,
+                "Column_End": column_end,
                 "Row": row_label,
                 "Beam_Column_Count": spanned_locations,
                 "Grid_Count": str(grid_counts_by_beam.get(beam_coordinate, 0)),
@@ -371,23 +375,9 @@ def build_beam_grid_map() -> Path:
         beam_coordinate = str(row.get("Beam_Coordinate", "")).strip()
         row["Beam_Height_Range_cm"] = beam_range_by_coordinate.get(beam_coordinate, "")
 
-    beam_file = BEAM_OUTPUT_DIR / "Beam_Segments.csv"
     location_file = BEAM_OUTPUT_DIR / "Location_Beam_Map.csv"
     beam_height_file = BEAM_OUTPUT_DIR / "Beam_Height_Coordinates.csv"
     summary_file = BEAM_OUTPUT_DIR / "Beam_Grid_Summary.csv"
-
-    with beam_file.open("w", newline="", encoding="utf-8") as target:
-        fieldnames = [
-            "Beam_Coordinate",
-            "Rack",
-            "Column_Start",
-            "Column_End",
-            "Row",
-            "Spanned_Locations",
-        ]
-        writer = csv.DictWriter(target, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(beam_segments)
 
     with location_file.open("w", newline="", encoding="utf-8") as target:
         fieldnames = [
@@ -409,6 +399,8 @@ def build_beam_grid_map() -> Path:
         fieldnames = [
             "Beam_Coordinate",
             "Rack",
+            "Column_Start",
+            "Column_End",
             "Row",
             "Beam_Column_Count",
             "Grid_Count",

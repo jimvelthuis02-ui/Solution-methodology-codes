@@ -11,13 +11,14 @@ import run_ordered_pipeline as common
 
 
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
-LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
-LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column.csv"
-LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location.csv"
+LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
+LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column_TopFilled.csv"
+LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location_TopFilled.csv"
 OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Objective_Layout_Recommendations.csv"
 MANAGEMENT_DECISION_FILE = common.STAGE8_OUTPUT_DIR / "Management_Decision_Table.csv"
 FINAL_LAYOUT_BY_COLUMN_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
 FINAL_LAYOUT_BY_LOCATION_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
+
 TOP_PER_OBJECTIVE = 3
 
 
@@ -40,6 +41,36 @@ def _robustness_rows() -> list[dict[str, str]]:
     if not ROBUSTNESS_SUMMARY_FILE.exists():
         raise FileNotFoundError(f"Missing robustness summary file: {ROBUSTNESS_SUMMARY_FILE}")
     return _read_csv(ROBUSTNESS_SUMMARY_FILE)
+
+
+def _final_column_fieldnames(rows: list[dict[str, str]]) -> list[str]:
+    base = [
+        "Layout_ID",
+        "Config_ID",
+        "Rack_Column",
+        "Beam_Count_Used",
+        "Allowed_Used_Height_cm",
+        "Assigned_Used_Height_cm",
+        "Remaining_Height_cm",
+        "Fill_Ratio",
+        "Beam_Relocations_In_Column",
+        "Removed_Beams_In_Column",
+        "Added_Beams_In_Column",
+        "Slot_Size_Distribution",
+    ]
+    topfill = [
+        "TopFill_Adjusted_Row",
+        "TopFill_Original_Top_Slot_cm",
+        "TopFill_Added_Height_cm",
+        "TopFill_Adjusted_Top_Slot_cm",
+    ]
+    has_topfill = any(
+        any(str(row.get(field, "")).strip() for field in topfill)
+        for row in rows
+    )
+    if has_topfill:
+        return [field for field in base if field != "Slot_Size_Distribution"] + topfill + ["Slot_Size_Distribution"]
+    return base
 
 
 def _count_unique_slot_sizes(layout_row: dict[str, str]) -> int:
@@ -294,6 +325,7 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
                 "Objective": objective,
                 "Recommended_Layout_ID": str(lead.get("Layout_ID", "")),
                 "Recommended_Config_ID": str(lead.get("Config_ID", "")),
+                "Recommended_Assigned_Locations_Total": str(lead.get("Assigned_Locations_Total", "")),
                 "Initial_Beams_Total": str(lead.get("Initial_Beams_Total", "")),
                 "Required_Beams_Total": str(lead.get("Required_Beams_Total", "")),
                 "Additional_Beams_Required": str(lead.get("Additional_Beams_Required", "")),
@@ -343,6 +375,7 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
             "Objective",
             "Recommended_Layout_ID",
             "Recommended_Config_ID",
+            "Recommended_Assigned_Locations_Total",
             "Initial_Beams_Total",
             "Required_Beams_Total",
             "Additional_Beams_Required",
@@ -378,20 +411,7 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
 
     common._write_csv_clean(
         FINAL_LAYOUT_BY_COLUMN_FILE,
-        [
-            "Layout_ID",
-            "Config_ID",
-            "Rack_Column",
-            "Beam_Count_Used",
-            "Allowed_Used_Height_cm",
-            "Assigned_Used_Height_cm",
-            "Remaining_Height_cm",
-            "Fill_Ratio",
-            "Beam_Relocations_In_Column",
-            "Removed_Beams_In_Column",
-            "Added_Beams_In_Column",
-            "Slot_Size_Distribution",
-        ],
+        _final_column_fieldnames(finalist_column_rows),
         finalist_column_rows,
     )
 
@@ -415,10 +435,10 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
 
 
 if __name__ == "__main__":
-    # Stage 8 entrypoint: produce objective-based recommendations for management.
+    # Stage 8 entrypoint: TopFilled-only recommendations for practical implementation output.
     recommendation_rows, finalist_column_rows, finalist_location_rows, management_rows = build_final_selection()
     print(
-        "Decision-support selection complete. "
+        "Decision-support selection complete (TopFilled). "
         f"Recommendation rows: {len(recommendation_rows)}, decision objectives: {len(management_rows)}, "
         f"recommended details: {len(finalist_column_rows)} columns / {len(finalist_location_rows)} locations."
     )

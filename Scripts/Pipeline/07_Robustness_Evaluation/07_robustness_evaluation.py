@@ -10,7 +10,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 import run_ordered_pipeline as common
 
 
-LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
+LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
 OUTPUT_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Scenario_Evaluation.csv"
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
 CAPACITY_CONSTRAINT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
@@ -150,6 +150,7 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
                 {
                     "Layout_ID": layout_id,
                     "Config_ID": str(layout.get("Config_ID", "")),
+                    "Assigned_Locations_Total": str(assigned_locations_total),
                     "SKU_Scenario": sku_scenario,
                     "SKU_Count": str(sku_count),
                     "Constraint_Satisfied": "YES" if constraint_satisfied else "NO",
@@ -177,6 +178,7 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
                 "Layout_ID": layout_id,
                 "Config_ID": str(layout.get("Config_ID", "")),
                 "Layout_Feasible": str(layout.get("Layout_Feasible", "")),
+                "Assigned_Locations_Total": str(assigned_locations_total),
                 "Mean_Occupancy_Rate": f"{(sum(occupancy_values) / len(occupancy_values)) if occupancy_values else 0.0:.6f}",
                 "Worst_Occupancy_Rate": f"{max(occupancy_values) if occupancy_values else 0.0:.6f}",
                 "Mean_Utilization_Rate": f"{(sum(utilization_values) / len(utilization_values)) if utilization_values else 0.0:.6f}",
@@ -200,6 +202,7 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
         [
             "Layout_ID",
             "Config_ID",
+            "Assigned_Locations_Total",
             "SKU_Scenario",
             "SKU_Count",
             "Constraint_Satisfied",
@@ -219,6 +222,7 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
             "Layout_ID",
             "Config_ID",
             "Layout_Feasible",
+            "Assigned_Locations_Total",
             "Mean_Occupancy_Rate",
             "Worst_Occupancy_Rate",
             "Mean_Utilization_Rate",
@@ -241,9 +245,9 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
 
 
 if __name__ == "__main__":
-    # Stage 7 entrypoint: produce detailed scenario checks and aggregated robustness.
+    # Stage 7 entrypoint: TopFilled-only robustness evaluation for practical implementation output.
     scenario_rows, robustness_rows = build_robustness_evaluation()
     print(
-        "Robustness evaluation complete. "
+        "Robustness evaluation complete (TopFilled). "
         f"Scenario rows: {len(scenario_rows)}, summary rows: {len(robustness_rows)}."
     )

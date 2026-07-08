@@ -1,5 +1,6 @@
 import csv
 from collections import defaultdict
+import os
 import sys
 from pathlib import Path
 
@@ -11,16 +12,53 @@ import run_ordered_pipeline as common
 
 
 OUTPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
-MAX_CANDIDATE_CONFIGURATIONS = 30
-NEAR_SLOT_TOLERANCE_CM = 5.0
-NEAR_DISTRIBUTION_TOLERANCE = 0.05
-FAMILY_SLOT_TOLERANCE_CM = 12.0
-FAMILY_DISTRIBUTION_TOLERANCE = 0.15
-FAMILY_MEAN_TOLERANCE_CM = 8.0
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+MAX_CANDIDATE_CONFIGURATIONS = _env_int("MAX_CANDIDATE_CONFIGURATIONS", 30)
+NEAR_SLOT_TOLERANCE_CM = _env_float("NEAR_SLOT_TOLERANCE_CM", 5.0)
+NEAR_DISTRIBUTION_TOLERANCE = _env_float("NEAR_DISTRIBUTION_TOLERANCE", 0.05)
+FAMILY_SLOT_TOLERANCE_CM = _env_float("FAMILY_SLOT_TOLERANCE_CM", 10.0)
+FAMILY_DISTRIBUTION_TOLERANCE = _env_float("FAMILY_DISTRIBUTION_TOLERANCE", 0.15)
+FAMILY_MEAN_TOLERANCE_CM = _env_float("FAMILY_MEAN_TOLERANCE_CM", 10.0)
+
+for _name, _value in (
+    ("NEAR_SLOT_TOLERANCE_CM", NEAR_SLOT_TOLERANCE_CM),
+    ("FAMILY_SLOT_TOLERANCE_CM", FAMILY_SLOT_TOLERANCE_CM),
+):
+    if abs((_value / 5.0) - round(_value / 5.0)) > 1e-9:
+        raise ValueError(f"{_name} must be in increments of 5 cm, got {_value}")
 
 
 def _read_stage3_rows() -> list[dict[str, str]]:
     """Read slot-size summaries from all Stage 3 clustering methods."""
+    merged_summary = common.SLOT_SIZE_ROOT / "Stage3_Slot_Size_Configuration_Summary_All.csv"
+    if merged_summary.exists():
+        with merged_summary.open("r", newline="", encoding="utf-8-sig") as source:
+            reader = csv.DictReader(source)
+            if reader.fieldnames is None:
+                return []
+            return list(reader)
+
     rows: list[dict[str, str]] = []
     method_summary_files = {
         "quantile_binning": "Quantile_Slot_Size_Configuration_Summary.csv",
@@ -28,7 +66,7 @@ def _read_stage3_rows() -> list[dict[str, str]]:
         "kmeans_clustering": "KMeans_Slot_Size_Configuration_Summary.csv",
     }
     for method in common.METHODS:
-        preferred = common.SLOT_SIZE_ROOT / method / method_summary_files.get(method, "Slot_Size_Configuration_Summary.csv")
+        preferred = common.SLOT_SIZE_ROOT / method_summary_files.get(method, "Slot_Size_Configuration_Summary.csv")
         legacy = common.SLOT_SIZE_ROOT / method / "Slot_Size_Configuration_Summary.csv"
         path = preferred if preferred.exists() else legacy
         if not path.exists():
@@ -170,6 +208,38 @@ def _candidate_sort_key(candidate: dict[str, object]) -> tuple[str, int, float, 
         _as_float(candidate.get("Slot_Size_Spread", 0.0)),
         _as_float(candidate.get("Weighted_Distribution_Spread", 0.0)),
     )
+
+
+def _select_method_balanced(candidates: list[dict[str, object]], limit: int) -> list[dict[str, object]]:
+    # Keep method diversity while taking the best-ranked candidates.
+    if limit <= 0 or not candidates:
+        return []
+
+    by_method: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for candidate in candidates:
+        by_method[str(candidate.get("Method", ""))].append(candidate)
+
+    for method in by_method:
+        by_method[method].sort(key=_candidate_score)
+
+    method_order = [method for method in common.METHODS if method in by_method]
+    if not method_order:
+        method_order = sorted(by_method.keys())
+
+    selected: list[dict[str, object]] = []
+    progressed = True
+    while progressed and len(selected) < limit:
+        progressed = False
+        for method in method_order:
+            pool = by_method.get(method, [])
+            if not pool:
+                continue
+            selected.append(pool.pop(0))
+            progressed = True
+            if len(selected) >= limit:
+                break
+
+    return selected
 
 
 def _is_family_similar(candidate: dict[str, object], anchor: dict[str, object]) -> bool:
@@ -322,13 +392,13 @@ def build_candidate_configuration_filtering() -> Path:
             status_by_id[candidate_id] = "PRUNED"
             prune_reason_by_id[candidate_id] = "Dominated by another family representative"
 
-    # Pass 4: method-balanced shortlist from surviving representatives.
+    # Pass 4: K-representative shortlist from surviving representatives.
     shortlist_pool = [
         candidate
         for candidate in active_family_representatives
         if status_by_id.get(str(candidate.get("Config_ID", "")).strip(), "") != "PRUNED"
     ]
-    shortlist_pool.sort(key=_candidate_sort_key)
+    shortlist_pool.sort(key=_candidate_score)
 
     if len(shortlist_pool) <= MAX_CANDIDATE_CONFIGURATIONS:
         shortlisted_ids = {
@@ -336,30 +406,61 @@ def build_candidate_configuration_filtering() -> Path:
             for candidate in shortlist_pool
         }
     else:
-        # Preserve diversity across methods before filling remaining slots.
-        by_method: dict[str, list[dict[str, object]]] = defaultdict(list)
+        # Preserve representativeness across K values first, then method diversity.
+        by_k: dict[int, list[dict[str, object]]] = defaultdict(list)
         for candidate in shortlist_pool:
-            by_method[str(candidate.get("Method", ""))].append(candidate)
+            by_k[_to_int(candidate.get("K"), 0)].append(candidate)
 
-        for method in by_method:
-            by_method[method].sort(key=_candidate_sort_key)
+        for k in by_k:
+            by_k[k].sort(key=_candidate_score)
+
+        k_values = sorted(by_k.keys())
+        total_pool = sum(len(by_k[k]) for k in k_values)
+
+        # Proportional quota by K (largest-remainder apportionment).
+        quota_by_k: dict[int, int] = {k: 0 for k in k_values}
+        remainders: list[tuple[float, int]] = []
+        assigned = 0
+        for k in k_values:
+            available = len(by_k[k])
+            raw = (MAX_CANDIDATE_CONFIGURATIONS * available) / max(total_pool, 1)
+            base = min(int(raw), available)
+            quota_by_k[k] = base
+            assigned += base
+            remainders.append((raw - base, k))
+
+        remaining_slots = MAX_CANDIDATE_CONFIGURATIONS - assigned
+        for _fraction, k in sorted(remainders, key=lambda item: (-item[0], item[1])):
+            if remaining_slots <= 0:
+                break
+            if quota_by_k[k] >= len(by_k[k]):
+                continue
+            quota_by_k[k] += 1
+            remaining_slots -= 1
 
         selected_candidates: list[dict[str, object]] = []
-        method_order = [method for method in common.METHODS if method in by_method]
-        if not method_order:
-            method_order = sorted(by_method.keys())
+        selected_ids: set[str] = set()
 
-        progressed = True
-        while progressed and len(selected_candidates) < MAX_CANDIDATE_CONFIGURATIONS:
-            progressed = False
-            for method in method_order:
-                pool = by_method.get(method, [])
-                if not pool:
+        # Within each K quota, preserve method diversity.
+        for k in k_values:
+            picked = _select_method_balanced(by_k[k], quota_by_k[k])
+            for candidate in picked:
+                candidate_id = str(candidate.get("Config_ID", "")).strip()
+                if candidate_id in selected_ids:
                     continue
-                selected_candidates.append(pool.pop(0))
-                progressed = True
-                if len(selected_candidates) >= MAX_CANDIDATE_CONFIGURATIONS:
-                    break
+                selected_candidates.append(candidate)
+                selected_ids.add(candidate_id)
+
+        # Fill any residual slots by overall best remaining score.
+        if len(selected_candidates) < MAX_CANDIDATE_CONFIGURATIONS:
+            remaining_candidates = [
+                candidate
+                for candidate in shortlist_pool
+                if str(candidate.get("Config_ID", "")).strip() not in selected_ids
+            ]
+            remaining_candidates.sort(key=_candidate_score)
+            need = MAX_CANDIDATE_CONFIGURATIONS - len(selected_candidates)
+            selected_candidates.extend(remaining_candidates[:need])
 
         shortlisted_ids = {
             str(candidate.get("Config_ID", "")).strip()
@@ -370,10 +471,10 @@ def build_candidate_configuration_filtering() -> Path:
         candidate_id = str(candidate.get("Config_ID", "")).strip()
         if candidate_id in shortlisted_ids:
             status_by_id[candidate_id] = "SHORTLISTED"
-            selection_reason_by_id[candidate_id] = "Family representative retained after duplicate/similarity/dominance filtering (method-balanced shortlist)"
+            selection_reason_by_id[candidate_id] = "Family representative retained after duplicate/similarity/dominance filtering (K-representative, method-balanced shortlist)"
         else:
             status_by_id[candidate_id] = "PRUNED"
-            prune_reason_by_id[candidate_id] = "Outside shortlist limit after method-balanced family selection"
+            prune_reason_by_id[candidate_id] = "Outside shortlist limit after K-representative method-balanced family selection"
 
     family_sizes: dict[str, int] = defaultdict(int)
     for candidate in candidate_rows:
