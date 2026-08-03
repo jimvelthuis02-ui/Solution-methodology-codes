@@ -1107,10 +1107,14 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             for column_key in layout_columns
         )
 
+        # Final feasibility must reflect the post-heuristic layout, not only the initial allocator step.
+        final_layout_feasible = feasible_layout and capacity_margin >= 0 and space_utilization <= 1.0
+
         summary_row = {
                 "Layout_ID": layout_id,
                 "Config_ID": config_id,
-                "Layout_Feasible": "YES" if feasible_layout else "NO",
+                "Layout_Feasible": "YES" if final_layout_feasible else "NO",
+                "Allocation_Feasible_Initial": "YES" if feasible_layout else "NO",
                 "Required_Locations_Total": str(required_locations_total),
                 "Total_Locations": str(assigned_total),
                 "Capacity_Margin": str(capacity_margin),
@@ -1242,6 +1246,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "Pre_Robustness_Rank",
         "Pre_Robustness_Prune_Reason",
         "Layout_Feasible",
+        "Allocation_Feasible_Initial",
         "Required_Locations_Total",
         "Total_Locations",
         "Capacity_Margin",

@@ -11,12 +11,14 @@ import run_ordered_pipeline as common
 
 
 LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
-OUTPUT_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Scenario_Evaluation.csv"
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
 CAPACITY_CONSTRAINT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
 
 
-OCCUPIED_LOCATION_SCENARIOS = common._build_occupied_location_count_scenarios([])
+# Stage 7 now evaluates only the baseline (100%) occupied-location demand.
+OCCUPIED_LOCATION_SCENARIOS = {
+    "Base_Count": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
+}
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -77,18 +79,20 @@ def _scenario_requirements_by_config() -> dict[tuple[str, str], dict[int, int]]:
         config_id = str(row.get("Config_ID", "")).strip()
         sku_scenario = str(row.get("SKU_Scenario", "")).strip()
         size = common._to_int_default(row.get("Representative_Slot_Size"), -1)
+        # Support both current and legacy Stage 5 headers to avoid silent zero requirements.
         required = common._to_int_default(row.get("Min_Required_Locations_At_Or_Above_Size"), 0)
+        if required <= 0:
+            required = common._to_int_default(row.get("Cumulative_Assigned_SKUs_At_Or_Above_Size"), 0)
         if config_id and sku_scenario and size >= 0:
             grouped[(config_id, sku_scenario)][size] = max(grouped[(config_id, sku_scenario)].get(size, 0), required)
     return dict(grouped)
 
 
-def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Evaluate each selected layout across low/base/high SKU scenarios."""
+def build_robustness_evaluation() -> list[dict[str, str]]:
+    """Evaluate each selected layout for the baseline (100%) SKU-count scenario."""
     layouts = _layouts()
     scenario_requirements = _scenario_requirements_by_config()
 
-    scenario_rows: list[dict[str, str]] = []
     robustness_rows: list[dict[str, str]] = []
 
     for layout in layouts:
@@ -146,22 +150,6 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
                 and slot_coverage_pass
             )
 
-            scenario_rows.append(
-                {
-                    "Layout_ID": layout_id,
-                    "Config_ID": str(layout.get("Config_ID", "")),
-                    "Assigned_Locations_Total": str(assigned_locations_total),
-                    "SKU_Scenario": sku_scenario,
-                    "SKU_Count": str(sku_count),
-                    "Constraint_Satisfied": "YES" if constraint_satisfied else "NO",
-                    "Occupancy_Rate": f"{occupancy:.6f}",
-                    "Utilization_Rate": f"{utilization:.6f}",
-                    "Capacity_Margin": str(capacity_margin),
-                    "Capacity_Ratio": f"{capacity_ratio:.6f}",
-                    "Normalized_Slack": f"{normalized_slack:.6f}",
-                }
-            )
-
             occupancy_values.append(occupancy)
             utilization_values.append(utilization)
             capacity_margin_values.append(capacity_margin)
@@ -196,25 +184,6 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
             }
         )
 
-    # Write scenario-level evaluation output.
-    _write_csv_preserve(
-        OUTPUT_FILE,
-        [
-            "Layout_ID",
-            "Config_ID",
-            "Assigned_Locations_Total",
-            "SKU_Scenario",
-            "SKU_Count",
-            "Constraint_Satisfied",
-            "Occupancy_Rate",
-            "Utilization_Rate",
-            "Capacity_Margin",
-            "Capacity_Ratio",
-            "Normalized_Slack",
-        ],
-        scenario_rows,
-    )
-
     # Write layout-level robustness summary used by final ranking.
     _write_csv_preserve(
         ROBUSTNESS_SUMMARY_FILE,
@@ -241,13 +210,13 @@ def build_robustness_evaluation() -> tuple[list[dict[str, str]], list[dict[str, 
         robustness_rows,
     )
 
-    return scenario_rows, robustness_rows
+    return robustness_rows
 
 
 if __name__ == "__main__":
     # Stage 7 entrypoint: TopFilled-only robustness evaluation for practical implementation output.
-    scenario_rows, robustness_rows = build_robustness_evaluation()
+    robustness_rows = build_robustness_evaluation()
     print(
         "Robustness evaluation complete (TopFilled). "
-        f"Scenario rows: {len(scenario_rows)}, summary rows: {len(robustness_rows)}."
+        f"Summary rows: {len(robustness_rows)}."
     )
