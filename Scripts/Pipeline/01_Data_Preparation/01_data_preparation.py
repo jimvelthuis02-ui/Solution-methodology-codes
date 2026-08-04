@@ -200,7 +200,6 @@ def build_beam_grid_map() -> Path:
 
             for seg_start, seg_end in segments:
                 supported_cols: list[int] = []
-                doorgang_columns: set[int] = set()
                 for col_num in range(seg_start, seg_end + 1):
                     key = (rack, col_num, row_label)
                     source_row = row_index.get(key)
@@ -208,9 +207,6 @@ def build_beam_grid_map() -> Path:
                     if source_row is not None:
                         beam_text = str(source_row.get("Beam column count", "")).strip()
                         beam_supported = beam_text != ""
-                        location_type = str(source_row.get("Location Type", "")).strip().lower()
-                        if "doorgang" in location_type:
-                            doorgang_columns.add(col_num)
                     if key in FORCED_BEAM_POINTS:
                         beam_supported = True
                     if key in DISABLED_BEAM_POINTS:
@@ -221,38 +217,43 @@ def build_beam_grid_map() -> Path:
                 if not supported_cols:
                     continue
 
-                # `span_cells` represents effective supported width. If a segment is
-                # partially blocked (e.g., doorgang), we use supported cells only.
-                structural_span_cells = seg_end - seg_start + 1
-                supported_span_cells = len(supported_cols)
-                terminal_column_missing = seg_end == 21 and seg_end not in supported_cols
-                if (doorgang_columns and supported_span_cells < structural_span_cells) or (
-                    terminal_column_missing and supported_span_cells < structural_span_cells
-                ):
-                    span_cells = supported_span_cells
-                else:
-                    span_cells = structural_span_cells
+                # Emit one beam object per contiguous supported run so span labels
+                # reflect the real physical span (for example 2-column instead of
+                # full 3-column when blocked by doorgang/split constraints).
+                contiguous_runs: list[tuple[int, int]] = []
+                run_start = supported_cols[0]
+                run_end = supported_cols[0]
+                for col_num in supported_cols[1:]:
+                    if col_num == run_end + 1:
+                        run_end = col_num
+                        continue
+                    contiguous_runs.append((run_start, run_end))
+                    run_start = col_num
+                    run_end = col_num
+                contiguous_runs.append((run_start, run_end))
 
-                start_col_str = f"{seg_start:02d}"
-                end_col_str = f"{seg_end:02d}"
-                beam_coordinate = f"{rack}[{start_col_str}-{end_col_str}]:{row_label}"
+                for run_start, run_end in contiguous_runs:
+                    start_col_str = f"{run_start:02d}"
+                    end_col_str = f"{run_end:02d}"
+                    span_cells = run_end - run_start + 1
+                    beam_coordinate = f"{rack}[{start_col_str}-{end_col_str}]:{row_label}"
 
-                beam_segments.append(
-                    {
-                        "Beam_Coordinate": beam_coordinate,
-                        "Rack": rack,
-                        "Column_Start": start_col_str,
-                        "Column_End": end_col_str,
-                        "Row": row_label,
-                        "Spanned_Locations": str(span_cells),
-                    }
-                )
+                    beam_segments.append(
+                        {
+                            "Beam_Coordinate": beam_coordinate,
+                            "Rack": rack,
+                            "Column_Start": start_col_str,
+                            "Column_End": end_col_str,
+                            "Row": row_label,
+                            "Spanned_Locations": str(span_cells),
+                        }
+                    )
 
-                for col_num in supported_cols:
-                    beam_for_location[(rack, col_num, row_label)] = {
-                        "Beam_Coordinate": beam_coordinate,
-                        "Spanned_Locations": str(span_cells),
-                    }
+                    for col_num in range(run_start, run_end + 1):
+                        beam_for_location[(rack, col_num, row_label)] = {
+                            "Beam_Coordinate": beam_coordinate,
+                            "Spanned_Locations": str(span_cells),
+                        }
 
     # Copy beam assignment to alias coordinates that must behave identically.
     for target_key, source_key in BEAM_ALIASES.items():

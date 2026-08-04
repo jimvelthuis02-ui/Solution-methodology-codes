@@ -34,7 +34,8 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-MAX_CANDIDATE_CONFIGURATIONS = _env_int("MAX_CANDIDATE_CONFIGURATIONS", 30)
+# Set to 0 (default) to disable shortlist capping and keep all surviving configurations.
+MAX_CANDIDATE_CONFIGURATIONS = _env_int("MAX_CANDIDATE_CONFIGURATIONS", 0)
 NEAR_SLOT_TOLERANCE_CM = _env_float("NEAR_SLOT_TOLERANCE_CM", 5.0)
 NEAR_DISTRIBUTION_TOLERANCE = _env_float("NEAR_DISTRIBUTION_TOLERANCE", 0.05)
 FAMILY_SLOT_TOLERANCE_CM = _env_float("FAMILY_SLOT_TOLERANCE_CM", 10.0)
@@ -400,7 +401,7 @@ def build_candidate_configuration_filtering() -> Path:
     ]
     shortlist_pool.sort(key=_candidate_score)
 
-    if len(shortlist_pool) <= MAX_CANDIDATE_CONFIGURATIONS:
+    if MAX_CANDIDATE_CONFIGURATIONS <= 0 or len(shortlist_pool) <= MAX_CANDIDATE_CONFIGURATIONS:
         shortlisted_ids = {
             str(candidate.get("Config_ID", "")).strip()
             for candidate in shortlist_pool

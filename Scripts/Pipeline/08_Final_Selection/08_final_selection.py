@@ -1,5 +1,4 @@
 import csv
-from collections import defaultdict
 import sys
 from pathlib import Path
 
@@ -14,17 +13,27 @@ ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustnes
 LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
 LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column_TopFilled.csv"
 LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location_TopFilled.csv"
-OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Objective_Layout_Recommendations.csv"
-MANAGEMENT_DECISION_FILE = common.STAGE8_OUTPUT_DIR / "Management_Decision_Table.csv"
+OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Candidate_Layout_Metric_Ranking.csv"
 FINAL_LAYOUT_BY_COLUMN_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
 FINAL_LAYOUT_BY_LOCATION_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
-
-TOP_PER_OBJECTIVE = 3
+LEGACY_OUTPUT_FILES = [
+    common.STAGE8_OUTPUT_DIR / "Objective_Layout_Recommendations.csv",
+    common.STAGE8_OUTPUT_DIR / "Management_Decision_Table.csv",
+]
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
     # Keep CSV read behavior consistent with shared pipeline helpers.
     return common._read_csv(path)
+
+
+def _write_csv_preserve(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    # Preserve explicit field order and duplicate-by-value rank columns for weighted-sum analysis.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(target, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _layout_map() -> dict[str, dict[str, str]]:
@@ -64,13 +73,74 @@ def _final_column_fieldnames(rows: list[dict[str, str]]) -> list[str]:
         "TopFill_Added_Height_cm",
         "TopFill_Adjusted_Top_Slot_cm",
     ]
-    has_topfill = any(
-        any(str(row.get(field, "")).strip() for field in topfill)
-        for row in rows
-    )
+    has_topfill = any(any(str(row.get(field, "")).strip() for field in topfill) for row in rows)
     if has_topfill:
         return [field for field in base if field != "Slot_Size_Distribution"] + topfill + ["Slot_Size_Distribution"]
     return base
+
+
+def _topfill_added_height_by_layout() -> dict[str, float]:
+    totals: dict[str, float] = {}
+    if not LAYOUT_BY_COLUMN_FILE.exists():
+        return totals
+
+    for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
+        layout_id = str(row.get("Layout_ID", "")).strip()
+        if not layout_id:
+            continue
+        totals[layout_id] = totals.get(layout_id, 0.0) + (common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0)
+    return totals
+
+
+def _source_slot_sizes_by_layout(layouts: dict[str, dict[str, str]]) -> dict[str, set[int]]:
+    # Parse the original configured slot sizes per layout before topfill adjustments.
+    by_layout: dict[str, set[int]] = {}
+    for layout_id, row in layouts.items():
+        source_text = str(row.get("Source_Slot_Sizes", "")).strip()
+        sizes: set[int] = set()
+        if source_text:
+            for token in source_text.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                size = common._to_int_default(token, -1)
+                if size >= 0:
+                    sizes.add(size)
+        by_layout[layout_id] = sizes
+    return by_layout
+
+
+def _topfill_extra_slot_size_variants_by_layout(
+    source_slot_sizes_by_layout: dict[str, set[int]],
+) -> dict[str, int]:
+    # Count distinct adjusted top slot sizes introduced by topfill that are not
+    # part of the original configured slot-size set for each layout.
+    extra_sizes_by_layout: dict[str, set[int]] = {}
+    if not LAYOUT_BY_COLUMN_FILE.exists():
+        return {}
+
+    for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
+        layout_id = str(row.get("Layout_ID", "")).strip()
+        if not layout_id:
+            continue
+
+        added_height = common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0
+        if added_height <= 0.0:
+            continue
+
+        adjusted_size = common._to_int_default(row.get("TopFill_Adjusted_Top_Slot_cm"), -1)
+        if adjusted_size < 0:
+            continue
+
+        original_sizes = source_slot_sizes_by_layout.get(layout_id, set())
+        if adjusted_size in original_sizes:
+            continue
+
+        if layout_id not in extra_sizes_by_layout:
+            extra_sizes_by_layout[layout_id] = set()
+        extra_sizes_by_layout[layout_id].add(adjusted_size)
+
+    return {layout_id: len(sizes) for layout_id, sizes in extra_sizes_by_layout.items()}
 
 
 def _count_unique_slot_sizes(layout_row: dict[str, str]) -> int:
@@ -91,60 +161,22 @@ def _count_unique_slot_sizes(layout_row: dict[str, str]) -> int:
     return len(values)
 
 
-def _to_recommendation_view(row: dict[str, str]) -> dict[str, str]:
-    space_utilization = common._to_float(row.get("Space_Utilization"))
-    if space_utilization is None:
-        space_utilization = common._to_float(row.get("Mean_Utilization_Rate")) or 0.0
-
-    worst_case_capacity_margin = common._to_int_default(
-        row.get("Worst_Case_Capacity_Margin") or row.get("Worst_Capacity_Margin"),
-        0,
-    )
-
-    return {
-        "Layout_ID": str(row.get("Layout_ID", "")),
-        "Config_ID": str(row.get("Config_ID", "")),
-        "Space_Utilization": f"{space_utilization:.6f}",
-        "Mean_Occupancy_Rate": f"{common._to_float(row.get('Mean_Occupancy_Rate')) or 0.0:.6f}",
-        "Worst_Occupancy_Rate": f"{common._to_float(row.get('Worst_Occupancy_Rate')) or 0.0:.6f}",
-        "Robustness": f"{common._to_float(row.get('Robustness')) or 0.0:.6f}",
-        "Minimum_Normalized_Slack": f"{common._to_float(row.get('Minimum_Normalized_Slack')) or 0.0:.6f}",
-        "Worst_Case_Capacity_Margin": str(worst_case_capacity_margin),
-        "Minimum_Capacity_Ratio": f"{common._to_float(row.get('Minimum_Capacity_Ratio')) or 0.0:.6f}",
-        "Beam_Relocations_Total": str(common._to_int_default(row.get("Beam_Relocations_Total"), 0)),
-        "Initial_Beams_Total": str(common._to_int_default(row.get("Initial_Beams_Total"), 0)),
-        "Required_Beams_Total": str(common._to_int_default(row.get("Required_Beams_Total"), 0)),
-        "Additional_Beams_Required": str(common._to_int_default(row.get("Additional_Beams_Required"), 0)),
-        "Initial_Grids_Total": str(common._to_int_default(row.get("Initial_Grids_Total"), 0)),
-        "Required_Grids_Total": str(common._to_int_default(row.get("Required_Grids_Total"), 0)),
-        "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
-        "Unique_Slot_Sizes_Count": str(common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0)),
-        "Assigned_Locations_Total": str(
-            common._to_int_default(row.get("Assigned_Locations_Total") or row.get("Total_Locations"), 0)
-        ),
-        "Space_Left": f"{common._to_float(row.get('Space_Left')) or 0.0:.3f}",
-    }
-
-
-def _normalize(values: list[float], higher_is_better: bool) -> list[float]:
+def _dense_ranks(values: list[float], higher_is_better: bool) -> list[int]:
     if not values:
         return []
-    min_value = min(values)
-    max_value = max(values)
-    if abs(max_value - min_value) <= 1e-12:
-        return [1.0 for _ in values]
-    if higher_is_better:
-        return [(value - min_value) / (max_value - min_value) for value in values]
-    return [(max_value - value) / (max_value - min_value) for value in values]
+    ordered_unique = sorted(set(values), reverse=higher_is_better)
+    value_to_rank = {value: index for index, value in enumerate(ordered_unique, start=1)}
+    return [value_to_rank[value] for value in values]
 
 
-def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
-    """Build objective-specific recommendations instead of one strict overall winner."""
+def build_final_selection() -> list[dict[str, str]]:
+    """Build a full all-candidate metric table with per-metric ranks for weighted-sum analysis."""
     robustness_rows = _robustness_rows()
     layouts = _layout_map()
+    topfill_added_height = _topfill_added_height_by_layout()
+    source_slot_sizes = _source_slot_sizes_by_layout(layouts)
+    topfill_extra_slot_size_variants = _topfill_extra_slot_size_variants_by_layout(source_slot_sizes)
 
-    recommendation_rows: list[dict[str, str]] = []
-    management_rows: list[dict[str, str]] = []
     joined_rows: list[dict[str, str]] = []
     # Join Stage 6 layout metadata with Stage 7 robustness metrics.
     for row in robustness_rows:
@@ -162,251 +194,117 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
         )
         joined_rows.append(merged)
 
-    eligible_rows = [
-        row
-        for row in joined_rows
-        if str(row.get("Layout_Feasible", "")).strip().upper() == "YES"
-    ]
+    candidate_rows: list[dict[str, str]] = []
+    for row in joined_rows:
+        implementation_effort_total = (
+            common._to_int_default(row.get("Beam_Relocations_Total"), 0)
+            + common._to_int_default(row.get("Additional_Beams_Required"), 0)
+            + common._to_int_default(row.get("Additional_Grids_Required"), 0)
+        )
 
-    def _top_rows(
-        rows: list[dict[str, str]],
-        sort_key,
-        objective_name: str,
-        rationale: str,
-    ) -> list[dict[str, str]]:
-        chosen = sorted(rows, key=sort_key)[:TOP_PER_OBJECTIVE]
-        formatted: list[dict[str, str]] = []
-        for idx, row in enumerate(chosen, start=1):
-            view = _to_recommendation_view(row)
-            view.update(
-                {
-                    "Objective": objective_name,
-                    "Objective_Rank": str(idx),
-                    "Selection_Rationale": rationale,
-                }
-            )
-            formatted.append(view)
-        return formatted
+        assigned_locations_total = common._to_int_default(
+            row.get("Assigned_Locations_Total") or row.get("Total_Locations"),
+            0,
+        )
+        required_locations_total = common._to_int_default(row.get("Required_Locations_Total"), 0)
 
-    util_rows = _top_rows(
-        eligible_rows,
-        lambda row: (
-            -(common._to_float(row.get("Space_Utilization")) or 0.0),
-            common._to_int_default(row.get("Beam_Relocations_Total"), 0),
-            common._to_float(row.get("Space_Left")) or 0.0,
-        ),
-        "A_Maximum_Space_Utilization",
-        "Highest vertical-space utilization with feasibility preserved",
-    )
-
-    effort_rows = _top_rows(
-        eligible_rows,
-        lambda row: (
-            common._to_int_default(row.get("Beam_Relocations_Total"), 0),
-            common._to_int_default(row.get("Additional_Beams_Required"), 0),
-            common._to_int_default(row.get("Additional_Grids_Required"), 0),
-            -(common._to_float(row.get("Space_Utilization")) or 0.0),
-        ),
-        "B_Minimum_Implementation_Effort",
-        "Lowest relocation and material-change burden",
-    )
-
-    standardization_rows = _top_rows(
-        eligible_rows,
-        lambda row: (
-            common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0),
-            common._to_int_default(row.get("Beam_Relocations_Total"), 0),
-            -(common._to_float(row.get("Space_Utilization")) or 0.0),
-        ),
-        "C_Maximum_Standardization",
-        "Fewest unique slot sizes while maintaining feasible performance",
-    )
-
-    robust_rows = _top_rows(
-        eligible_rows,
-        lambda row: (
-            -(common._to_float(row.get("Minimum_Normalized_Slack")) or 0.0),
-            -common._to_int_default(row.get("Worst_Case_Capacity_Margin") or row.get("Worst_Capacity_Margin"), 0),
-            -(common._to_float(row.get("Minimum_Capacity_Ratio")) or 0.0),
-            common._to_int_default(row.get("Beam_Relocations_Total"), 0),
-        ),
-        "D_Robust_Layout",
-        "Strongest worst-case capacity buffer under SKU-count scenarios",
-    )
-
-    if eligible_rows:
-        util_values = [common._to_float(row.get("Space_Utilization")) or 0.0 for row in eligible_rows]
-        effort_values = [common._to_int_default(row.get("Implementation_Effort_Total"), 0) for row in eligible_rows]
-        robust_values = [common._to_float(row.get("Minimum_Normalized_Slack")) or 0.0 for row in eligible_rows]
-        std_values = [common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0) for row in eligible_rows]
-
-        util_norm = _normalize(util_values, higher_is_better=True)
-        effort_norm = _normalize([float(value) for value in effort_values], higher_is_better=False)
-        robust_norm = _normalize(robust_values, higher_is_better=True)
-        std_norm = _normalize([float(value) for value in std_values], higher_is_better=False)
-
-        for idx, row in enumerate(eligible_rows):
-            balanced_score = (util_norm[idx] + effort_norm[idx] + robust_norm[idx] + std_norm[idx]) / 4.0
-            row["Balanced_Score"] = f"{balanced_score:.6f}"
-
-    balanced_rows = _top_rows(
-        eligible_rows,
-        lambda row: (
-            -(common._to_float(row.get("Balanced_Score")) or 0.0),
-            -(common._to_float(row.get("Space_Utilization")) or 0.0),
-            common._to_int_default(row.get("Implementation_Effort_Total"), 0),
-        ),
-        "E_Best_Balanced_Alternative",
-        "Best compromise across utilization, implementation effort, robustness, and standardization",
-    )
-
-    recommendation_rows.extend(util_rows)
-    recommendation_rows.extend(effort_rows)
-    recommendation_rows.extend(standardization_rows)
-    recommendation_rows.extend(robust_rows)
-    recommendation_rows.extend(balanced_rows)
-
-    objective_groups: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for row in recommendation_rows:
-        objective_groups[str(row.get("Objective", ""))].append(row)
-
-    for objective, rows in objective_groups.items():
-        layout_labels = [
-            f"{row.get('Layout_ID', '')} ({row.get('Config_ID', '')})"
-            for row in rows
-        ]
-        key_advantages = []
-        key_disadvantages = []
-        if objective.startswith("A_"):
-            key_advantages.append("Highest space utilization")
-            key_disadvantages.append("Can require higher implementation effort")
-        elif objective.startswith("B_"):
-            key_advantages.append("Lowest relocation and added-material burden")
-            key_disadvantages.append("May sacrifice capacity efficiency")
-        elif objective.startswith("C_"):
-            key_advantages.append("Higher operational standardization")
-            key_disadvantages.append("May not maximize utilization or robustness buffer")
-        elif objective.startswith("D_"):
-            key_advantages.append("Strongest worst-case capacity safety margin")
-            key_disadvantages.append("May not minimize implementation effort")
-        else:
-            key_advantages.append("Balanced trade-off across major objectives")
-            key_disadvantages.append("Not best on any single KPI extreme")
-
-        relevant_kpis = []
-        for row in rows:
-            relevant_kpis.append(
-                " | ".join(
-                    [
-                        f"{row.get('Layout_ID', '')}",
-                        f"SU={row.get('Space_Utilization', '')}",
-                        f"OccM={row.get('Mean_Occupancy_Rate', '')}",
-                        f"Rob={row.get('Robustness', '')}",
-                        f"Slack={row.get('Minimum_Normalized_Slack', '')}",
-                        f"WCM={row.get('Worst_Case_Capacity_Margin', '')}",
-                        f"Reloc={row.get('Beam_Relocations_Total', '')}",
-                        f"InitBeams={row.get('Initial_Beams_Total', '')}",
-                        f"ReqBeams={row.get('Required_Beams_Total', '')}",
-                        f"Beams={row.get('Additional_Beams_Required', '')}",
-                        f"InitGrids={row.get('Initial_Grids_Total', '')}",
-                        f"ReqGrids={row.get('Required_Grids_Total', '')}",
-                        f"Grids={row.get('Additional_Grids_Required', '')}",
-                        f"Std={row.get('Unique_Slot_Sizes_Count', '')}",
-                        f"Assign={row.get('Assigned_Locations_Total', '')}",
-                        f"SpaceLeft={row.get('Space_Left', '')}",
-                    ]
-                )
-            )
-
-        lead = rows[0] if rows else {}
-
-        management_rows.append(
+        candidate_rows.append(
             {
-                "Objective": objective,
-                "Recommended_Layout_ID": str(lead.get("Layout_ID", "")),
-                "Recommended_Config_ID": str(lead.get("Config_ID", "")),
-                "Recommended_Assigned_Locations_Total": str(lead.get("Assigned_Locations_Total", "")),
-                "Initial_Beams_Total": str(lead.get("Initial_Beams_Total", "")),
-                "Required_Beams_Total": str(lead.get("Required_Beams_Total", "")),
-                "Additional_Beams_Required": str(lead.get("Additional_Beams_Required", "")),
-                "Initial_Grids_Total": str(lead.get("Initial_Grids_Total", "")),
-                "Required_Grids_Total": str(lead.get("Required_Grids_Total", "")),
-                "Additional_Grids_Required": str(lead.get("Additional_Grids_Required", "")),
-                "Recommended_Layouts": "; ".join(layout_labels),
-                "Key_Advantages": "; ".join(key_advantages),
-                "Key_Disadvantages": "; ".join(key_disadvantages),
-                "Relevant_KPI_Values": " || ".join(relevant_kpis),
+                "Layout_ID": str(row.get("Layout_ID", "")),
+                "Config_ID": str(row.get("Config_ID", "")),
+                "Assigned_Locations_Total": str(assigned_locations_total),
+                "Capacity_Margin": str(assigned_locations_total - required_locations_total),
+                "Occupancy_Rate": f"{common._to_float(row.get('Mean_Occupancy_Rate')) or 0.0:.6f}",
+                "Beam_Relocations_Total": str(common._to_int_default(row.get("Beam_Relocations_Total"), 0)),
+                "Additional_Beams_Required": str(common._to_int_default(row.get("Additional_Beams_Required"), 0)),
+                "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
+                "Implementation_Effort_Total": str(implementation_effort_total),
+                "Standardization_Unique_Slot_Sizes": str(common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0)),
+                "Worst_Slot_Coverage_Gap": str(common._to_int_default(row.get("Worst_Slot_Coverage_Gap"), 0)),
+                "Additional_Fill_Height_Total_cm": f"{topfill_added_height.get(str(row.get('Layout_ID', '')).strip(), 0.0):.0f}",
+                "Additional_Fill_Extra_Slot_Size_Variants": str(
+                    topfill_extra_slot_size_variants.get(str(row.get("Layout_ID", "")).strip(), 0)
+                ),
             }
         )
 
-    # Write objective-specific recommendation table.
-    common._write_csv_clean(
+    metric_rank_specs = [
+        ("Beam_Relocations_Total", "Rank_Beam_Relocations_Total", False),
+        ("Additional_Beams_Required", "Rank_Additional_Required_Beams", False),
+        ("Additional_Grids_Required", "Rank_Additional_Required_Grids", False),
+        ("Implementation_Effort_Total", "Rank_Implementation_Effort_Total", False),
+        ("Standardization_Unique_Slot_Sizes", "Rank_Standardization", False),
+        ("Worst_Slot_Coverage_Gap", "Rank_Worst_Slot_Coverage_Gap", False),
+        ("Additional_Fill_Height_Total_cm", "Rank_Additional_Fill_Height_Total_cm", False),
+        (
+            "Additional_Fill_Extra_Slot_Size_Variants",
+            "Rank_Additional_Fill_Extra_Slot_Size_Variants",
+            False,
+        ),
+        ("Occupancy_Rate", "Rank_Occupancy_Rate", False),
+    ]
+
+    for metric_field, rank_field, higher_is_better in metric_rank_specs:
+        values = [common._to_float(row.get(metric_field)) or 0.0 for row in candidate_rows]
+        ranks = _dense_ranks(values, higher_is_better=higher_is_better)
+        for row, rank in zip(candidate_rows, ranks):
+            row[rank_field] = str(rank)
+
+    # Keep output order stable: best robustness first, then implementation effort.
+    candidate_rows = sorted(
+        candidate_rows,
+        key=lambda row: (
+            common._to_int_default(row.get("Rank_Worst_Slot_Coverage_Gap"), 10**9),
+            common._to_int_default(row.get("Rank_Implementation_Effort_Total"), 10**9),
+            str(row.get("Layout_ID", "")),
+        ),
+    )
+
+    _write_csv_preserve(
         OUTPUT_FILE,
         [
-            "Objective",
-            "Objective_Rank",
             "Layout_ID",
             "Config_ID",
-            "Selection_Rationale",
-            "Space_Utilization",
-            "Mean_Occupancy_Rate",
-            "Worst_Occupancy_Rate",
-            "Robustness",
-            "Minimum_Normalized_Slack",
-            "Worst_Case_Capacity_Margin",
-            "Minimum_Capacity_Ratio",
-            "Beam_Relocations_Total",
-            "Initial_Beams_Total",
-            "Required_Beams_Total",
-            "Additional_Beams_Required",
-            "Initial_Grids_Total",
-            "Required_Grids_Total",
-            "Additional_Grids_Required",
-            "Unique_Slot_Sizes_Count",
             "Assigned_Locations_Total",
-            "Space_Left",
-        ],
-        recommendation_rows,
-    )
-
-    common._write_csv_clean(
-        MANAGEMENT_DECISION_FILE,
-        [
-            "Objective",
-            "Recommended_Layout_ID",
-            "Recommended_Config_ID",
-            "Recommended_Assigned_Locations_Total",
-            "Initial_Beams_Total",
-            "Required_Beams_Total",
+            "Capacity_Margin",
+            "Occupancy_Rate",
+            "Rank_Occupancy_Rate",
+            "Beam_Relocations_Total",
+            "Rank_Beam_Relocations_Total",
             "Additional_Beams_Required",
-            "Initial_Grids_Total",
-            "Required_Grids_Total",
+            "Rank_Additional_Required_Beams",
             "Additional_Grids_Required",
-            "Recommended_Layouts",
-            "Key_Advantages",
-            "Key_Disadvantages",
-            "Relevant_KPI_Values",
+            "Rank_Additional_Required_Grids",
+            "Implementation_Effort_Total",
+            "Rank_Implementation_Effort_Total",
+            "Standardization_Unique_Slot_Sizes",
+            "Rank_Standardization",
+            "Worst_Slot_Coverage_Gap",
+            "Rank_Worst_Slot_Coverage_Gap",
+            "Additional_Fill_Height_Total_cm",
+            "Rank_Additional_Fill_Height_Total_cm",
+            "Additional_Fill_Extra_Slot_Size_Variants",
+            "Rank_Additional_Fill_Extra_Slot_Size_Variants",
         ],
-        management_rows,
+        candidate_rows,
     )
 
-    recommended_ids = {
+    candidate_ids = {
         str(row.get("Layout_ID", "")).strip()
-        for row in recommendation_rows
+        for row in candidate_rows
+        if str(row.get("Layout_ID", "")).strip()
     }
 
     finalist_column_rows: list[dict[str, str]] = []
-    # Export details for all recommended layouts across objectives.
     if LAYOUT_BY_COLUMN_FILE.exists():
         for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-            if str(row.get("Layout_ID", "")).strip() in recommended_ids:
+            if str(row.get("Layout_ID", "")).strip() in candidate_ids:
                 finalist_column_rows.append(row)
 
     finalist_location_rows: list[dict[str, str]] = []
-    # Export location assignments for all recommended layouts.
     if LAYOUT_BY_LOCATION_FILE.exists():
         for row in _read_csv(LAYOUT_BY_LOCATION_FILE):
-            if str(row.get("Layout_ID", "")).strip() in recommended_ids:
+            if str(row.get("Layout_ID", "")).strip() in candidate_ids:
                 finalist_location_rows.append(row)
 
     common._write_csv_clean(
@@ -431,14 +329,17 @@ def build_final_selection() -> tuple[list[dict[str, str]], list[dict[str, str]],
         finalist_location_rows,
     )
 
-    return recommendation_rows, finalist_column_rows, finalist_location_rows, management_rows
+    for legacy_file in LEGACY_OUTPUT_FILES:
+        if legacy_file.exists():
+            legacy_file.unlink()
+
+    return candidate_rows
 
 
 if __name__ == "__main__":
-    # Stage 8 entrypoint: TopFilled-only recommendations for practical implementation output.
-    recommendation_rows, finalist_column_rows, finalist_location_rows, management_rows = build_final_selection()
+    # Stage 8 entrypoint: emit full candidate scorecard for weighted-sum analysis.
+    candidate_rows = build_final_selection()
     print(
-        "Decision-support selection complete (TopFilled). "
-        f"Recommendation rows: {len(recommendation_rows)}, decision objectives: {len(management_rows)}, "
-        f"recommended details: {len(finalist_column_rows)} columns / {len(finalist_location_rows)} locations."
+        "Decision-support candidate ranking complete (TopFilled). "
+        f"Candidate rows: {len(candidate_rows)}."
     )

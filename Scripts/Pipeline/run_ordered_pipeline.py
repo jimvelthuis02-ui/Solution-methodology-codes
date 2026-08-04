@@ -243,14 +243,16 @@ def _build_generated_layout_location_rows(
                     column_num = _to_int_default(column, 0)
                     beam_elevation = beam_bottom
                     # Below the doorgang height, the left-adjacent pair must be bridged with
-                    # a 2-column beam. Once the row height exceeds the doorgang threshold,
-                    # the full 3-column span can resume.
-                    if (
-                        seg_c1 == doorgang_column
-                        and column_num in {doorgang_column - 2, doorgang_column - 1}
-                        and beam_elevation < doorgang_height
-                    ):
-                        beam_coordinate = f"{seg_rack}[{doorgang_column - 2:02d}-{doorgang_column - 1:02d}]:{row_index:02d}"
+                    # a 2-column beam, while the doorgang column itself has no beam.
+                    # Once the row height exceeds the doorgang threshold, the full
+                    # 3-column span can resume.
+                    if seg_c1 == doorgang_column and beam_elevation <= doorgang_height:
+                        if column_num in {doorgang_column - 2, doorgang_column - 1}:
+                            beam_coordinate = f"{seg_rack}[{doorgang_column - 2:02d}-{doorgang_column - 1:02d}]:{row_index:02d}"
+                        elif column_num == doorgang_column:
+                            beam_coordinate = ""
+                        else:
+                            beam_coordinate = f"{seg_rack}[{seg_c0:02d}-{seg_c1:02d}]:{row_index:02d}"
                     else:
                         beam_coordinate = f"{seg_rack}[{seg_c0:02d}-{seg_c1:02d}]:{row_index:02d}"
                 else:
@@ -540,6 +542,29 @@ def _beam_unit_columns(beam_unit: str) -> set[str]:
     return {f"{rack}{col:02d}" for col in range(c0, c1 + 1)}
 
 
+def _beam_units_by_column(rows: list[dict[str, str]]) -> dict[str, set[str]]:
+    # Build explicit beam-unit membership per column from row-level coordinates.
+    # This preserves partial spans (for example around doorgang) for per-column
+    # relocation/add/remove accounting.
+    units_by_column: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        rack = str(row.get("Rack", "")).strip()
+        column = str(row.get("Column", "")).strip()
+        beam_coordinate = str(row.get("Beam_Coordinate", "")).strip()
+        if not rack or not column or not beam_coordinate:
+            continue
+
+        parsed = _parse_beam_coordinate_parts(beam_coordinate)
+        if parsed is None:
+            continue
+
+        seg_rack, c0, c1, level = parsed
+        unit = _format_beam_unit(seg_rack, c0, c1, level)
+        units_by_column[f"{rack}{column}"].add(unit)
+
+    return dict(units_by_column)
+
+
 def _beam_level_index(level: str) -> int | None:
     normalized = _normalize_beam_level(level)
     match = re.match(r"^(\d{2})", normalized)
@@ -606,7 +631,7 @@ def _build_current_beam_units_and_segments(
     prepared_rows: list[dict[str, str]] | None = None,
     beam_height_rows: list[dict[str, str]] | None = None,
 ) -> tuple[set[str], set[tuple[str, int, int]], dict[str, float]]:
-    # Build baseline beam units and horizontal segment definitions from Stage 1 map.
+    # Build baseline beam units and horizontal segment definitions from Stage 1 data.
     beam_units: set[str] = set()
     segments: set[tuple[str, int, int]] = set()
 
@@ -617,6 +642,33 @@ def _build_current_beam_units_and_segments(
         rack, c0, c1, level = parsed
         beam_units.add(_format_beam_unit(rack, c0, c1, level))
         segments.add((rack, c0, c1))
+
+    # Prefer structural segments from prepared rows so row-level partial beam spans
+    # (for example near doorgang) do not overwrite the rack's physical segmentation.
+    if prepared_rows is not None:
+        rack_columns: dict[str, set[int]] = defaultdict(set)
+        for row in prepared_rows:
+            rack = str(row.get("Rack", "")).strip()
+            col = _to_int_default(row.get("Column"), -1)
+            if rack and col >= 0:
+                rack_columns[rack].add(col)
+
+        structural_segments: set[tuple[str, int, int]] = set()
+        for rack, columns in rack_columns.items():
+            if not columns:
+                continue
+            max_col = max(columns)
+            start = 0
+            first_end = min(max_col, 3)
+            structural_segments.add((rack, start, first_end))
+            start = first_end + 1
+            while start <= max_col:
+                end = min(max_col, start + 2)
+                structural_segments.add((rack, start, end))
+                start = end + 1
+
+        if structural_segments:
+            segments = structural_segments
 
     if beam_height_rows is not None:
         mapped_heights: dict[str, list[float]] = defaultdict(list)
@@ -651,27 +703,42 @@ def _build_proposed_beam_units_from_layout_rows(
     layout_rows: list[dict[str, str]],
     segments: set[tuple[str, int, int]],
 ) -> tuple[set[str], dict[str, float]]:
-    # Infer proposed beam units by common row depth across each structural segment.
-    row_count_by_column: dict[str, int] = defaultdict(int)
-    for row in layout_rows:
-        rack = str(row.get("Rack", "")).strip()
-        column = str(row.get("Column", "")).strip()
-        row_index = _to_int_default(row.get("Row"), 0)
-        if rack == "" or column == "" or row_index <= 0:
-            continue
-        key = f"{rack}{column}"
-        if row_index > row_count_by_column.get(key, 0):
-            row_count_by_column[key] = row_index
-
+    # Infer proposed beam units directly from explicit generated beam coordinates.
+    # This preserves partial spans around doorgang/split areas instead of collapsing
+    # each segment to the minimum common row depth.
     proposed_units: set[str] = set()
-    for rack, c0, c1 in sorted(segments):
-        covered_columns = [f"{rack}{col:02d}" for col in range(c0, c1 + 1)]
-        max_common_rows = min((row_count_by_column.get(column_key, 0) for column_key in covered_columns), default=0)
-        for level in range(2, max_common_rows + 1):
-            proposed_units.add(_format_beam_unit(rack, c0, c1, f"{level:02d}"))
+    proposed_heights_samples: dict[str, list[float]] = defaultdict(list)
 
-    slot_sizes_by_column = _column_slot_sizes_from_rows(layout_rows, "Assigned_Slot_Size_cm")
-    proposed_heights = _beam_unit_heights_from_slot_sizes(proposed_units, slot_sizes_by_column)
+    for row in layout_rows:
+        beam_coordinate = str(row.get("Beam_Coordinate", "")).strip()
+        if not beam_coordinate:
+            continue
+        parsed = _parse_beam_coordinate_parts(beam_coordinate)
+        if parsed is None:
+            continue
+        rack, c0, c1, level = parsed
+        beam_unit = _format_beam_unit(rack, c0, c1, level)
+        proposed_units.add(beam_unit)
+
+        beam_height_range = str(row.get("Beam_Height_Range_cm", "")).strip()
+        if "-" in beam_height_range:
+            bottom_text = beam_height_range.split("-", 1)[0].strip()
+            bottom = _to_float(bottom_text)
+            if bottom is not None:
+                proposed_heights_samples[beam_unit].append(float(bottom))
+
+    proposed_heights = {
+        unit: (sum(samples) / len(samples))
+        for unit, samples in proposed_heights_samples.items()
+        if samples
+    }
+
+    # Fallback if height ranges are unexpectedly missing for some generated beams.
+    missing_units = [unit for unit in proposed_units if unit not in proposed_heights]
+    if missing_units:
+        slot_sizes_by_column = _column_slot_sizes_from_rows(layout_rows, "Assigned_Slot_Size_cm")
+        inferred = _beam_unit_heights_from_slot_sizes(set(missing_units), slot_sizes_by_column)
+        proposed_heights.update(inferred)
 
     return proposed_units, proposed_heights
 
@@ -804,10 +871,12 @@ def _beam_relocations(
     proposed_units: set[str],
     current_unit_heights: dict[str, float],
     proposed_unit_heights: dict[str, float],
+    current_units_by_column: dict[str, set[str]] | None = None,
+    proposed_units_by_column: dict[str, set[str]] | None = None,
 ) -> tuple[int, dict[str, int], dict[str, int], dict[str, int]]:
-    # Count beam changes by segment: relocated, removed, and added.
-    # Relocations are unmatched baseline beams that can be paired with unmatched
-    # proposed beams in the same segment; leftovers are removals/additions.
+    # Count beam changes by segment.
+    # Added/removed beams are driven by the difference in beam counts.
+    # Relocations are paired beams whose locations/heights do not match.
     by_segment_current: dict[tuple[str, int, int], list[tuple[str, float]]] = defaultdict(list)
     by_segment_proposed: dict[tuple[str, int, int], list[tuple[str, float]]] = defaultdict(list)
 
@@ -840,52 +909,50 @@ def _beam_relocations(
         current_segment = sorted(by_segment_current.get(segment, []), key=lambda item: item[1])
         proposed_segment = sorted(by_segment_proposed.get(segment, []), key=lambda item: item[1])
 
-        i = 0
-        j = 0
-        unmatched_current: list[str] = []
-        unmatched_proposed: list[str] = []
-        while i < len(current_segment) and j < len(proposed_segment):
-            current_unit, current_height = current_segment[i]
-            proposed_unit, proposed_height = proposed_segment[j]
-            delta = current_height - proposed_height
-            if abs(delta) <= 1e-9:
-                i += 1
-                j += 1
-            elif delta < 0.0:
-                unmatched_current.append(current_unit)
-                i += 1
-            else:
-                unmatched_proposed.append(proposed_unit)
-                j += 1
+        paired_count = min(len(current_segment), len(proposed_segment))
+        for index in range(paired_count):
+            current_unit, current_height = current_segment[index]
+            _proposed_unit, proposed_height = proposed_segment[index]
+            if abs(current_height - proposed_height) > 1e-9:
+                relocated_units.add(current_unit)
 
-        while i < len(current_segment):
-            unmatched_current.append(current_segment[i][0])
-            i += 1
-        while j < len(proposed_segment):
-            unmatched_proposed.append(proposed_segment[j][0])
-            j += 1
+        if len(current_segment) > paired_count:
+            removed_units.update(unit for unit, _height in current_segment[paired_count:])
 
-        relocations_in_segment = min(len(unmatched_current), len(unmatched_proposed))
-        relocated_units.update(unmatched_current[:relocations_in_segment])
-        removed_units.update(unmatched_current[relocations_in_segment:])
-        added_units.update(unmatched_proposed[relocations_in_segment:])
+        if len(proposed_segment) > paired_count:
+            added_units.update(unit for unit, _height in proposed_segment[paired_count:])
 
     relocation_total = len(relocated_units)
 
     per_column_relocated: dict[str, int] = defaultdict(int)
     for beam_unit in relocated_units:
-        for column_key in _beam_unit_columns(beam_unit):
-            per_column_relocated[column_key] += 1
+        if current_units_by_column is not None:
+            for column_key, column_units in current_units_by_column.items():
+                if beam_unit in column_units:
+                    per_column_relocated[column_key] += 1
+        else:
+            for column_key in _beam_unit_columns(beam_unit):
+                per_column_relocated[column_key] += 1
 
     per_column_removed: dict[str, int] = defaultdict(int)
     for beam_unit in removed_units:
-        for column_key in _beam_unit_columns(beam_unit):
-            per_column_removed[column_key] += 1
+        if current_units_by_column is not None:
+            for column_key, column_units in current_units_by_column.items():
+                if beam_unit in column_units:
+                    per_column_removed[column_key] += 1
+        else:
+            for column_key in _beam_unit_columns(beam_unit):
+                per_column_removed[column_key] += 1
 
     per_column_added: dict[str, int] = defaultdict(int)
     for beam_unit in added_units:
-        for column_key in _beam_unit_columns(beam_unit):
-            per_column_added[column_key] += 1
+        if proposed_units_by_column is not None:
+            for column_key, column_units in proposed_units_by_column.items():
+                if beam_unit in column_units:
+                    per_column_added[column_key] += 1
+        else:
+            for column_key in _beam_unit_columns(beam_unit):
+                per_column_added[column_key] += 1
 
     return relocation_total, dict(per_column_relocated), dict(per_column_removed), dict(per_column_added)
 

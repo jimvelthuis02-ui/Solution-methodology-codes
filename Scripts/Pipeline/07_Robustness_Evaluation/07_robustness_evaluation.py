@@ -36,22 +36,19 @@ def _write_csv_preserve(path: Path, fieldnames: list[str], rows: list[dict[str, 
 
 
 def _layouts() -> list[dict[str, str]]:
-    """Load Stage 6 candidate layout summary rows."""
+    """Load feasible Stage 6 layout summary rows for robustness evaluation."""
     if not LAYOUT_SUMMARY_FILE.exists():
         raise FileNotFoundError(f"Missing layout summary file: {LAYOUT_SUMMARY_FILE}")
     rows = _read_csv(LAYOUT_SUMMARY_FILE)
     if not rows:
         return rows
 
-    if "Pre_Robustness_Status" in rows[0]:
-        selected = [
-            row
-            for row in rows
-            if str(row.get("Pre_Robustness_Status", "")).strip().upper() == "SELECTED"
-        ]
-        return selected
-
-    return rows
+    feasible = [
+        row
+        for row in rows
+        if str(row.get("Layout_Feasible", "")).strip().upper() == "YES"
+    ]
+    return feasible if feasible else rows
 
 
 def _parse_slot_distribution(value: str) -> dict[int, int]:
@@ -174,6 +171,7 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 "Worst_Capacity_Margin": str(min(capacity_margin_values) if capacity_margin_values else 0),
                 "Minimum_Capacity_Ratio": f"{min(capacity_ratio_values) if capacity_ratio_values else 0.0:.6f}",
                 "Minimum_Normalized_Slack": f"{min(normalized_slack_values) if normalized_slack_values else 0.0:.6f}",
+                "Worst_Slot_Coverage_Gap": str(max(slot_gap_values) if slot_gap_values else 0),
                 "Robustness": f"{(satisfied_count / total_count) if total_count else 0.0:.6f}",
                 "Scenario_Pass_Count": str(satisfied_count),
                 "Scenario_Total_Count": str(total_count),
@@ -199,6 +197,7 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
             "Worst_Capacity_Margin",
             "Minimum_Capacity_Ratio",
             "Minimum_Normalized_Slack",
+            "Worst_Slot_Coverage_Gap",
             "Robustness",
             "Scenario_Pass_Count",
             "Scenario_Total_Count",

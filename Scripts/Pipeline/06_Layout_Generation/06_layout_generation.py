@@ -937,6 +937,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         prepared_rows,
         beam_height_rows,
     )
+    current_beam_units_by_column = common._beam_units_by_column(beam_map_rows)
     initial_beam_count, initial_grid_count = common._initial_beam_grid_counts(prepared_rows, current_beam_units)
     beam_preference = _beam_preference_by_column(current_beam_units)
     total_physical_locations = len(
@@ -1068,11 +1069,14 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             generated_location_rows,
             beam_segments,
         )
+        proposed_beam_units_by_column = common._beam_units_by_column(generated_location_rows)
         relocation_total, relocation_by_column, removed_by_column, added_by_column = common._beam_relocations(
             current_beam_units,
             proposed_beam_units,
             current_beam_heights,
             proposed_beam_heights,
+            current_beam_units_by_column,
+            proposed_beam_units_by_column,
         )
         required_beams, required_grids, additional_beams, additional_grids = common._material_requirements(
             initial_beam_count,
@@ -1242,9 +1246,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     summary_fieldnames = [
         "Layout_ID",
         "Config_ID",
-        "Pre_Robustness_Status",
-        "Pre_Robustness_Rank",
-        "Pre_Robustness_Prune_Reason",
         "Layout_Feasible",
         "Allocation_Feasible_Initial",
         "Required_Locations_Total",
