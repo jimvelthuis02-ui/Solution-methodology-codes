@@ -1,5 +1,4 @@
 import csv
-from collections import Counter
 from collections import defaultdict
 import sys
 from pathlib import Path
@@ -185,11 +184,12 @@ def _expand_layout_capacity(
     used_by_column: dict[str, float],
     column_keys: list[str],
     slot_sizes: list[float],
+    minimum_exact_counts: dict[float, int] | None,
     style: str,
     beam_preference: dict[str, int],
 ) -> tuple[dict[str, list[float]], dict[str, float]]:
-    # Fill remaining feasible height with a balanced mix across configured slot
-    # sizes so additional capacity does not collapse to only the smallest slots.
+    # Fill remaining feasible height while tracking the same slot-size
+    # proportions used for minimum required counts per configuration.
     expanded_assignments: dict[str, list[float]] = {
         column_key: list(column_assignments.get(column_key, []))
         for column_key in column_keys
@@ -218,6 +218,22 @@ def _expand_layout_capacity(
         }
         return compact_assignments, compact_used
 
+    target_weights_raw: dict[float, int] = {}
+    if isinstance(minimum_exact_counts, dict):
+        for slot_size in candidate_slot_sizes:
+            target_weights_raw[slot_size] = max(
+                common._to_int_default(minimum_exact_counts.get(slot_size), 0),
+                0,
+            )
+    target_weight_total = sum(target_weights_raw.values())
+    if target_weight_total <= 0:
+        target_shares = {slot_size: 1.0 / len(candidate_slot_sizes) for slot_size in candidate_slot_sizes}
+    else:
+        target_shares = {
+            slot_size: (target_weights_raw.get(slot_size, 0) / target_weight_total)
+            for slot_size in candidate_slot_sizes
+        }
+
     # First, enforce minimum locations per column (practical floor for rack layout).
     minimum_locations = max(int(common.MIN_LOCATIONS_PER_COLUMN), 1)
     smallest_slot = min(candidate_slot_sizes)
@@ -241,11 +257,18 @@ def _expand_layout_capacity(
         _ = beam_preference
         expansion_columns = _column_order_for_style(column_keys, expanded_used, style)
 
-        # Place one slot at a time, always picking the currently least-used slot
-        # size (ties -> larger size first) to keep expansion close to equal mix.
+        # Place one slot at a time, selecting the slot size most under target
+        # share among already added extras (ties -> larger size first).
         while len(tried_slot_sizes) < len(candidate_slot_sizes):
             remaining_sizes = [size for size in candidate_slot_sizes if size not in tried_slot_sizes]
-            target_size = min(remaining_sizes, key=lambda size: (added_counts.get(size, 0), -size))
+            total_added = sum(added_counts.values())
+            target_size = max(
+                remaining_sizes,
+                key=lambda size: (
+                    (target_shares.get(size, 0.0) * (total_added + 1)) - added_counts.get(size, 0),
+                    size,
+                ),
+            )
 
             placed_target = False
             for column_key in expansion_columns:
@@ -517,69 +540,6 @@ def _slot_signatures_from_location_rows(location_rows: list[dict[str, str]]) -> 
     return distribution, cumulative_signature
 
 
-def _slot_distribution_from_slots(slots: list[float]) -> str:
-    counts: dict[int, int] = defaultdict(int)
-    for value in slots:
-        counts[int(round(float(value)))] += 1
-    return "|".join(f"{size}:{count}" for size, count in sorted(counts.items()))
-
-
-def _slot_diff_signature(counter: Counter[int]) -> str:
-    items = [(size, count) for size, count in sorted(counter.items()) if count > 0]
-    if not items:
-        return ""
-    return "|".join(f"{size}:{count}" for size, count in items)
-
-
-def _build_heuristic_change_rows(
-    layout_id: str,
-    config_id: str,
-    column_keys: list[str],
-    before_assignments: dict[str, list[float]],
-    after_assignments: dict[str, list[float]],
-) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for column_key in column_keys:
-        before_slots = [float(v) for v in before_assignments.get(column_key, [])]
-        after_slots = [float(v) for v in after_assignments.get(column_key, [])]
-        before_counter = Counter(int(round(v)) for v in before_slots)
-        after_counter = Counter(int(round(v)) for v in after_slots)
-
-        added_counter: Counter[int] = Counter()
-        removed_counter: Counter[int] = Counter()
-        all_sizes = set(before_counter.keys()) | set(after_counter.keys())
-        for size in all_sizes:
-            delta = after_counter.get(size, 0) - before_counter.get(size, 0)
-            if delta > 0:
-                added_counter[size] = delta
-            elif delta < 0:
-                removed_counter[size] = -delta
-
-        changed = before_counter != after_counter
-        before_sum = sum(before_slots)
-        after_sum = sum(after_slots)
-
-        rows.append(
-            {
-                "Layout_ID": layout_id,
-                "Config_ID": config_id,
-                "Rack_Column": column_key,
-                "Heuristic_Changed": "YES" if changed else "NO",
-                "Before_Slot_Count": str(len(before_slots)),
-                "After_Slot_Count": str(len(after_slots)),
-                "Before_Used_Height_cm": f"{before_sum:.3f}",
-                "After_Used_Height_cm": f"{after_sum:.3f}",
-                "Delta_Used_Height_cm": f"{(after_sum - before_sum):.3f}",
-                "Before_Slot_Distribution": _slot_distribution_from_slots(before_slots),
-                "After_Slot_Distribution": _slot_distribution_from_slots(after_slots),
-                "Removed_Slots": _slot_diff_signature(removed_counter),
-                "Added_Slots": _slot_diff_signature(added_counter),
-            }
-        )
-
-    return rows
-
-
 def _enforce_min_locations_per_column(
     column_assignments: dict[str, list[float]],
     column_keys: list[str],
@@ -610,169 +570,6 @@ def _enforce_min_locations_per_column(
             slots.append(float(min_slot_size))
 
     return {key: values for key, values in adjusted.items() if values}
-
-
-def _segment_column_groups(
-    segments: set[tuple[str, int, int]],
-    doorgang_thresholds_by_rack: dict[str, tuple[int, float]] | None = None,
-) -> list[list[str]]:
-    # Build physical column groups that must share slot-profile adjustments.
-    groups: list[list[str]] = []
-    thresholds = doorgang_thresholds_by_rack or {}
-    for rack, c0, c1 in sorted(segments):
-        threshold = thresholds.get(rack)
-        if threshold is not None:
-            doorgang_column, _height = threshold
-            if c1 == doorgang_column and c0 == doorgang_column - 2:
-                groups.append([f"{rack}{col:02d}" for col in range(c0, c1)])
-                groups.append([f"{rack}{c1:02d}"])
-                continue
-        groups.append([f"{rack}{col:02d}" for col in range(c0, c1 + 1)])
-    return groups
-
-
-def _optimize_mutable_profile(
-    original_mutable_slots: list[float],
-    prefix_sum: float,
-    prefix_len: int,
-    config_slot_sizes: list[float],
-) -> list[float]:
-    # Heuristic profile optimizer: search nearby swap/add/remove combinations
-    # to minimize remaining height under the per-column beam-height allowance.
-    sizes = sorted({int(round(value)) for value in config_slot_sizes if float(value) > 0.0})
-    if not sizes:
-        return list(original_mutable_slots)
-
-    original = [int(round(value)) for value in original_mutable_slots]
-    original_counter = Counter(original)
-    size_index = {size: idx for idx, size in enumerate(sizes)}
-    original_vector = [original_counter.get(size, 0) for size in sizes]
-
-    min_mutable = max(int(common.MIN_LOCATIONS_PER_COLUMN) - prefix_len, 0)
-    current_mutable = len(original)
-    lower = max(min_mutable, current_mutable - 1)
-    upper = max(current_mutable + 3, lower)
-
-    best_counts: list[int] | None = None
-    best_score: tuple[float, int, int, int] | None = None
-
-    def _evaluate(candidate_counts: list[int], n_mutable: int, used_sum: int, capacity: float) -> None:
-        nonlocal best_counts, best_score
-        slack = capacity - used_sum
-        if slack < -1e-9:
-            return
-        diff = sum(abs(candidate_counts[idx] - original_vector[idx]) for idx in range(len(sizes)))
-        edit_ops = diff // 2
-        score = (slack, edit_ops, abs(n_mutable - current_mutable), -used_sum)
-        if best_score is None or score < best_score:
-            best_score = score
-            best_counts = list(candidate_counts)
-
-    for n_mutable in range(lower, upper + 1):
-        total_slots = prefix_len + n_mutable
-        allowed = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(total_slots - 1, common.MIN_BEAMS_PER_COLUMN)
-        capacity = allowed - float(prefix_sum)
-        if capacity < min(sizes) - 1e-9 and n_mutable > 0:
-            continue
-
-        counts = [0 for _ in sizes]
-
-        def _search(idx: int, remaining_slots: int, used_sum: int) -> None:
-            if idx == len(sizes) - 1:
-                size = sizes[idx]
-                if remaining_slots == 0:
-                    _evaluate(counts, n_mutable, used_sum, capacity)
-                    return
-                new_sum = used_sum + (remaining_slots * size)
-                if new_sum <= capacity + 1e-9:
-                    counts[idx] = remaining_slots
-                    _evaluate(counts, n_mutable, new_sum, capacity)
-                    counts[idx] = 0
-                return
-
-            size = sizes[idx]
-            max_take = remaining_slots
-            for take in range(max_take + 1):
-                new_sum = used_sum + (take * size)
-                if new_sum > capacity + 1e-9:
-                    break
-                counts[idx] = take
-                _search(idx + 1, remaining_slots - take, new_sum)
-            counts[idx] = 0
-
-        _search(0, n_mutable, 0)
-
-    if best_counts is None:
-        return list(original_mutable_slots)
-
-    target_counter = {sizes[idx]: best_counts[idx] for idx in range(len(sizes))}
-    mutable_result: list[int] = list(original)
-
-    for size in list(mutable_result):
-        if target_counter.get(size, 0) <= 0:
-            mutable_result.remove(size)
-        else:
-            target_counter[size] -= 1
-
-    for size, count in sorted(target_counter.items()):
-        if count > 0:
-            mutable_result.extend([size] * count)
-
-    return [float(value) for value in mutable_result]
-
-
-def _apply_segment_fill_heuristic(
-    column_assignments: dict[str, list[float]],
-    segments: set[tuple[str, int, int]],
-    config_slot_sizes: list[float],
-    fixed_prefix_by_column: dict[str, list[float]] | None = None,
-    doorgang_thresholds_by_rack: dict[str, tuple[int, float]] | None = None,
-) -> dict[str, list[float]]:
-    # Improve utilization by swap-based profile optimization per physical segment
-    # group while preserving segment coupling and fixed prefixes.
-    if not column_assignments:
-        return {}
-
-    fixed_prefix_by_column = fixed_prefix_by_column or {}
-    optimized = {
-        column_key: [float(value) for value in slots]
-        for column_key, slots in column_assignments.items()
-    }
-
-    for group in _segment_column_groups(segments, doorgang_thresholds_by_rack):
-        active_columns = [column_key for column_key in group if column_key in optimized]
-        if not active_columns:
-            continue
-
-        by_prefix: dict[tuple[int, ...], list[str]] = defaultdict(list)
-        for column_key in active_columns:
-            prefix_tuple = tuple(int(round(value)) for value in fixed_prefix_by_column.get(column_key, []))
-            by_prefix[prefix_tuple].append(column_key)
-
-        for prefix_tuple, prefix_columns in by_prefix.items():
-            representative = prefix_columns[0]
-            rep_slots = list(optimized.get(representative, []))
-            prefix = [float(value) for value in fixed_prefix_by_column.get(representative, [])]
-            prefix_len = len(prefix)
-            mutable = list(rep_slots[prefix_len:]) if prefix_len <= len(rep_slots) else []
-
-            improved_mutable = _optimize_mutable_profile(
-                mutable,
-                prefix_sum=sum(prefix),
-                prefix_len=prefix_len,
-                config_slot_sizes=config_slot_sizes,
-            )
-
-            for column_key in prefix_columns:
-                column_prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
-                candidate = column_prefix + list(improved_mutable)
-                total_slots = len(candidate)
-                allowed = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(total_slots - 1, common.MIN_BEAMS_PER_COLUMN)
-                used = sum(candidate)
-                if used <= allowed + 1e-9:
-                    optimized[column_key] = candidate
-
-    return optimized
 
 
 def _build_top_filled_layout_set(
@@ -878,19 +675,12 @@ def _build_top_filled_layout_set(
         added = space_added_by_layout.get(layout_id, 0.0)
         new_total_used = total_used + added
 
-        dist_sig, cum_sig = _slot_signatures_from_location_rows(location_rows_by_layout[layout_id])
-        minimum_required_counts = str(updated.get("Minimum_Required_Counts", ""))
-        additional_fill_sig = _additional_fill_signature_from_location_rows(
-            location_rows_by_layout[layout_id],
-            minimum_required_counts,
-        )
-
+        topfill_dist_sig, topfill_cum_sig = _slot_signatures_from_location_rows(location_rows_by_layout[layout_id])
         updated["Assigned_Used_Height_Total"] = f"{new_total_used:.3f}"
         updated["Space_Left"] = "0.000"
         updated["Percentage_Rack_Height_Used"] = f"{((new_total_used / total_allowed) * 100.0) if total_allowed > 0 else 0.0:.2f}"
-        updated["Layout_Slot_Size_Distribution"] = dist_sig
-        updated["Layout_Slot_Size_Cumulative_Coverage"] = cum_sig
-        updated["Additional_Fill_Counts"] = additional_fill_sig
+        updated["TopFill_Layout_Slot_Size_Distribution"] = topfill_dist_sig
+        updated["TopFill_Layout_Slot_Size_Cumulative_Coverage"] = topfill_cum_sig
         top_filled_summary_rows.append(updated)
 
     return top_filled_summary_rows, top_filled_column_rows, top_filled_location_rows
@@ -956,8 +746,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     candidate_layout_column_rows: list[dict[str, str]] = []
     candidate_layout_location_rows_all: list[dict[str, str]] = []
     candidate_layout_column_rows_all: list[dict[str, str]] = []
-    heuristic_change_rows_all: list[dict[str, str]] = []
-
     # Build layout variants for every shortlisted config and layout style.
     layout_counter = 1
     for config in configs:
@@ -996,6 +784,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             used_by_column=used_by_column,
             column_keys=layout_columns,
             slot_sizes=expansion_slot_sizes,
+            minimum_exact_counts=base_exact_counts,
             style=style,
             beam_preference=beam_preference,
         )
@@ -1020,21 +809,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             },
             doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
         )
-        before_heuristic_assignments = {
-            column_key: list(slots)
-            for column_key, slots in column_assignments.items()
-        }
-        column_assignments = _apply_segment_fill_heuristic(
-            column_assignments,
-            beam_segments,
-            config_slot_sizes=expansion_slot_sizes,
-            fixed_prefix_by_column={
-                column_key: [float(height)]
-                for column_key, height in fixed_doorgang_slot_by_column.items()
-                if column_key in column_assignments
-            },
-            doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
-        )
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
         if smallest_config_slot > 0.0:
             column_assignments = _enforce_min_locations_per_column(
@@ -1042,15 +816,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 layout_columns,
                 float(smallest_config_slot),
             )
-        heuristic_change_rows_all.extend(
-            _build_heuristic_change_rows(
-                layout_id=layout_id,
-                config_id=config_id,
-                column_keys=layout_columns,
-                before_assignments=before_heuristic_assignments,
-                after_assignments=column_assignments,
-            )
-        )
         used_by_column = {
             column_key: sum(float(value) for value in slots)
             for column_key, slots in column_assignments.items()
@@ -1266,6 +1031,8 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "Additional_Fill_Counts",
         "Layout_Slot_Size_Distribution",
         "Layout_Slot_Size_Cumulative_Coverage",
+        "TopFill_Layout_Slot_Size_Distribution",
+        "TopFill_Layout_Slot_Size_Cumulative_Coverage",
         "Source_Slot_Sizes",
         "Feasible_Columns_Considered_Total",
         "Feasible_Columns_Min",
@@ -1328,26 +1095,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             "Assigned_Slot_Size_cm",
         ],
         top_filled_location_rows,
-    )
-
-    _write_csv_preserve_with_fallback(
-        LAYOUT_DIAGNOSTICS_DIR / "Heuristic_Column_Changes_All.csv",
-        [
-            "Layout_ID",
-            "Config_ID",
-            "Rack_Column",
-            "Heuristic_Changed",
-            "Before_Slot_Count",
-            "After_Slot_Count",
-            "Before_Used_Height_cm",
-            "After_Used_Height_cm",
-            "Delta_Used_Height_cm",
-            "Before_Slot_Distribution",
-            "After_Slot_Distribution",
-            "Removed_Slots",
-            "Added_Slots",
-        ],
-        heuristic_change_rows_all,
     )
 
     return candidate_layout_rows, candidate_layout_column_rows, candidate_layout_location_rows

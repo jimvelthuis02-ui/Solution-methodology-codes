@@ -52,6 +52,17 @@ def _robustness_rows() -> list[dict[str, str]]:
     return _read_csv(ROBUSTNESS_SUMMARY_FILE)
 
 
+def _is_robustness_passing(row: dict[str, str]) -> bool:
+    # Final selection should only include layouts that pass all evaluated
+    # robustness scenarios (currently Base_Count only).
+    pass_count = common._to_int_default(row.get("Scenario_Pass_Count"), 0)
+    total_count = common._to_int_default(row.get("Scenario_Total_Count"), 0)
+    robustness_value = common._to_float(row.get("Robustness")) or 0.0
+    if total_count <= 0:
+        return False
+    return pass_count >= total_count and robustness_value > 0.0
+
+
 def _final_column_fieldnames(rows: list[dict[str, str]]) -> list[str]:
     base = [
         "Layout_ID",
@@ -143,6 +154,42 @@ def _topfill_extra_slot_size_variants_by_layout(
     return {layout_id: len(sizes) for layout_id, sizes in extra_sizes_by_layout.items()}
 
 
+def _topfill_extra_slot_sizes_by_layout(
+    source_slot_sizes_by_layout: dict[str, set[int]],
+) -> dict[str, str]:
+    # List distinct adjusted top slot sizes introduced by topfill that are not
+    # part of the original configured slot-size set for each layout.
+    extra_sizes_by_layout: dict[str, set[int]] = {}
+    if not LAYOUT_BY_COLUMN_FILE.exists():
+        return {}
+
+    for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
+        layout_id = str(row.get("Layout_ID", "")).strip()
+        if not layout_id:
+            continue
+
+        added_height = common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0
+        if added_height <= 0.0:
+            continue
+
+        adjusted_size = common._to_int_default(row.get("TopFill_Adjusted_Top_Slot_cm"), -1)
+        if adjusted_size < 0:
+            continue
+
+        original_sizes = source_slot_sizes_by_layout.get(layout_id, set())
+        if adjusted_size in original_sizes:
+            continue
+
+        if layout_id not in extra_sizes_by_layout:
+            extra_sizes_by_layout[layout_id] = set()
+        extra_sizes_by_layout[layout_id].add(adjusted_size)
+
+    return {
+        layout_id: ",".join(str(size) for size in sorted(sizes))
+        for layout_id, sizes in extra_sizes_by_layout.items()
+    }
+
+
 def _count_unique_slot_sizes(layout_row: dict[str, str]) -> int:
     # Standardization proxy: fewer unique slot sizes means higher standardization.
     source = str(layout_row.get("Source_Slot_Sizes", "")).strip()
@@ -171,11 +218,12 @@ def _dense_ranks(values: list[float], higher_is_better: bool) -> list[int]:
 
 def build_final_selection() -> list[dict[str, str]]:
     """Build a full all-candidate metric table with per-metric ranks for weighted-sum analysis."""
-    robustness_rows = _robustness_rows()
+    robustness_rows = [row for row in _robustness_rows() if _is_robustness_passing(row)]
     layouts = _layout_map()
     topfill_added_height = _topfill_added_height_by_layout()
     source_slot_sizes = _source_slot_sizes_by_layout(layouts)
     topfill_extra_slot_size_variants = _topfill_extra_slot_size_variants_by_layout(source_slot_sizes)
+    topfill_extra_slot_sizes = _topfill_extra_slot_sizes_by_layout(source_slot_sizes)
 
     joined_rows: list[dict[str, str]] = []
     # Join Stage 6 layout metadata with Stage 7 robustness metrics.
@@ -212,6 +260,7 @@ def build_final_selection() -> list[dict[str, str]]:
             {
                 "Layout_ID": str(row.get("Layout_ID", "")),
                 "Config_ID": str(row.get("Config_ID", "")),
+                "Source_Slot_Sizes": str(row.get("Source_Slot_Sizes", "")).strip(),
                 "Assigned_Locations_Total": str(assigned_locations_total),
                 "Capacity_Margin": str(assigned_locations_total - required_locations_total),
                 "Occupancy_Rate": f"{common._to_float(row.get('Mean_Occupancy_Rate')) or 0.0:.6f}",
@@ -220,10 +269,12 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
                 "Implementation_Effort_Total": str(implementation_effort_total),
                 "Standardization_Unique_Slot_Sizes": str(common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0)),
-                "Worst_Slot_Coverage_Gap": str(common._to_int_default(row.get("Worst_Slot_Coverage_Gap"), 0)),
                 "Additional_Fill_Height_Total_cm": f"{topfill_added_height.get(str(row.get('Layout_ID', '')).strip(), 0.0):.0f}",
                 "Additional_Fill_Extra_Slot_Size_Variants": str(
                     topfill_extra_slot_size_variants.get(str(row.get("Layout_ID", "")).strip(), 0)
+                ),
+                "Additional_Fill_Extra_Slot_Sizes": str(
+                    topfill_extra_slot_sizes.get(str(row.get("Layout_ID", "")).strip(), "")
                 ),
             }
         )
@@ -234,7 +285,6 @@ def build_final_selection() -> list[dict[str, str]]:
         ("Additional_Grids_Required", "Rank_Additional_Required_Grids", False),
         ("Implementation_Effort_Total", "Rank_Implementation_Effort_Total", False),
         ("Standardization_Unique_Slot_Sizes", "Rank_Standardization", False),
-        ("Worst_Slot_Coverage_Gap", "Rank_Worst_Slot_Coverage_Gap", False),
         ("Additional_Fill_Height_Total_cm", "Rank_Additional_Fill_Height_Total_cm", False),
         (
             "Additional_Fill_Extra_Slot_Size_Variants",
@@ -254,7 +304,6 @@ def build_final_selection() -> list[dict[str, str]]:
     candidate_rows = sorted(
         candidate_rows,
         key=lambda row: (
-            common._to_int_default(row.get("Rank_Worst_Slot_Coverage_Gap"), 10**9),
             common._to_int_default(row.get("Rank_Implementation_Effort_Total"), 10**9),
             str(row.get("Layout_ID", "")),
         ),
@@ -265,6 +314,7 @@ def build_final_selection() -> list[dict[str, str]]:
         [
             "Layout_ID",
             "Config_ID",
+            "Source_Slot_Sizes",
             "Assigned_Locations_Total",
             "Capacity_Margin",
             "Occupancy_Rate",
@@ -279,11 +329,10 @@ def build_final_selection() -> list[dict[str, str]]:
             "Rank_Implementation_Effort_Total",
             "Standardization_Unique_Slot_Sizes",
             "Rank_Standardization",
-            "Worst_Slot_Coverage_Gap",
-            "Rank_Worst_Slot_Coverage_Gap",
             "Additional_Fill_Height_Total_cm",
             "Rank_Additional_Fill_Height_Total_cm",
             "Additional_Fill_Extra_Slot_Size_Variants",
+            "Additional_Fill_Extra_Slot_Sizes",
             "Rank_Additional_Fill_Extra_Slot_Size_Variants",
         ],
         candidate_rows,

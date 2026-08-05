@@ -118,7 +118,9 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
 def build_capacity_determination() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Generate Stage 5 capacity outputs for all shortlisted configurations."""
     configs = _read_candidate_configurations()
-    occupied_location_scenarios = common._build_occupied_location_count_scenarios([])
+    occupied_location_scenarios = {
+        "Base_Count": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
+    }
 
     summary_rows: list[dict[str, str]] = []
     count_rows: list[dict[str, str]] = []

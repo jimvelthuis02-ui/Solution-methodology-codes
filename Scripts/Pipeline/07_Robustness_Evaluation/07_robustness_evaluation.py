@@ -116,11 +116,15 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
         capacity_margin_values: list[int] = []
         capacity_ratio_values: list[float] = []
         normalized_slack_values: list[float] = []
-        slot_gap_values: list[int] = []
         satisfied_count = 0
         total_count = 0
 
-        layout_slot_counts = _parse_slot_distribution(str(layout.get("Layout_Slot_Size_Distribution", "")))
+        layout_slot_counts = _parse_slot_distribution(
+            str(
+                layout.get("Base_Layout_Slot_Size_Distribution")
+                or layout.get("Layout_Slot_Size_Distribution", "")
+            )
+        )
 
         for sku_scenario, sku_count in OCCUPIED_LOCATION_SCENARIOS.items():
             occupancy = sku_count / max(assigned_locations_total, 1)
@@ -131,13 +135,12 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
             layout_feasible_flag = str(layout.get("Layout_Feasible", "YES")).strip().upper() == "YES"
 
             required_by_size = scenario_requirements.get((str(layout.get("Config_ID", "")), sku_scenario), {})
-            worst_gap = 0
+            slot_coverage_pass = True
             for size, required in required_by_size.items():
                 available = _available_at_or_above(layout_slot_counts, size)
-                gap = max(required - available, 0)
-                if gap > worst_gap:
-                    worst_gap = gap
-            slot_coverage_pass = worst_gap == 0
+                if required - available > 0:
+                    slot_coverage_pass = False
+                    break
 
             constraint_satisfied = (
                 layout_feasible_flag
@@ -152,7 +155,6 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
             capacity_margin_values.append(capacity_margin)
             capacity_ratio_values.append(capacity_ratio)
             normalized_slack_values.append(normalized_slack)
-            slot_gap_values.append(worst_gap)
             total_count += 1
             if constraint_satisfied:
                 satisfied_count += 1
@@ -171,7 +173,6 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 "Worst_Capacity_Margin": str(min(capacity_margin_values) if capacity_margin_values else 0),
                 "Minimum_Capacity_Ratio": f"{min(capacity_ratio_values) if capacity_ratio_values else 0.0:.6f}",
                 "Minimum_Normalized_Slack": f"{min(normalized_slack_values) if normalized_slack_values else 0.0:.6f}",
-                "Worst_Slot_Coverage_Gap": str(max(slot_gap_values) if slot_gap_values else 0),
                 "Robustness": f"{(satisfied_count / total_count) if total_count else 0.0:.6f}",
                 "Scenario_Pass_Count": str(satisfied_count),
                 "Scenario_Total_Count": str(total_count),
@@ -197,7 +198,6 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
             "Worst_Capacity_Margin",
             "Minimum_Capacity_Ratio",
             "Minimum_Normalized_Slack",
-            "Worst_Slot_Coverage_Gap",
             "Robustness",
             "Scenario_Pass_Count",
             "Scenario_Total_Count",
