@@ -11,7 +11,7 @@ OUTPUT_ROOT = ROOT / "Output"
 STAGE1_OUTPUT_DIR = OUTPUT_ROOT / "01_Data_Preparation"
 STAGE2_OUTPUT_DIR = OUTPUT_ROOT / "02_Scenario_Generation"
 STAGE3_OUTPUT_DIR = OUTPUT_ROOT / "03_Slot_Size_Generation"
-STAGE4_OUTPUT_DIR = OUTPUT_ROOT / "04_Candidate_Configuration_Filtering"
+STAGE4_OUTPUT_DIR = OUTPUT_ROOT / "04_Candidate_Configuration"
 STAGE5_OUTPUT_DIR = OUTPUT_ROOT / "05_Capacity_Determination"
 STAGE6_OUTPUT_DIR = OUTPUT_ROOT / "06_Layout_Generation"
 STAGE7_OUTPUT_DIR = OUTPUT_ROOT / "07_Robustness_Evaluation"
@@ -65,6 +65,24 @@ def _to_int_default(value: object | None, default: int = 0) -> int:
         return int(float(text))
     except ValueError:
         return default
+
+
+def _decode_excel_text(value: object | None) -> str:
+    # Normalize spreadsheet-forced text values of the form ="..." back to raw text.
+    text = "" if value is None else str(value).strip()
+    if len(text) >= 4 and text.startswith('="') and text.endswith('"'):
+        inner = text[2:-1]
+        return inner.replace('""', '"')
+    return text
+
+
+def _encode_excel_text(value: object | None) -> str:
+    # Force spreadsheet tools (notably Excel) to keep comma-separated values as text.
+    text = _decode_excel_text(value)
+    if text == "":
+        return ""
+    escaped = text.replace('"', '""')
+    return f'="{escaped}"'
 
 
 def _allocate_counts_from_percentages(total_count: int, percentages: list[float]) -> list[int]:
@@ -1021,7 +1039,7 @@ ORDERED_SCRIPTS = [
     "01_Data_Preparation/01_data_preparation.py",
     "02_Scenario_Generation/02_scenario_generation_weighted_delta.py",
     "03_Slot_Size_Generation/03_slot_size_generation_main.py",
-    "04_Candidate_Configuration_Filtering/04_candidate_configuration_filtering.py",
+    "04_Candidate_Configuration/04_candidate_configuration.py",
     "05_Capacity_Determination/05_capacity_determination.py",
     "06_Layout_Generation/06_layout_generation.py",
     "07_Robustness_Evaluation/07_robustness_evaluation.py",

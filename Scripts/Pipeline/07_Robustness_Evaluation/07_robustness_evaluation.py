@@ -93,8 +93,8 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
     robustness_rows: list[dict[str, str]] = []
 
     for layout in layouts:
-        layout_id = str(layout.get("Layout_ID", "")).strip()
-        if not layout_id:
+        config_id = str(layout.get("Config_ID", "")).strip()
+        if not config_id:
             continue
 
         assigned_locations_total = common._to_int_default(
@@ -162,8 +162,7 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
         # Aggregate scenario-level results into one robustness summary row per layout.
         robustness_rows.append(
             {
-                "Layout_ID": layout_id,
-                "Config_ID": str(layout.get("Config_ID", "")),
+                "Config_ID": config_id,
                 "Layout_Feasible": str(layout.get("Layout_Feasible", "")),
                 "Assigned_Locations_Total": str(assigned_locations_total),
                 "Mean_Occupancy_Rate": f"{(sum(occupancy_values) / len(occupancy_values)) if occupancy_values else 0.0:.6f}",
@@ -187,7 +186,6 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
     _write_csv_preserve(
         ROBUSTNESS_SUMMARY_FILE,
         [
-            "Layout_ID",
             "Config_ID",
             "Layout_Feasible",
             "Assigned_Locations_Total",

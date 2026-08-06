@@ -16,20 +16,21 @@ COUNT_OUTPUT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Sl
 
 
 def _read_candidate_configurations() -> list[dict[str, str]]:
-    """Read Stage 4 candidates and keep only shortlisted configurations."""
+    """Read all Stage 4 candidate configurations."""
     if not INPUT_FILE.exists():
         raise FileNotFoundError(f"Missing input file: {INPUT_FILE}")
     with INPUT_FILE.open("r", newline="", encoding="utf-8-sig") as source:
         reader = csv.DictReader(source)
         if reader.fieldnames is None:
             raise ValueError("Candidate configuration CSV has no header row.")
-        return [row for row in reader if str(row.get("Selection_Status", "")).strip() == "SHORTLISTED"]
+        return list(reader)
 
 
 def _parse_slot_sizes(value: str) -> list[float]:
     # Parse comma-separated representative slot sizes from Stage 4 output.
     sizes: list[float] = []
-    for item in str(value).split(","):
+    raw = common._decode_excel_text(value)
+    for item in raw.split(","):
         parsed = common._to_float(item)
         if parsed is not None:
             sizes.append(parsed)
@@ -39,7 +40,8 @@ def _parse_slot_sizes(value: str) -> list[float]:
 def _parse_distribution(value: str) -> list[float]:
     # Parse distribution values in either percentage or fraction form to 0-1 scale.
     distribution: list[float] = []
-    for item in str(value).split(","):
+    raw = common._decode_excel_text(value)
+    for item in raw.split(","):
         text = str(item).strip()
         if text.endswith("%"):
             text = text[:-1].strip()
@@ -51,10 +53,17 @@ def _parse_distribution(value: str) -> list[float]:
     return distribution
 
 
+def _distribution_value(config: dict[str, str]) -> str:
+    value = str(config.get("Relative Slot Size Distribution", "")).strip()
+    if value:
+        return value
+    return str(config.get("Relative_Slot_Size_Distribution", ""))
+
+
 def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, int]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Build per-scenario capacity summary and slot-size constraint rows for one config."""
     slot_sizes = _parse_slot_sizes(config.get("Slot_Sizes", ""))
-    distributions = _parse_distribution(config.get("Relative_Slot_Size_Distribution", ""))
+    distributions = _parse_distribution(_distribution_value(config))
     if not slot_sizes or not distributions:
         return [], []
 
@@ -89,7 +98,7 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
                 "SKU_Count": str(sku_count),
                 "Required_Locations_Total": str(exact_total),
                 "Exact_Count_Distribution": "|".join(f"{int(size)}:{count}" for size, count in sorted(exact_required_by_size.items())),
-                "Relative_Slot_Size_Distribution": config.get("Relative_Slot_Size_Distribution", ""),
+                "Relative_Slot_Size_Distribution": _distribution_value(config),
             }
         )
 

@@ -68,10 +68,9 @@ def _write_csv_clean_with_fallback(path: Path, fieldnames: list[str], rows: list
         return fallback
 
 
-def _shortlisted_configs() -> list[dict[str, str]]:
-    """Read Stage 4 configurations and keep only shortlisted candidates."""
-    configs = _read_csv(INPUT_CONFIG_FILE)
-    return [row for row in configs if str(row.get("Selection_Status", "")).strip() == "SHORTLISTED"]
+def _candidate_configs() -> list[dict[str, str]]:
+    """Read all Stage 4 candidate configurations."""
+    return _read_csv(INPUT_CONFIG_FILE)
 
 
 def _capacity_rows_by_config() -> dict[str, list[dict[str, str]]]:
@@ -717,7 +716,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     prepared_rows = _read_csv(INPUT_PREPARED)
     beam_map_rows = _read_csv(INPUT_LOCATION_BEAM_MAP)
     beam_height_rows = _read_csv(INPUT_BEAM_HEIGHT_COORDS)
-    configs = _shortlisted_configs()
+    configs = _candidate_configs()
     capacity_rows = _capacity_rows_by_config()
     doorgang_thresholds_by_rack = common._doorgang_thresholds_by_rack(prepared_rows)
     fixed_doorgang_slot_by_column = common._fixed_doorgang_slot_by_column(prepared_rows)
@@ -789,16 +788,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             beam_preference=beam_preference,
         )
 
-        column_assignments = common._optimize_column_slot_order_for_beam_preservation(
-            column_assignments,
-            beam_segments,
-            current_beam_heights,
-            fixed_prefix_by_column={
-                column_key: [float(height)]
-                for column_key, height in fixed_doorgang_slot_by_column.items()
-                if column_key in column_assignments
-            },
-        )
         column_assignments = _enforce_segment_uniform_slot_profiles(
             column_assignments,
             beam_segments,
@@ -903,7 +892,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 "Slot_Composition_Signature": "|".join(f"{int(size)}:{count}" for size, count in sorted(base_exact_counts.items())),
                 "Layout_Slot_Size_Distribution": _slot_distribution_signature(column_assignments),
                 "Layout_Slot_Size_Cumulative_Coverage": _cumulative_coverage_signature(column_assignments),
-                "Source_Slot_Sizes": ",".join(f"{int(size)}" for size in config_slot_sizes),
+                "Source_Slot_Sizes": common._encode_excel_text(",".join(f"{int(size)}" for size in config_slot_sizes)),
                 "Feasible_Columns_Considered_Total": str(int(allocation_diagnostics.get("Feasible_Columns_Considered_Total", 0.0))),
                 "Feasible_Columns_Min": str(int(allocation_diagnostics.get("Feasible_Columns_Min", 0.0))),
                 "Feasible_Columns_Max": str(int(allocation_diagnostics.get("Feasible_Columns_Max", 0.0))),
@@ -1008,8 +997,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 candidate_layout_rows.append({key: str(value) for key, value in summary.items()})
 
     # Write layout-level KPIs.
-    summary_fieldnames = [
-        "Layout_ID",
+    summary_export_fieldnames = [
         "Config_ID",
         "Layout_Feasible",
         "Allocation_Feasible_Initial",
@@ -1039,10 +1027,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "Feasible_Columns_Max",
         "Feasible_Columns_Average",
     ]
-    summary_output_rows = [
-        {field: str(row.get(field, "")) for field in summary_fieldnames}
-        for row in candidate_layout_rows
-    ]
+    summary_output_rows = [{key: str(value) for key, value in row.items()} for row in candidate_layout_rows]
 
     # Write a separate practical variant where each column's residual space is
     # absorbed by its highest assigned location.
@@ -1054,14 +1039,13 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
 
     _write_csv_preserve_with_fallback(
         LAYOUT_TOPFILLED_DIR / "Candidate_Layout_Summary_TopFilled.csv",
-        summary_fieldnames,
-        [{field: str(row.get(field, "")) for field in summary_fieldnames} for row in top_filled_summary_rows],
+        summary_export_fieldnames,
+        [{field: str(row.get(field, "")) for field in summary_export_fieldnames} for row in top_filled_summary_rows],
     )
 
     _write_csv_preserve_with_fallback(
         LAYOUT_TOPFILLED_DIR / "Candidate_Layout_By_Rack_Column_TopFilled.csv",
         [
-            "Layout_ID",
             "Config_ID",
             "Rack_Column",
             "Beam_Count_Used",
@@ -1078,13 +1062,34 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             "TopFill_Adjusted_Top_Slot_cm",
             "Slot_Size_Distribution",
         ],
-        top_filled_column_rows,
+        [
+            {
+                field: str(row.get(field, ""))
+                for field in [
+                    "Config_ID",
+                    "Rack_Column",
+                    "Beam_Count_Used",
+                    "Allowed_Used_Height_cm",
+                    "Assigned_Used_Height_cm",
+                    "Remaining_Height_cm",
+                    "Fill_Ratio",
+                    "Beam_Relocations_In_Column",
+                    "Removed_Beams_In_Column",
+                    "Added_Beams_In_Column",
+                    "TopFill_Adjusted_Row",
+                    "TopFill_Original_Top_Slot_cm",
+                    "TopFill_Added_Height_cm",
+                    "TopFill_Adjusted_Top_Slot_cm",
+                    "Slot_Size_Distribution",
+                ]
+            }
+            for row in top_filled_column_rows
+        ],
     )
 
     _write_csv_clean_with_fallback(
         LAYOUT_TOPFILLED_DIR / "Candidate_Layout_By_Location_TopFilled.csv",
         [
-            "Layout_ID",
             "Config_ID",
             "Location",
             "Rack",
@@ -1094,7 +1099,22 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             "Beam_Height_Range_cm",
             "Assigned_Slot_Size_cm",
         ],
-        top_filled_location_rows,
+        [
+            {
+                field: str(row.get(field, ""))
+                for field in [
+                    "Config_ID",
+                    "Location",
+                    "Rack",
+                    "Column",
+                    "Row",
+                    "Beam_Coordinate",
+                    "Beam_Height_Range_cm",
+                    "Assigned_Slot_Size_cm",
+                ]
+            }
+            for row in top_filled_location_rows
+        ],
     )
 
     return candidate_layout_rows, candidate_layout_column_rows, candidate_layout_location_rows

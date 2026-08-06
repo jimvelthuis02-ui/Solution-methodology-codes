@@ -37,11 +37,13 @@ def _write_csv_preserve(path: Path, fieldnames: list[str], rows: list[dict[str, 
 
 
 def _layout_map() -> dict[str, dict[str, str]]:
-    """Load Stage 6 layout summary rows keyed by layout ID."""
+    """Load Stage 6 layout summary rows keyed by config ID."""
     layouts: dict[str, dict[str, str]] = {}
     if LAYOUT_SUMMARY_FILE.exists():
         for row in _read_csv(LAYOUT_SUMMARY_FILE):
-            layouts[str(row.get("Layout_ID", "")).strip()] = row
+            config_id = str(row.get("Config_ID", "")).strip()
+            if config_id:
+                layouts[config_id] = row
     return layouts
 
 
@@ -65,7 +67,6 @@ def _is_robustness_passing(row: dict[str, str]) -> bool:
 
 def _final_column_fieldnames(rows: list[dict[str, str]]) -> list[str]:
     base = [
-        "Layout_ID",
         "Config_ID",
         "Rack_Column",
         "Beam_Count_Used",
@@ -96,10 +97,10 @@ def _topfill_added_height_by_layout() -> dict[str, float]:
         return totals
 
     for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-        layout_id = str(row.get("Layout_ID", "")).strip()
-        if not layout_id:
+        config_id = str(row.get("Config_ID", "")).strip()
+        if not config_id:
             continue
-        totals[layout_id] = totals.get(layout_id, 0.0) + (common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0)
+        totals[config_id] = totals.get(config_id, 0.0) + (common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0)
     return totals
 
 
@@ -107,7 +108,7 @@ def _source_slot_sizes_by_layout(layouts: dict[str, dict[str, str]]) -> dict[str
     # Parse the original configured slot sizes per layout before topfill adjustments.
     by_layout: dict[str, set[int]] = {}
     for layout_id, row in layouts.items():
-        source_text = str(row.get("Source_Slot_Sizes", "")).strip()
+        source_text = common._decode_excel_text(row.get("Source_Slot_Sizes", ""))
         sizes: set[int] = set()
         if source_text:
             for token in source_text.split(","):
@@ -131,7 +132,7 @@ def _topfill_extra_slot_size_variants_by_layout(
         return {}
 
     for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-        layout_id = str(row.get("Layout_ID", "")).strip()
+        layout_id = str(row.get("Config_ID", "")).strip()
         if not layout_id:
             continue
 
@@ -164,7 +165,7 @@ def _topfill_extra_slot_sizes_by_layout(
         return {}
 
     for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-        layout_id = str(row.get("Layout_ID", "")).strip()
+        layout_id = str(row.get("Config_ID", "")).strip()
         if not layout_id:
             continue
 
@@ -192,7 +193,7 @@ def _topfill_extra_slot_sizes_by_layout(
 
 def _count_unique_slot_sizes(layout_row: dict[str, str]) -> int:
     # Standardization proxy: fewer unique slot sizes means higher standardization.
-    source = str(layout_row.get("Source_Slot_Sizes", "")).strip()
+    source = common._decode_excel_text(layout_row.get("Source_Slot_Sizes", ""))
     if source:
         values = {token.strip() for token in source.split(",") if token.strip()}
         return len(values)
@@ -228,10 +229,10 @@ def build_final_selection() -> list[dict[str, str]]:
     joined_rows: list[dict[str, str]] = []
     # Join Stage 6 layout metadata with Stage 7 robustness metrics.
     for row in robustness_rows:
-        layout_id = str(row.get("Layout_ID", "")).strip()
-        if not layout_id:
+        config_id = str(row.get("Config_ID", "")).strip()
+        if not config_id:
             continue
-        layout = layouts.get(layout_id, {})
+        layout = layouts.get(config_id, {})
         merged = dict(layout)
         merged.update(row)
         merged["Unique_Slot_Sizes_Count"] = str(_count_unique_slot_sizes(layout))
@@ -258,9 +259,10 @@ def build_final_selection() -> list[dict[str, str]]:
 
         candidate_rows.append(
             {
-                "Layout_ID": str(row.get("Layout_ID", "")),
                 "Config_ID": str(row.get("Config_ID", "")),
-                "Source_Slot_Sizes": str(row.get("Source_Slot_Sizes", "")).strip(),
+                "Source_Slot_Sizes": common._encode_excel_text(
+                    common._decode_excel_text(row.get("Source_Slot_Sizes", ""))
+                ),
                 "Assigned_Locations_Total": str(assigned_locations_total),
                 "Capacity_Margin": str(assigned_locations_total - required_locations_total),
                 "Occupancy_Rate": f"{common._to_float(row.get('Mean_Occupancy_Rate')) or 0.0:.6f}",
@@ -269,12 +271,12 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
                 "Implementation_Effort_Total": str(implementation_effort_total),
                 "Standardization_Unique_Slot_Sizes": str(common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0)),
-                "Additional_Fill_Height_Total_cm": f"{topfill_added_height.get(str(row.get('Layout_ID', '')).strip(), 0.0):.0f}",
+                "Additional_Fill_Height_Total_cm": f"{topfill_added_height.get(str(row.get('Config_ID', '')).strip(), 0.0):.0f}",
                 "Additional_Fill_Extra_Slot_Size_Variants": str(
-                    topfill_extra_slot_size_variants.get(str(row.get("Layout_ID", "")).strip(), 0)
+                    topfill_extra_slot_size_variants.get(str(row.get("Config_ID", "")).strip(), 0)
                 ),
-                "Additional_Fill_Extra_Slot_Sizes": str(
-                    topfill_extra_slot_sizes.get(str(row.get("Layout_ID", "")).strip(), "")
+                "Additional_Fill_Extra_Slot_Sizes": common._encode_excel_text(
+                    str(topfill_extra_slot_sizes.get(str(row.get("Config_ID", "")).strip(), ""))
                 ),
             }
         )
@@ -305,14 +307,13 @@ def build_final_selection() -> list[dict[str, str]]:
         candidate_rows,
         key=lambda row: (
             common._to_int_default(row.get("Rank_Implementation_Effort_Total"), 10**9),
-            str(row.get("Layout_ID", "")),
+            str(row.get("Config_ID", "")),
         ),
     )
 
     _write_csv_preserve(
         OUTPUT_FILE,
         [
-            "Layout_ID",
             "Config_ID",
             "Source_Slot_Sizes",
             "Assigned_Locations_Total",
@@ -339,33 +340,36 @@ def build_final_selection() -> list[dict[str, str]]:
     )
 
     candidate_ids = {
-        str(row.get("Layout_ID", "")).strip()
+        str(row.get("Config_ID", "")).strip()
         for row in candidate_rows
-        if str(row.get("Layout_ID", "")).strip()
+        if str(row.get("Config_ID", "")).strip()
     }
 
     finalist_column_rows: list[dict[str, str]] = []
     if LAYOUT_BY_COLUMN_FILE.exists():
         for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-            if str(row.get("Layout_ID", "")).strip() in candidate_ids:
+            if str(row.get("Config_ID", "")).strip() in candidate_ids:
                 finalist_column_rows.append(row)
 
     finalist_location_rows: list[dict[str, str]] = []
     if LAYOUT_BY_LOCATION_FILE.exists():
         for row in _read_csv(LAYOUT_BY_LOCATION_FILE):
-            if str(row.get("Layout_ID", "")).strip() in candidate_ids:
+            if str(row.get("Config_ID", "")).strip() in candidate_ids:
                 finalist_location_rows.append(row)
 
+    final_column_fields = _final_column_fieldnames(finalist_column_rows)
     common._write_csv_clean(
         FINAL_LAYOUT_BY_COLUMN_FILE,
-        _final_column_fieldnames(finalist_column_rows),
-        finalist_column_rows,
+        final_column_fields,
+        [
+            {field: str(row.get(field, "")) for field in final_column_fields}
+            for row in finalist_column_rows
+        ],
     )
 
     common._write_csv_clean(
         FINAL_LAYOUT_BY_LOCATION_FILE,
         [
-            "Layout_ID",
             "Config_ID",
             "Location",
             "Rack",
@@ -375,7 +379,22 @@ def build_final_selection() -> list[dict[str, str]]:
             "Beam_Height_Range_cm",
             "Assigned_Slot_Size_cm",
         ],
-        finalist_location_rows,
+        [
+            {
+                field: str(row.get(field, ""))
+                for field in [
+                    "Config_ID",
+                    "Location",
+                    "Rack",
+                    "Column",
+                    "Row",
+                    "Beam_Coordinate",
+                    "Beam_Height_Range_cm",
+                    "Assigned_Slot_Size_cm",
+                ]
+            }
+            for row in finalist_location_rows
+        ],
     )
 
     for legacy_file in LEGACY_OUTPUT_FILES:
