@@ -22,10 +22,10 @@ def _load_base_stage7_module():
 def build_robustness_evaluation_greedy_anchor() -> Path:
     stage7 = _load_base_stage7_module()
 
-    output_dir = common.OUTPUT_ROOT / "07_Robustness_Evaluation_GreedyAnchored"
+    output_dir = common.OUTPUT_ROOT / "07_Robustness_Evaluation_Greedy"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    stage7.LAYOUT_SUMMARY_FILE = common.OUTPUT_ROOT / "06_Layout_Generation_GreedyAnchored" / "Candidate_Layout_Summary_TopFilled.csv"
+    stage7.LAYOUT_SUMMARY_FILE = common.OUTPUT_ROOT / "06_Layout_Generation_Greedy" / "Candidate_Layout_Summary_TopFilled.csv"
     stage7.ROBUSTNESS_SUMMARY_FILE = output_dir / "Candidate_Layout_Robustness_Summary.csv"
 
     stage7.build_robustness_evaluation()
@@ -34,4 +34,4 @@ def build_robustness_evaluation_greedy_anchor() -> Path:
 
 if __name__ == "__main__":
     output_path = build_robustness_evaluation_greedy_anchor()
-    print(f"Greedy anchored Stage 7 variant complete. Output written to: {output_path}")
+    print(f"Greedy Stage 7 variant complete. Output written to: {output_path}")

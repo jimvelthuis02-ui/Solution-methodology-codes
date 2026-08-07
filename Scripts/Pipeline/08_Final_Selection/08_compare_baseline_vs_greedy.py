@@ -10,9 +10,9 @@ import run_ordered_pipeline as common
 
 
 BASELINE_FILE = common.OUTPUT_ROOT / "08_Final_Selection" / "Candidate_Layout_Metric_Ranking.csv"
-GREEDY_FILE = common.OUTPUT_ROOT / "08_Final_Selection_GreedyAnchored" / "Candidate_Layout_Metric_Ranking.csv"
+GREEDY_FILE = common.OUTPUT_ROOT / "08_Final_Selection_Greedy" / "Candidate_Layout_Metric_Ranking.csv"
 OUTPUT_DIR = common.OUTPUT_ROOT / "08_Final_Selection_Comparison"
-OUTPUT_FILE = OUTPUT_DIR / "Baseline_vs_GreedyAnchored_Metric_Comparison.csv"
+OUTPUT_FILE = OUTPUT_DIR / "Baseline_vs_Greedy_Metric_Comparison.csv"
 
 
 METRIC_FIELDS = [
@@ -85,25 +85,25 @@ def build_comparison() -> Path:
         merged = {
             "Config_ID": config_id,
             "Present_In_Baseline": "YES" if config_id in baseline else "NO",
-            "Present_In_GreedyAnchored": "YES" if config_id in greedy else "NO",
+            "Present_In_Greedy": "YES" if config_id in greedy else "NO",
             "Baseline_Source_Slot_Sizes": _safe_text(base_row.get("Source_Slot_Sizes", "")),
-            "GreedyAnchored_Source_Slot_Sizes": _safe_text(greedy_row.get("Source_Slot_Sizes", "")),
+            "Greedy_Source_Slot_Sizes": _safe_text(greedy_row.get("Source_Slot_Sizes", "")),
             "Baseline_Additional_Fill_Extra_Slot_Sizes": _safe_text(base_row.get("Additional_Fill_Extra_Slot_Sizes", "")),
-            "GreedyAnchored_Additional_Fill_Extra_Slot_Sizes": _safe_text(greedy_row.get("Additional_Fill_Extra_Slot_Sizes", "")),
+            "Greedy_Additional_Fill_Extra_Slot_Sizes": _safe_text(greedy_row.get("Additional_Fill_Extra_Slot_Sizes", "")),
         }
 
         for field in METRIC_FIELDS:
             base_value = _as_float(base_row.get(field))
             greedy_value = _as_float(greedy_row.get(field))
             merged[f"Baseline_{field}"] = str(base_row.get(field, ""))
-            merged[f"GreedyAnchored_{field}"] = str(greedy_row.get(field, ""))
+            merged[f"Greedy_{field}"] = str(greedy_row.get(field, ""))
             merged[f"Delta_{field}"] = f"{(greedy_value - base_value):.6f}" if (config_id in baseline and config_id in greedy) else ""
 
         for field in RANK_FIELDS:
             base_rank = _as_int(base_row.get(field))
             greedy_rank = _as_int(greedy_row.get(field))
             merged[f"Baseline_{field}"] = str(base_row.get(field, ""))
-            merged[f"GreedyAnchored_{field}"] = str(greedy_row.get(field, ""))
+            merged[f"Greedy_{field}"] = str(greedy_row.get(field, ""))
             merged[f"Delta_{field}"] = str(greedy_rank - base_rank) if (config_id in baseline and config_id in greedy) else ""
 
         output_rows.append(merged)
@@ -111,22 +111,22 @@ def build_comparison() -> Path:
     fieldnames = [
         "Config_ID",
         "Present_In_Baseline",
-        "Present_In_GreedyAnchored",
+        "Present_In_Greedy",
         "Baseline_Source_Slot_Sizes",
-        "GreedyAnchored_Source_Slot_Sizes",
+        "Greedy_Source_Slot_Sizes",
         "Baseline_Additional_Fill_Extra_Slot_Sizes",
-        "GreedyAnchored_Additional_Fill_Extra_Slot_Sizes",
+        "Greedy_Additional_Fill_Extra_Slot_Sizes",
     ]
     for field in METRIC_FIELDS:
         fieldnames.extend([
             f"Baseline_{field}",
-            f"GreedyAnchored_{field}",
+            f"Greedy_{field}",
             f"Delta_{field}",
         ])
     for field in RANK_FIELDS:
         fieldnames.extend([
             f"Baseline_{field}",
-            f"GreedyAnchored_{field}",
+            f"Greedy_{field}",
             f"Delta_{field}",
         ])
 
@@ -140,4 +140,4 @@ def build_comparison() -> Path:
 
 if __name__ == "__main__":
     output_path = build_comparison()
-    print(f"Baseline vs greedy anchored comparison written to: {output_path}")
+    print(f"Baseline vs greedy comparison written to: {output_path}")

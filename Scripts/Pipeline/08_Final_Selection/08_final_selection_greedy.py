@@ -22,9 +22,9 @@ def _load_base_stage8_module():
 def build_final_selection_greedy_anchor() -> Path:
     stage8 = _load_base_stage8_module()
 
-    stage6_dir = common.OUTPUT_ROOT / "06_Layout_Generation_GreedyAnchored"
-    stage7_dir = common.OUTPUT_ROOT / "07_Robustness_Evaluation_GreedyAnchored"
-    output_dir = common.OUTPUT_ROOT / "08_Final_Selection_GreedyAnchored"
+    stage6_dir = common.OUTPUT_ROOT / "06_Layout_Generation_Greedy"
+    stage7_dir = common.OUTPUT_ROOT / "07_Robustness_Evaluation_Greedy"
+    output_dir = common.OUTPUT_ROOT / "08_Final_Selection_Greedy"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stage8.ROBUSTNESS_SUMMARY_FILE = stage7_dir / "Candidate_Layout_Robustness_Summary.csv"
@@ -34,6 +34,7 @@ def build_final_selection_greedy_anchor() -> Path:
     stage8.OUTPUT_FILE = output_dir / "Candidate_Layout_Metric_Ranking.csv"
     stage8.FINAL_LAYOUT_BY_COLUMN_FILE = output_dir / "Final_Layout_By_Rack_Column.csv"
     stage8.FINAL_LAYOUT_BY_LOCATION_FILE = output_dir / "Final_Layout_By_Location.csv"
+    stage8.FINAL_LAYOUT_BY_SEGMENT_FILE = output_dir / "Final_Layout_By_Segment.csv"
     stage8.LEGACY_OUTPUT_FILES = [
         output_dir / "Objective_Layout_Recommendations.csv",
         output_dir / "Management_Decision_Table.csv",
@@ -45,4 +46,4 @@ def build_final_selection_greedy_anchor() -> Path:
 
 if __name__ == "__main__":
     output_path = build_final_selection_greedy_anchor()
-    print(f"Greedy anchored Stage 8 variant complete. Output written to: {output_path}")
+    print(f"Greedy Stage 8 variant complete. Output written to: {output_path}")

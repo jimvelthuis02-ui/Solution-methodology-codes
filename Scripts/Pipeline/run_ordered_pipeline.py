@@ -2,6 +2,7 @@ import csv
 import math
 import re
 import runpy
+import time
 from functools import lru_cache
 from collections import defaultdict
 from pathlib import Path
@@ -1069,5 +1070,11 @@ def run_pipeline() -> None:
 
 if __name__ == "__main__":
     # Pipeline entrypoint for full ordered execution.
+    start_time = time.perf_counter()
     run_pipeline()
+    elapsed_seconds = time.perf_counter() - start_time
+    hours = int(elapsed_seconds // 3600)
+    minutes = int((elapsed_seconds % 3600) // 60)
+    seconds = elapsed_seconds % 60
     print("Ordered pipeline complete.")
+    print(f"Total runtime: {hours:02d}:{minutes:02d}:{seconds:06.3f} (hh:mm:ss.sss)")

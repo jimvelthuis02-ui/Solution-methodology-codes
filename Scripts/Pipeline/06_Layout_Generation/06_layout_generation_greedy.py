@@ -128,7 +128,7 @@ def _merge_fixed_prefixes(
 def build_layout_generation_greedy_anchor() -> Path:
     stage6 = _load_base_stage6_module()
 
-    output_dir = common.OUTPUT_ROOT / "06_Layout_Generation_GreedyAnchored"
+    output_dir = common.OUTPUT_ROOT / "06_Layout_Generation_Greedy"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stage6.LAYOUT_OUTPUT_DIR = output_dir
@@ -201,7 +201,7 @@ def build_layout_generation_greedy_anchor() -> Path:
     finally:
         common._allocate_layout_by_column = original_allocate
 
-    anchor_file = output_dir / "Greedy_Anchor_Fixed_Slots_Summary.csv"
+    anchor_file = output_dir / "Greedy_Fixed_Slots_Summary.csv"
     with anchor_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,

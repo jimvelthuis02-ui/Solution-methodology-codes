@@ -16,6 +16,7 @@ LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Locati
 OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Candidate_Layout_Metric_Ranking.csv"
 FINAL_LAYOUT_BY_COLUMN_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
 FINAL_LAYOUT_BY_LOCATION_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
+FINAL_LAYOUT_BY_SEGMENT_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Segment.csv"
 LEGACY_OUTPUT_FILES = [
     common.STAGE8_OUTPUT_DIR / "Objective_Layout_Recommendations.csv",
     common.STAGE8_OUTPUT_DIR / "Management_Decision_Table.csv",
@@ -217,6 +218,72 @@ def _dense_ranks(values: list[float], higher_is_better: bool) -> list[int]:
     return [value_to_rank[value] for value in values]
 
 
+def _segment_label(segment: tuple[str, int, int]) -> str:
+    rack, c0, c1 = segment
+    return f"{rack}[{c0:02d}-{c1:02d}]"
+
+
+def _beam_change_rows_by_segment(
+    config_id: str,
+    current_units: set[str],
+    proposed_units: set[str],
+    current_unit_heights: dict[str, float],
+    proposed_unit_heights: dict[str, float],
+) -> list[dict[str, str]]:
+    # Compute actual beam relocations/additions/removals per segment (not per-column duplication).
+    by_segment_current: dict[tuple[str, int, int], list[float]] = {}
+    by_segment_proposed: dict[tuple[str, int, int], list[float]] = {}
+
+    for unit in current_units:
+        height = current_unit_heights.get(unit)
+        if height is None:
+            continue
+        parsed = common._parse_beam_coordinate_parts(unit)
+        if parsed is None:
+            continue
+        rack, c0, c1, _level = parsed
+        by_segment_current.setdefault((rack, c0, c1), []).append(float(height))
+
+    for unit in proposed_units:
+        height = proposed_unit_heights.get(unit)
+        if height is None:
+            continue
+        parsed = common._parse_beam_coordinate_parts(unit)
+        if parsed is None:
+            continue
+        rack, c0, c1, _level = parsed
+        by_segment_proposed.setdefault((rack, c0, c1), []).append(float(height))
+
+    all_segments = sorted(set(by_segment_current.keys()) | set(by_segment_proposed.keys()))
+    rows: list[dict[str, str]] = []
+    for segment in all_segments:
+        current_heights = sorted(by_segment_current.get(segment, []))
+        proposed_heights = sorted(by_segment_proposed.get(segment, []))
+
+        paired_count = min(len(current_heights), len(proposed_heights))
+        relocations = 0
+        for index in range(paired_count):
+            if abs(current_heights[index] - proposed_heights[index]) > 1e-9:
+                relocations += 1
+
+        removed = max(len(current_heights) - paired_count, 0)
+        added = max(len(proposed_heights) - paired_count, 0)
+
+        rows.append(
+            {
+                "Config_ID": config_id,
+                "Segment_ID": _segment_label(segment),
+                "Initial_Beams_In_Segment": str(len(current_heights)),
+                "Required_Beams_In_Segment": str(len(proposed_heights)),
+                "Beam_Relocations_In_Segment": str(relocations),
+                "Removed_Beams_In_Segment": str(removed),
+                "Added_Beams_In_Segment": str(added),
+            }
+        )
+
+    return rows
+
+
 def build_final_selection() -> list[dict[str, str]]:
     """Build a full all-candidate metric table with per-metric ranks for weighted-sum analysis."""
     robustness_rows = [row for row in _robustness_rows() if _is_robustness_passing(row)]
@@ -357,6 +424,38 @@ def build_final_selection() -> list[dict[str, str]]:
             if str(row.get("Config_ID", "")).strip() in candidate_ids:
                 finalist_location_rows.append(row)
 
+    prepared_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv")
+    beam_map_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Location_Beam_Map.csv")
+    beam_height_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Beam_Height_Coordinates.csv")
+    _current_units, beam_segments, current_unit_heights = common._build_current_beam_units_and_segments(
+        beam_map_rows,
+        prepared_rows,
+        beam_height_rows,
+    )
+
+    location_rows_by_config: dict[str, list[dict[str, str]]] = {}
+    for row in finalist_location_rows:
+        config_id = str(row.get("Config_ID", "")).strip()
+        if not config_id:
+            continue
+        location_rows_by_config.setdefault(config_id, []).append(row)
+
+    segment_rows: list[dict[str, str]] = []
+    for config_id, config_location_rows in sorted(location_rows_by_config.items()):
+        proposed_units, proposed_unit_heights = common._build_proposed_beam_units_from_layout_rows(
+            config_location_rows,
+            beam_segments,
+        )
+        segment_rows.extend(
+            _beam_change_rows_by_segment(
+                config_id,
+                _current_units,
+                proposed_units,
+                current_unit_heights,
+                proposed_unit_heights,
+            )
+        )
+
     final_column_fields = _final_column_fieldnames(finalist_column_rows)
     common._write_csv_clean(
         FINAL_LAYOUT_BY_COLUMN_FILE,
@@ -395,6 +494,20 @@ def build_final_selection() -> list[dict[str, str]]:
             }
             for row in finalist_location_rows
         ],
+    )
+
+    common._write_csv_clean(
+        FINAL_LAYOUT_BY_SEGMENT_FILE,
+        [
+            "Config_ID",
+            "Segment_ID",
+            "Initial_Beams_In_Segment",
+            "Required_Beams_In_Segment",
+            "Beam_Relocations_In_Segment",
+            "Removed_Beams_In_Segment",
+            "Added_Beams_In_Segment",
+        ],
+        segment_rows,
     )
 
     for legacy_file in LEGACY_OUTPUT_FILES:
