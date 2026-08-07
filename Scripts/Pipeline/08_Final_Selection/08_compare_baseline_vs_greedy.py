@@ -10,7 +10,7 @@ import run_ordered_pipeline as common
 
 
 BASELINE_FILE = common.OUTPUT_ROOT / "08_Final_Selection" / "Candidate_Layout_Metric_Ranking.csv"
-GREEDY_FILE = common.OUTPUT_ROOT / "08_Final_Selection_Greedy" / "Candidate_Layout_Metric_Ranking.csv"
+GREEDY_FILE = common.OUTPUT_ROOT / "08_Final_Selection_Greedy" / "Candidate_Layout_Metric_Ranking_greedy.csv"
 OUTPUT_DIR = common.OUTPUT_ROOT / "08_Final_Selection_Comparison"
 OUTPUT_FILE = OUTPUT_DIR / "Baseline_vs_Greedy_Metric_Comparison.csv"
 

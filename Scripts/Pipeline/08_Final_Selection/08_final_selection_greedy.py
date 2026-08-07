@@ -27,14 +27,14 @@ def build_final_selection_greedy_anchor() -> Path:
     output_dir = common.OUTPUT_ROOT / "08_Final_Selection_Greedy"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    stage8.ROBUSTNESS_SUMMARY_FILE = stage7_dir / "Candidate_Layout_Robustness_Summary.csv"
-    stage8.LAYOUT_SUMMARY_FILE = stage6_dir / "Candidate_Layout_Summary_TopFilled.csv"
-    stage8.LAYOUT_BY_COLUMN_FILE = stage6_dir / "Candidate_Layout_By_Rack_Column_TopFilled.csv"
-    stage8.LAYOUT_BY_LOCATION_FILE = stage6_dir / "Candidate_Layout_By_Location_TopFilled.csv"
-    stage8.OUTPUT_FILE = output_dir / "Candidate_Layout_Metric_Ranking.csv"
-    stage8.FINAL_LAYOUT_BY_COLUMN_FILE = output_dir / "Final_Layout_By_Rack_Column.csv"
-    stage8.FINAL_LAYOUT_BY_LOCATION_FILE = output_dir / "Final_Layout_By_Location.csv"
-    stage8.FINAL_LAYOUT_BY_SEGMENT_FILE = output_dir / "Final_Layout_By_Segment.csv"
+    stage8.ROBUSTNESS_SUMMARY_FILE = stage7_dir / "Candidate_Layout_Robustness_Summary_greedy.csv"
+    stage8.LAYOUT_SUMMARY_FILE = stage6_dir / "Candidate_Layout_Summary_TopFilled_greedy.csv"
+    stage8.LAYOUT_BY_COLUMN_FILE = stage6_dir / "Candidate_Layout_By_Rack_Column_TopFilled_greedy.csv"
+    stage8.LAYOUT_BY_LOCATION_FILE = stage6_dir / "Candidate_Layout_By_Location_TopFilled_greedy.csv"
+    stage8.OUTPUT_FILE = output_dir / "Candidate_Layout_Metric_Ranking_greedy.csv"
+    stage8.FINAL_LAYOUT_BY_COLUMN_FILE = output_dir / "Final_Layout_By_Rack_Column_greedy.csv"
+    stage8.FINAL_LAYOUT_BY_LOCATION_FILE = output_dir / "Final_Layout_By_Location_greedy.csv"
+    stage8.FINAL_LAYOUT_BY_SEGMENT_FILE = output_dir / "Final_Layout_By_Segment_greedy.csv"
     stage8.LEGACY_OUTPUT_FILES = [
         output_dir / "Objective_Layout_Recommendations.csv",
         output_dir / "Management_Decision_Table.csv",

@@ -218,6 +218,53 @@ def _dense_ranks(values: list[float], higher_is_better: bool) -> list[int]:
     return [value_to_rank[value] for value in values]
 
 
+def _parse_size_count_signature(value: str) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    text = str(value).strip()
+    if not text:
+        return counts
+
+    for token in text.split("|"):
+        token = token.strip()
+        if not token or ":" not in token:
+            continue
+        size_text, count_text = token.split(":", 1)
+        size = common._to_int_default(size_text, -1)
+        count = common._to_int_default(count_text, 0)
+        if size < 0:
+            continue
+        counts[size] = max(count, 0)
+
+    return counts
+
+
+def _space_utilization_metrics(layout_row: dict[str, str]) -> tuple[int, int, int, int, int, float]:
+    # Compare occupied vs empty layout space at the fixed Base_Count demand.
+    occupied_by_size = _parse_size_count_signature(str(layout_row.get("Minimum_Required_Counts", "")))
+    total_by_size = _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+
+    all_sizes = sorted(set(occupied_by_size.keys()) | set(total_by_size.keys()))
+    occupied_locations = 0
+    occupied_space = 0
+    total_locations = 0
+    total_space = 0
+
+    for size in all_sizes:
+        occupied_count = max(occupied_by_size.get(size, 0), 0)
+        total_count = max(total_by_size.get(size, 0), 0)
+
+        occupied_locations += occupied_count
+        total_locations += total_count
+        occupied_space += size * occupied_count
+        total_space += size * total_count
+
+    empty_locations = max(total_locations - occupied_locations, 0)
+    empty_space = max(total_space - occupied_space, 0)
+    utilization_pct = (occupied_space / total_space * 100.0) if total_space > 0 else 0.0
+
+    return occupied_locations, empty_locations, occupied_space, empty_space, total_space, utilization_pct
+
+
 def _segment_label(segment: tuple[str, int, int]) -> str:
     rack, c0, c1 = segment
     return f"{rack}[{c0:02d}-{c1:02d}]"
@@ -312,6 +359,9 @@ def build_final_selection() -> list[dict[str, str]]:
 
     candidate_rows: list[dict[str, str]] = []
     for row in joined_rows:
+        occupied_locations, empty_locations, occupied_space, empty_space, total_space, utilization_pct = (
+            _space_utilization_metrics(row)
+        )
         implementation_effort_total = (
             common._to_int_default(row.get("Beam_Relocations_Total"), 0)
             + common._to_int_default(row.get("Additional_Beams_Required"), 0)
@@ -333,6 +383,12 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Assigned_Locations_Total": str(assigned_locations_total),
                 "Capacity_Margin": str(assigned_locations_total - required_locations_total),
                 "Occupancy_Rate": f"{common._to_float(row.get('Mean_Occupancy_Rate')) or 0.0:.6f}",
+                "Occupied_Locations": str(occupied_locations),
+                "Empty_Locations": str(empty_locations),
+                "Occupied_Slot_Space_cm": str(occupied_space),
+                "Empty_Slot_Space_cm": str(empty_space),
+                "Total_Slot_Space_cm": str(total_space),
+                "Space_Utilization_Pct": f"{utilization_pct:.4f}",
                 "Beam_Relocations_Total": str(common._to_int_default(row.get("Beam_Relocations_Total"), 0)),
                 "Additional_Beams_Required": str(common._to_int_default(row.get("Additional_Beams_Required"), 0)),
                 "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
@@ -360,6 +416,7 @@ def build_final_selection() -> list[dict[str, str]]:
             "Rank_Additional_Fill_Extra_Slot_Size_Variants",
             False,
         ),
+        ("Space_Utilization_Pct", "Rank_Space_Utilization_Pct", True),
         ("Occupancy_Rate", "Rank_Occupancy_Rate", False),
     ]
 
@@ -387,6 +444,13 @@ def build_final_selection() -> list[dict[str, str]]:
             "Capacity_Margin",
             "Occupancy_Rate",
             "Rank_Occupancy_Rate",
+            "Occupied_Locations",
+            "Empty_Locations",
+            "Occupied_Slot_Space_cm",
+            "Empty_Slot_Space_cm",
+            "Total_Slot_Space_cm",
+            "Space_Utilization_Pct",
+            "Rank_Space_Utilization_Pct",
             "Beam_Relocations_Total",
             "Rank_Beam_Relocations_Total",
             "Additional_Beams_Required",

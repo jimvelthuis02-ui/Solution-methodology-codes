@@ -1,6 +1,7 @@
 import csv
 import importlib.util
 from collections import Counter, defaultdict
+import shutil
 from pathlib import Path
 import sys
 
@@ -9,6 +10,14 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
+
+
+def _replace_with_suffix(path: Path, suffix: str = "_greedy") -> Path:
+    if not path.exists():
+        return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+    target = path.with_name(f"{path.stem}{suffix}{path.suffix}")
+    shutil.move(str(path), str(target))
+    return target
 
 
 def _load_base_stage6_module():
@@ -201,7 +210,12 @@ def build_layout_generation_greedy_anchor() -> Path:
     finally:
         common._allocate_layout_by_column = original_allocate
 
-    anchor_file = output_dir / "Greedy_Fixed_Slots_Summary.csv"
+    _replace_with_suffix(output_dir / "Candidate_Layout_Summary_TopFilled.csv")
+    _replace_with_suffix(output_dir / "Candidate_Layout_By_Rack_Column_TopFilled.csv")
+    _replace_with_suffix(output_dir / "Candidate_Layout_By_Location_TopFilled.csv")
+    _replace_with_suffix(output_dir / "Empty_Locations_By_Slot_Size.csv")
+
+    anchor_file = output_dir / "Greedy_Fixed_Slots_Summary_greedy.csv"
     with anchor_file.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(
             target,

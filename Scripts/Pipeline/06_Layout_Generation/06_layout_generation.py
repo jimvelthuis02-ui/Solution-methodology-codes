@@ -22,6 +22,8 @@ LAYOUT_DIAGNOSTICS_DIR = LAYOUT_OUTPUT_DIR
 PRE_ROBUST_LAYOUT_LIMIT = 8
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
+LOCAL_SEARCH_MAX_ITERATIONS = 6
+LOCAL_SEARCH_MAX_COLUMNS_PER_ITER = 12
 
 SummaryRow: TypeAlias = dict[str, str]
 DetailRows: TypeAlias = list[dict[str, str]]
@@ -367,6 +369,72 @@ def _additional_fill_signature_from_location_rows(
     return "|".join(f"{size}:{count}" for size, count in sorted(additional.items()))
 
 
+def _occupied_allocation_by_exact_slot_size(
+    minimum_counts: dict[int, int],
+    total_counts: dict[int, int],
+) -> dict[int, int]:
+    # Assign occupied demand buckets to exact slot capacities using best fit:
+    # for each demand size, consume the smallest available exact slot size that can fit it.
+    remaining_capacity = {size: max(int(count), 0) for size, count in total_counts.items()}
+    occupied_exact: dict[int, int] = defaultdict(int)
+    capacity_sizes = sorted(remaining_capacity.keys())
+
+    for demand_size in sorted(minimum_counts.keys(), reverse=True):
+        remaining_demand = max(int(minimum_counts.get(demand_size, 0)), 0)
+        if remaining_demand <= 0:
+            continue
+
+        for capacity_size in capacity_sizes:
+            if capacity_size < demand_size:
+                continue
+            available = remaining_capacity.get(capacity_size, 0)
+            if available <= 0:
+                continue
+
+            used = min(available, remaining_demand)
+            occupied_exact[capacity_size] += used
+            remaining_capacity[capacity_size] = available - used
+            remaining_demand -= used
+
+            if remaining_demand <= 0:
+                break
+
+    return dict(occupied_exact)
+
+
+def _empty_locations_rows_by_slot_size(
+    summary_rows: list[dict[str, str]],
+    method_label: str,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in summary_rows:
+        config_id = str(row.get("Config_ID", "")).strip()
+        if not config_id:
+            continue
+
+        minimum_counts = _parse_count_signature(str(row.get("Minimum_Required_Counts", "")))
+        total_counts = _parse_count_signature(str(row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+        occupied_exact = _occupied_allocation_by_exact_slot_size(minimum_counts, total_counts)
+
+        all_sizes = sorted(set(total_counts.keys()) | set(occupied_exact.keys()))
+        for size in all_sizes:
+            total_count = max(total_counts.get(size, 0), 0)
+            occupied_count = max(occupied_exact.get(size, 0), 0)
+            empty_count = max(total_count - occupied_count, 0)
+            rows.append(
+                {
+                    "Method": method_label,
+                    "Config_ID": config_id,
+                    "Slot_Size_cm": str(size),
+                    "Occupied": str(occupied_count),
+                    "Total_Locations_In_Layout": str(total_count),
+                    "Empty": str(empty_count),
+                }
+            )
+
+    return rows
+
+
 def _enforce_segment_uniform_slot_profiles(
     column_assignments: dict[str, list[float]],
     segments: set[tuple[str, int, int]],
@@ -569,6 +637,216 @@ def _enforce_min_locations_per_column(
             slots.append(float(min_slot_size))
 
     return {key: values for key, values in adjusted.items() if values}
+
+
+def _clone_column_assignments(column_assignments: dict[str, list[float]]) -> dict[str, list[float]]:
+    return {key: [float(value) for value in values] for key, values in column_assignments.items()}
+
+
+def _evaluate_relocations_for_assignments(
+    column_assignments: dict[str, list[float]],
+    layout_id: str,
+    config_id: str,
+    style: str,
+    beam_segments: set[tuple[str, int, int]],
+    doorgang_thresholds_by_rack: dict[str, tuple[int, float]],
+    current_beam_units: set[str],
+    current_beam_heights: dict[str, float],
+    current_beam_units_by_column: dict[str, set[str]],
+) -> tuple[int, dict[str, int], dict[str, int], dict[str, int], list[dict[str, str]], set[str]]:
+    generated_location_rows = common._build_generated_layout_location_rows(
+        layout_id=layout_id,
+        config_id=config_id,
+        style=style,
+        column_assignments=column_assignments,
+        segments=beam_segments,
+        doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+    )
+    proposed_beam_units, proposed_beam_heights = common._build_proposed_beam_units_from_layout_rows(
+        generated_location_rows,
+        beam_segments,
+    )
+    proposed_beam_units_by_column = common._beam_units_by_column(generated_location_rows)
+    relocation_total, relocation_by_column, removed_by_column, added_by_column = common._beam_relocations(
+        current_beam_units,
+        proposed_beam_units,
+        current_beam_heights,
+        proposed_beam_heights,
+        current_beam_units_by_column,
+        proposed_beam_units_by_column,
+    )
+    return (
+        relocation_total,
+        relocation_by_column,
+        removed_by_column,
+        added_by_column,
+        generated_location_rows,
+        proposed_beam_units,
+    )
+
+
+def _local_search_minimize_beam_relocations(
+    column_assignments: dict[str, list[float]],
+    layout_columns: list[str],
+    fixed_prefix_by_column: dict[str, list[float]],
+    beam_segments: set[tuple[str, int, int]],
+    doorgang_thresholds_by_rack: dict[str, tuple[int, float]],
+    smallest_config_slot: float,
+    layout_id: str,
+    config_id: str,
+    style: str,
+    current_beam_units: set[str],
+    current_beam_heights: dict[str, float],
+    current_beam_units_by_column: dict[str, set[str]],
+) -> tuple[dict[str, list[float]], int, int, int]:
+    # First-improvement hill climb using adjacent swaps to reduce beam relocations.
+    if not column_assignments:
+        return column_assignments, 0, 0, 0
+
+    current_assignments = _clone_column_assignments(column_assignments)
+    current_relocations, relocation_by_column, _removed, _added, _rows, _units = _evaluate_relocations_for_assignments(
+        current_assignments,
+        layout_id,
+        config_id,
+        style,
+        beam_segments,
+        doorgang_thresholds_by_rack,
+        current_beam_units,
+        current_beam_heights,
+        current_beam_units_by_column,
+    )
+    initial_relocations = current_relocations
+    accepted_moves = 0
+    completed_iterations = 0
+
+    for _iter in range(LOCAL_SEARCH_MAX_ITERATIONS):
+        improved = False
+        completed_iterations += 1
+
+        candidate_columns = sorted(
+            [
+                column_key
+                for column_key, slots in current_assignments.items()
+                if len(slots) - len(fixed_prefix_by_column.get(column_key, [])) >= 2
+            ],
+            key=lambda key: (-relocation_by_column.get(key, 0), key),
+        )
+        candidate_columns = candidate_columns[:LOCAL_SEARCH_MAX_COLUMNS_PER_ITER]
+
+        for column_key in candidate_columns:
+            slots = current_assignments.get(column_key, [])
+            prefix_len = len(fixed_prefix_by_column.get(column_key, []))
+            if len(slots) - prefix_len < 2:
+                continue
+
+            for idx in range(prefix_len, len(slots) - 1):
+                if abs(float(slots[idx]) - float(slots[idx + 1])) <= 1e-9:
+                    continue
+
+                proposal = _clone_column_assignments(current_assignments)
+                proposal_slots = proposal.get(column_key, [])
+                proposal_slots[idx], proposal_slots[idx + 1] = proposal_slots[idx + 1], proposal_slots[idx]
+                proposal[column_key] = proposal_slots
+
+                proposal = _enforce_segment_uniform_slot_profiles(
+                    proposal,
+                    beam_segments,
+                    fixed_prefix_by_column=fixed_prefix_by_column,
+                    doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+                )
+                if smallest_config_slot > 0.0:
+                    proposal = _enforce_min_locations_per_column(
+                        proposal,
+                        layout_columns,
+                        float(smallest_config_slot),
+                    )
+
+                proposal_relocations, proposal_by_column, _r, _a, _rows, _units = _evaluate_relocations_for_assignments(
+                    proposal,
+                    layout_id,
+                    config_id,
+                    style,
+                    beam_segments,
+                    doorgang_thresholds_by_rack,
+                    current_beam_units,
+                    current_beam_heights,
+                    current_beam_units_by_column,
+                )
+
+                if proposal_relocations < current_relocations:
+                    current_assignments = proposal
+                    current_relocations = proposal_relocations
+                    relocation_by_column = proposal_by_column
+                    accepted_moves += 1
+                    improved = True
+                    break
+
+            if improved:
+                break
+
+        if not improved and len(candidate_columns) >= 2:
+            pair_columns = candidate_columns[: min(len(candidate_columns), 8)]
+            for idx_a, column_a in enumerate(pair_columns):
+                slots_a = current_assignments.get(column_a, [])
+                prefix_a = len(fixed_prefix_by_column.get(column_a, []))
+                suffix_a = list(slots_a[prefix_a:])
+                if len(suffix_a) <= 0:
+                    continue
+
+                for column_b in pair_columns[idx_a + 1:]:
+                    slots_b = current_assignments.get(column_b, [])
+                    prefix_b = len(fixed_prefix_by_column.get(column_b, []))
+                    suffix_b = list(slots_b[prefix_b:])
+                    if len(suffix_b) <= 0:
+                        continue
+
+                    if suffix_a == suffix_b:
+                        continue
+
+                    proposal = _clone_column_assignments(current_assignments)
+                    proposal[column_a] = list(proposal[column_a][:prefix_a]) + list(suffix_b)
+                    proposal[column_b] = list(proposal[column_b][:prefix_b]) + list(suffix_a)
+
+                    proposal = _enforce_segment_uniform_slot_profiles(
+                        proposal,
+                        beam_segments,
+                        fixed_prefix_by_column=fixed_prefix_by_column,
+                        doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+                    )
+                    if smallest_config_slot > 0.0:
+                        proposal = _enforce_min_locations_per_column(
+                            proposal,
+                            layout_columns,
+                            float(smallest_config_slot),
+                        )
+
+                    proposal_relocations, proposal_by_column, _r, _a, _rows, _units = _evaluate_relocations_for_assignments(
+                        proposal,
+                        layout_id,
+                        config_id,
+                        style,
+                        beam_segments,
+                        doorgang_thresholds_by_rack,
+                        current_beam_units,
+                        current_beam_heights,
+                        current_beam_units_by_column,
+                    )
+
+                    if proposal_relocations < current_relocations:
+                        current_assignments = proposal
+                        current_relocations = proposal_relocations
+                        relocation_by_column = proposal_by_column
+                        accepted_moves += 1
+                        improved = True
+                        break
+
+                if improved:
+                    break
+
+        if not improved:
+            break
+
+    return current_assignments, initial_relocations, current_relocations, accepted_moves if accepted_moves >= 0 else 0
 
 
 def _build_top_filled_layout_set(
@@ -788,14 +1066,16 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             beam_preference=beam_preference,
         )
 
+        fixed_prefix_by_column = {
+            column_key: [float(height)]
+            for column_key, height in fixed_doorgang_slot_by_column.items()
+            if column_key in column_assignments
+        }
+
         column_assignments = _enforce_segment_uniform_slot_profiles(
             column_assignments,
             beam_segments,
-            fixed_prefix_by_column={
-                column_key: [float(height)]
-                for column_key, height in fixed_doorgang_slot_by_column.items()
-                if column_key in column_assignments
-            },
+            fixed_prefix_by_column=fixed_prefix_by_column,
             doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
         )
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
@@ -805,6 +1085,25 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 layout_columns,
                 float(smallest_config_slot),
             )
+        used_by_column = {
+            column_key: sum(float(value) for value in slots)
+            for column_key, slots in column_assignments.items()
+        }
+
+        column_assignments, reloc_before_search, reloc_after_search, accepted_search_moves = _local_search_minimize_beam_relocations(
+            column_assignments=column_assignments,
+            layout_columns=layout_columns,
+            fixed_prefix_by_column=fixed_prefix_by_column,
+            beam_segments=beam_segments,
+            doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+            smallest_config_slot=float(smallest_config_slot),
+            layout_id=layout_id,
+            config_id=config_id,
+            style=style,
+            current_beam_units=current_beam_units,
+            current_beam_heights=current_beam_heights,
+            current_beam_units_by_column=current_beam_units_by_column,
+        )
         used_by_column = {
             column_key: sum(float(value) for value in slots)
             for column_key, slots in column_assignments.items()
@@ -880,6 +1179,9 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 "Total_Allowed_Height": f"{total_allowed_height:.3f}",
                 "Space_Left": f"{space_left:.3f}",
                 "Beam_Relocations_Total": str(relocation_total),
+                "Beam_Relocations_Before_Local_Search": str(reloc_before_search),
+                "Beam_Relocations_After_Local_Search": str(reloc_after_search),
+                "Local_Search_Accepted_Moves": str(accepted_search_moves),
                 "Initial_Beams_Total": str(initial_beam_count),
                 "Required_Beams_Total": str(required_beams),
                 "Additional_Beams_Required": str(additional_beams),
@@ -1008,6 +1310,9 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "Total_Allowed_Height",
         "Space_Left",
         "Beam_Relocations_Total",
+        "Beam_Relocations_Before_Local_Search",
+        "Beam_Relocations_After_Local_Search",
+        "Local_Search_Accepted_Moves",
         "Initial_Beams_Total",
         "Required_Beams_Total",
         "Additional_Beams_Required",
@@ -1115,6 +1420,21 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             }
             for row in top_filled_location_rows
         ],
+    )
+
+    method_label = "Greedy" if "greedy" in str(LAYOUT_TOPFILLED_DIR.name).lower() else "Baseline"
+    empty_rows = _empty_locations_rows_by_slot_size(top_filled_summary_rows, method_label)
+    _write_csv_clean_with_fallback(
+        LAYOUT_TOPFILLED_DIR / "Empty_Locations_By_Slot_Size.csv",
+        [
+            "Method",
+            "Config_ID",
+            "Slot_Size_cm",
+            "Occupied",
+            "Total_Locations_In_Layout",
+            "Empty",
+        ],
+        empty_rows,
     )
 
     return candidate_layout_rows, candidate_layout_column_rows, candidate_layout_location_rows
