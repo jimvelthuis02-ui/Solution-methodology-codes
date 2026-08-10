@@ -980,19 +980,7 @@ def _initial_beam_grid_counts(
     prepared_rows: list[dict[str, str]] | None,
     current_units: set[str],
 ) -> tuple[int, int]:
-    # Use known Stage 1 baseline counts when available.
-    summary_path = STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Beam_Grid_Summary.csv"
-    if summary_path.exists():
-        summary_rows = _read_csv(summary_path)
-        by_metric = {
-            str(row.get("Metric", "")).strip(): _to_int_default(row.get("Value"), -1)
-            for row in summary_rows
-        }
-        baseline_beams = by_metric.get("Beam objects (actual horizontal spans)", -1)
-        baseline_grids = by_metric.get("Total grids per height objects", -1)
-        if baseline_beams >= 0 and baseline_grids >= 0:
-            return baseline_beams, baseline_grids
-
+    # Derive baseline counts directly from Stage 1 prepared/beam data.
     baseline_beams = len(current_units)
     baseline_grids = 0
     for row in prepared_rows or []:
@@ -1043,8 +1031,15 @@ ORDERED_SCRIPTS = [
     "04_Candidate_Configuration/04_candidate_configuration.py",
     "05_Capacity_Determination/05_capacity_determination.py",
     "06_Layout_Generation/06_layout_generation.py",
+    "06_Layout_Generation/06_layout_generation_greedy.py",
     "07_Robustness_Evaluation/07_robustness_evaluation.py",
+    "07_Robustness_Evaluation/07_robustness_evaluation_greedy.py",
     "08_Final_Selection/08_final_selection.py",
+    "08_Final_Selection/08_final_selection_greedy.py",
+    "06_Layout_Generation/06_layout_generation_heuristics.py",
+    "07_Robustness_Evaluation/07_robustness_heuristics.py",
+    "08_Final_Selection/08_final_selection_heuristics.py",
+    "09_Heuristic_Comparison/09_layout_heuristic_comparison.py",
 ]
 
 

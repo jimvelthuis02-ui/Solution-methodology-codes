@@ -1,0 +1,571 @@
+import csv
+import importlib.util
+from collections import Counter
+from pathlib import Path
+import shutil
+import sys
+from typing import Any
+
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
+import run_ordered_pipeline as common
+
+
+OUTPUT_ROOT = common.OUTPUT_ROOT / "09_Heuristic_Comparison"
+VARIANTS_ROOT = OUTPUT_ROOT / "Variants"
+WIDE_OUTPUT_FILE = OUTPUT_ROOT / "Layout_Heuristic_Wide.csv"
+VARIANT_DEFINITIONS_FILE = OUTPUT_ROOT / "Heuristic_Variant_Definitions.csv"
+IMPACT_OUTPUT_FILE = OUTPUT_ROOT / "Stage6_Heuristic_Impact_All.csv"
+
+VARIANTS = [
+    {
+        "label": "Baseline_None",
+        "construction_method": "baseline",
+        "use_beam_optimizer": False,
+        "use_local_search": False,
+        "improvement_method": "none",
+    },
+    {
+        "label": "Baseline_LocalSearch",
+        "construction_method": "baseline",
+        "use_beam_optimizer": False,
+        "use_local_search": True,
+        "improvement_method": "local_search",
+    },
+    {
+        "label": "Baseline_BeamPreserving",
+        "construction_method": "baseline",
+        "use_beam_optimizer": True,
+        "use_local_search": False,
+        "improvement_method": "beam_preserving",
+    },
+    {
+        "label": "Baseline_BeamPlusLocalSearch",
+        "construction_method": "baseline",
+        "use_beam_optimizer": True,
+        "use_local_search": True,
+        "improvement_method": "beam_preserving_plus_local_search",
+    },
+    {
+        "label": "Greedy_None",
+        "construction_method": "greedy",
+        "use_beam_optimizer": False,
+        "use_local_search": False,
+        "improvement_method": "none",
+    },
+    {
+        "label": "Greedy_LocalSearch",
+        "construction_method": "greedy",
+        "use_beam_optimizer": False,
+        "use_local_search": True,
+        "improvement_method": "local_search",
+    },
+    {
+        "label": "Greedy_BeamPreserving",
+        "construction_method": "greedy",
+        "use_beam_optimizer": True,
+        "use_local_search": False,
+        "improvement_method": "beam_preserving",
+    },
+    {
+        "label": "Greedy_BeamPlusLocalSearch",
+        "construction_method": "greedy",
+        "use_beam_optimizer": True,
+        "use_local_search": True,
+        "improvement_method": "beam_preserving_plus_local_search",
+    },
+]
+
+
+def _load_module(path: Path, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    return common._read_csv(path)
+
+
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(target, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _variant_root(variant: dict[str, object]) -> Path:
+    return VARIANTS_ROOT / str(variant["label"])
+
+
+def _stage6_dir(variant: dict[str, object]) -> Path:
+    folder = "06_Layout_Generation_Greedy" if str(variant["construction_method"]) == "greedy" else "06_Layout_Generation"
+    return _variant_root(variant) / folder
+
+
+def _stage7_dir(variant: dict[str, object]) -> Path:
+    folder = "07_Robustness_Evaluation_Greedy" if str(variant["construction_method"]) == "greedy" else "07_Robustness_Evaluation"
+    return _variant_root(variant) / folder
+
+
+def _stage8_dir(variant: dict[str, object]) -> Path:
+    folder = "08_Final_Selection_Greedy" if str(variant["construction_method"]) == "greedy" else "08_Final_Selection"
+    return _variant_root(variant) / folder
+
+
+def _stage8_ranking_file(variant: dict[str, object]) -> Path:
+    return _stage8_dir(variant) / "Candidate_Layout_Metric_Ranking.csv"
+
+
+def _rows_by_config_with_fieldnames(path: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
+    if not path.exists():
+        return {}, []
+
+    with path.open("r", newline="", encoding="utf-8-sig") as source:
+        reader = csv.DictReader(source)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+
+    by_config = {
+        str(row.get("Config_ID", "")).strip(): row
+        for row in rows
+        if str(row.get("Config_ID", "")).strip()
+    }
+    return by_config, fieldnames
+
+
+def _load_greedy_helpers():
+    return _load_module(
+        PIPELINE_ROOT / "06_Layout_Generation" / "06_layout_generation_greedy.py",
+        "layout_generation_greedy_helpers_module",
+    )
+
+
+def _load_stage6_module(variant: dict[str, object]):
+    return _load_module(
+        PIPELINE_ROOT / "06_Layout_Generation" / "06_layout_generation.py",
+        f"stage6_variant_{variant['label']}",
+    )
+
+
+def _load_stage7_module(variant: dict[str, object]):
+    return _load_module(
+        PIPELINE_ROOT / "07_Robustness_Evaluation" / "07_robustness_evaluation.py",
+        f"stage7_variant_{variant['label']}",
+    )
+
+
+def _load_stage8_module(variant: dict[str, object]):
+    return _load_module(
+        PIPELINE_ROOT / "08_Final_Selection" / "08_final_selection.py",
+        f"stage8_variant_{variant['label']}",
+    )
+
+
+def _make_greedy_allocate_wrapper(stage6: Any, greedy_helpers: Any):
+    prepared_rows = common._read_csv(common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv")
+    rows_by_column = greedy_helpers._original_rows_by_column(prepared_rows)
+    config_ids = [str(row.get("Config_ID", "")).strip() for row in stage6._candidate_configs()]
+    anchor_records: list[dict[str, str]] = []
+    call_index = 0
+    original_allocate = common._allocate_layout_by_column
+
+    def _allocate_with_greedy_anchor(
+        target_exact_counts: dict[float, int],
+        column_keys: list[str],
+        style: str,
+        style_context: dict[str, object] | None = None,
+    ):
+        nonlocal call_index
+
+        config_id = config_ids[call_index] if call_index < len(config_ids) else f"CFG_CALL_{call_index + 1:03d}"
+        call_index += 1
+
+        config_slot_sizes = {int(round(size)) for size, count in target_exact_counts.items() if int(count) > 0}
+        anchor_prefix = greedy_helpers._build_anchor_prefix_by_column(config_slot_sizes, column_keys, rows_by_column)
+
+        anchor_counts = Counter()
+        for values in anchor_prefix.values():
+            for value in values:
+                anchor_counts[int(round(value))] += 1
+
+        remaining_counts: dict[float, int] = {}
+        for size, required in target_exact_counts.items():
+            used = anchor_counts.get(int(round(size)), 0)
+            remaining_counts[size] = max(int(required) - used, 0)
+
+        context = dict(style_context or {})
+        existing_fixed = context.get("fixed_prefix_by_column", {})
+        context["fixed_prefix_by_column"] = greedy_helpers._merge_fixed_prefixes(existing_fixed, anchor_prefix)
+
+        anchor_records.append(
+            {
+                "Config_ID": config_id,
+                "Config_Slot_Sizes": common._encode_excel_text(",".join(str(size) for size in sorted(config_slot_sizes))),
+                "Anchor_Fixed_Slot_Distribution": "|".join(
+                    f"{size}:{count}" for size, count in sorted(anchor_counts.items())
+                ),
+                "Anchor_Fixed_Slot_Count": str(sum(anchor_counts.values())),
+                "Anchor_Fixed_Columns_Count": str(len(anchor_prefix)),
+                "Remaining_Required_Counts_After_Anchoring": "|".join(
+                    f"{int(size)}:{count}" for size, count in sorted(remaining_counts.items())
+                ),
+            }
+        )
+
+        return original_allocate(
+            target_exact_counts=remaining_counts,
+            column_keys=column_keys,
+            style=style,
+            style_context=context,
+        )
+
+    return original_allocate, _allocate_with_greedy_anchor, anchor_records
+
+
+def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_rows: list[dict[str, str]]):
+    use_beam = bool(variant.get("use_beam_optimizer"))
+    use_local = bool(variant.get("use_local_search"))
+    original_local_search = stage6._local_search_minimize_beam_relocations
+
+    def _wrapped_improvement(
+        column_assignments: dict[str, list[float]],
+        layout_columns: list[str],
+        fixed_prefix_by_column: dict[str, list[float]],
+        beam_segments: set[tuple[str, int, int]],
+        doorgang_thresholds_by_rack: dict[str, tuple[int, float]],
+        smallest_config_slot: float,
+        layout_id: str,
+        config_id: str,
+        style: str,
+        current_beam_units: set[str],
+        current_beam_heights: dict[str, float],
+        current_beam_units_by_column: dict[str, set[str]],
+    ) -> tuple[dict[str, list[float]], int, int, int]:
+        before_any, _by_col0, _r0, _a0, _rows0, _units0 = stage6._evaluate_relocations_for_assignments(
+            column_assignments,
+            layout_id,
+            config_id,
+            style,
+            beam_segments,
+            doorgang_thresholds_by_rack,
+            current_beam_units,
+            current_beam_heights,
+            current_beam_units_by_column,
+        )
+
+        working_assignments = column_assignments
+        after_beam = before_any
+        beam_changed = False
+        if use_beam:
+            working_assignments = common._optimize_column_slot_order_for_beam_preservation(
+                column_assignments=column_assignments,
+                segments=beam_segments,
+                baseline_beam_heights=current_beam_heights,
+                fixed_prefix_by_column=fixed_prefix_by_column,
+            )
+            working_assignments = stage6._enforce_segment_uniform_slot_profiles(
+                working_assignments,
+                beam_segments,
+                fixed_prefix_by_column=fixed_prefix_by_column,
+                doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+            )
+            if smallest_config_slot > 0.0:
+                working_assignments = stage6._enforce_min_locations_per_column(
+                    working_assignments,
+                    layout_columns,
+                    float(smallest_config_slot),
+                )
+
+            after_beam, _by_col1, _r1, _a1, _rows1, _units1 = stage6._evaluate_relocations_for_assignments(
+                working_assignments,
+                layout_id,
+                config_id,
+                style,
+                beam_segments,
+                doorgang_thresholds_by_rack,
+                current_beam_units,
+                current_beam_heights,
+                current_beam_units_by_column,
+            )
+            beam_changed = working_assignments != column_assignments
+
+        if use_local:
+            final_assignments, reloc_before_search, reloc_after_search, accepted_search_moves = original_local_search(
+                column_assignments=working_assignments,
+                layout_columns=layout_columns,
+                fixed_prefix_by_column=fixed_prefix_by_column,
+                beam_segments=beam_segments,
+                doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+                smallest_config_slot=smallest_config_slot,
+                layout_id=layout_id,
+                config_id=config_id,
+                style=style,
+                current_beam_units=current_beam_units,
+                current_beam_heights=current_beam_heights,
+                current_beam_units_by_column=current_beam_units_by_column,
+            )
+        else:
+            final_assignments = working_assignments
+            reloc_before_search = after_beam
+            reloc_after_search = after_beam
+            accepted_search_moves = 0
+
+        impact_rows.append(
+            {
+                "Variant_Label": str(variant["label"]),
+                "Construction_Method": str(variant["construction_method"]),
+                "Improvement_Method": str(variant["improvement_method"]),
+                "Config_ID": str(config_id),
+                "Layout_ID": str(layout_id),
+                "Style": str(style),
+                "Beam_Relocations_Before_Any_Improvement": str(before_any),
+                "Beam_Relocations_After_Beam_Optimizer": str(after_beam),
+                "Beam_Relocations_After_Local_Search": str(reloc_after_search),
+                "Beam_Optimizer_Delta": str(after_beam - before_any),
+                "Local_Search_Delta": str(reloc_after_search - after_beam),
+                "Total_Delta": str(reloc_after_search - before_any),
+                "Beam_Optimizer_Changed_Assignments": "YES" if beam_changed else "NO",
+                "Local_Search_Enabled": "YES" if use_local else "NO",
+                "Local_Search_Accepted_Moves": str(accepted_search_moves),
+            }
+        )
+
+        return final_assignments, reloc_before_search, reloc_after_search, accepted_search_moves
+
+    return original_local_search, _wrapped_improvement
+
+
+def _run_stage6_variant(variant: dict[str, object], all_impact_rows: list[dict[str, str]]) -> Path:
+    stage6: Any = _load_stage6_module(variant)
+    stage6_dir = _stage6_dir(variant)
+    stage6_dir.mkdir(parents=True, exist_ok=True)
+
+    stage6.LAYOUT_OUTPUT_DIR = stage6_dir
+    stage6.LAYOUT_TOPFILLED_DIR = stage6_dir
+    stage6.LAYOUT_DIAGNOSTICS_DIR = stage6_dir
+
+    original_allocate = None
+    greedy_anchor_rows: list[dict[str, str]] = []
+    if str(variant["construction_method"]) == "greedy":
+        greedy_helpers = _load_greedy_helpers()
+        original_allocate, wrapped_allocate, greedy_anchor_rows = _make_greedy_allocate_wrapper(stage6, greedy_helpers)
+        common._allocate_layout_by_column = wrapped_allocate
+
+    original_local_search, wrapped_improvement = _make_improvement_wrapper(stage6, variant, all_impact_rows)
+    stage6._local_search_minimize_beam_relocations = wrapped_improvement
+
+    try:
+        stage6.build_layout_generation()
+    finally:
+        stage6._local_search_minimize_beam_relocations = original_local_search
+        if original_allocate is not None:
+            common._allocate_layout_by_column = original_allocate
+
+    if greedy_anchor_rows:
+        _write_csv(
+            stage6_dir / "Greedy_Fixed_Slots_Summary.csv",
+            [
+                "Config_ID",
+                "Config_Slot_Sizes",
+                "Anchor_Fixed_Slot_Distribution",
+                "Anchor_Fixed_Slot_Count",
+                "Anchor_Fixed_Columns_Count",
+                "Remaining_Required_Counts_After_Anchoring",
+            ],
+            greedy_anchor_rows,
+        )
+
+    return stage6_dir
+
+
+def _run_stage7_variant(variant: dict[str, object]) -> Path:
+    stage7: Any = _load_stage7_module(variant)
+    output_dir = _stage7_dir(variant)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    stage7.LAYOUT_SUMMARY_FILE = _stage6_dir(variant) / "Candidate_Layout_Summary_TopFilled.csv"
+    stage7.ROBUSTNESS_SUMMARY_FILE = output_dir / "Candidate_Layout_Robustness_Summary.csv"
+
+    stage7.build_robustness_evaluation()
+    return stage7.ROBUSTNESS_SUMMARY_FILE
+
+
+def _run_stage8_variant(variant: dict[str, object]) -> Path:
+    stage8: Any = _load_stage8_module(variant)
+    output_dir = _stage8_dir(variant)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    stage6_dir = _stage6_dir(variant)
+    stage7_dir = _stage7_dir(variant)
+    stage8.ROBUSTNESS_SUMMARY_FILE = stage7_dir / "Candidate_Layout_Robustness_Summary.csv"
+    stage8.LAYOUT_SUMMARY_FILE = stage6_dir / "Candidate_Layout_Summary_TopFilled.csv"
+    stage8.LAYOUT_BY_COLUMN_FILE = stage6_dir / "Candidate_Layout_By_Rack_Column_TopFilled.csv"
+    stage8.LAYOUT_BY_LOCATION_FILE = stage6_dir / "Candidate_Layout_By_Location_TopFilled.csv"
+    stage8.OUTPUT_FILE = output_dir / "Candidate_Layout_Metric_Ranking.csv"
+    stage8.FINAL_LAYOUT_BY_COLUMN_FILE = output_dir / "Final_Layout_By_Rack_Column.csv"
+    stage8.FINAL_LAYOUT_BY_LOCATION_FILE = output_dir / "Final_Layout_By_Location.csv"
+    stage8.FINAL_LAYOUT_BY_SEGMENT_FILE = output_dir / "Final_Layout_By_Segment.csv"
+    stage8.LEGACY_OUTPUT_FILES = [
+        output_dir / "Objective_Layout_Recommendations.csv",
+        output_dir / "Management_Decision_Table.csv",
+    ]
+
+    stage8.build_final_selection()
+    return stage8.OUTPUT_FILE
+
+
+def _write_variant_definitions() -> None:
+    rows = [
+        {
+            "Variant_Label": str(variant["label"]),
+            "Construction_Method": str(variant["construction_method"]),
+            "Use_Beam_Optimizer": "YES" if bool(variant["use_beam_optimizer"]) else "NO",
+            "Use_Local_Search": "YES" if bool(variant["use_local_search"]) else "NO",
+            "Improvement_Method": str(variant["improvement_method"]),
+        }
+        for variant in VARIANTS
+    ]
+    _write_csv(
+        VARIANT_DEFINITIONS_FILE,
+        [
+            "Variant_Label",
+            "Construction_Method",
+            "Use_Beam_Optimizer",
+            "Use_Local_Search",
+            "Improvement_Method",
+        ],
+        rows,
+    )
+
+
+def _build_wide_comparison() -> Path:
+    config_rows = _read_csv(common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv")
+    configs_by_id = {
+        str(row.get("Config_ID", "")).strip(): row
+        for row in config_rows
+        if str(row.get("Config_ID", "")).strip()
+    }
+
+    variant_rows_by_label: dict[str, dict[str, dict[str, str]]] = {}
+    metric_fieldnames: list[str] = []
+    for variant in VARIANTS:
+        rows_by_config, fieldnames = _rows_by_config_with_fieldnames(_stage8_ranking_file(variant))
+        variant_rows_by_label[str(variant["label"])] = rows_by_config
+        if fieldnames and not metric_fieldnames:
+            metric_fieldnames = [field for field in fieldnames if field != "Config_ID"]
+
+    all_config_ids = sorted(
+        set(configs_by_id.keys())
+        | {config_id for rows in variant_rows_by_label.values() for config_id in rows.keys()}
+    )
+
+    output_rows: list[dict[str, str]] = []
+    for config_id in all_config_ids:
+        config = configs_by_id.get(config_id, {})
+        merged = {
+            "Config_ID": config_id,
+            "Method": str(config.get("Method", "")),
+            "Scenario": str(config.get("Scenario", "")),
+            "K": str(config.get("K", "")),
+            "Slot_Sizes": str(config.get("Slot_Sizes", "")),
+            "Relative Slot Size Distribution": str(config.get("Relative Slot Size Distribution", "")),
+            "Source Sample": str(config.get("Source Sample", "")),
+        }
+
+        for variant in VARIANTS:
+            label = str(variant["label"])
+            row = variant_rows_by_label.get(label, {}).get(config_id, {})
+            merged[f"Present_{label}"] = "YES" if row else "NO"
+            for field in metric_fieldnames:
+                merged[f"{label}__{field}"] = str(row.get(field, ""))
+
+        output_rows.append(merged)
+
+    fieldnames = [
+        "Config_ID",
+        "Method",
+        "Scenario",
+        "K",
+        "Slot_Sizes",
+        "Relative Slot Size Distribution",
+        "Source Sample",
+    ]
+    for variant in VARIANTS:
+        label = str(variant["label"])
+        fieldnames.append(f"Present_{label}")
+        fieldnames.extend(f"{label}__{field}" for field in metric_fieldnames)
+
+    _write_csv(WIDE_OUTPUT_FILE, fieldnames, output_rows)
+    return WIDE_OUTPUT_FILE
+
+
+def _cleanup_variant_outputs() -> None:
+    if VARIANTS_ROOT.exists():
+        shutil.rmtree(VARIANTS_ROOT)
+
+
+def run_layout_heuristic_comparison() -> Path:
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    VARIANTS_ROOT.mkdir(parents=True, exist_ok=True)
+    _write_variant_definitions()
+
+    required_scripts = [
+        PIPELINE_ROOT / "06_Layout_Generation" / "06_layout_generation.py",
+        PIPELINE_ROOT / "06_Layout_Generation" / "06_layout_generation_greedy.py",
+        PIPELINE_ROOT / "07_Robustness_Evaluation" / "07_robustness_evaluation.py",
+        PIPELINE_ROOT / "08_Final_Selection" / "08_final_selection.py",
+    ]
+    missing_scripts = [path for path in required_scripts if not path.exists()]
+    if missing_scripts:
+        if WIDE_OUTPUT_FILE.exists():
+            return WIDE_OUTPUT_FILE
+        missing_text = "\n".join(str(path) for path in missing_scripts)
+        raise FileNotFoundError(
+            "Cannot run Stage 9 variant regeneration; required scripts are missing:\n"
+            f"{missing_text}"
+        )
+
+    all_impact_rows: list[dict[str, str]] = []
+    for variant in VARIANTS:
+        print(f"Running heuristic variant: {variant['label']}")
+        _run_stage6_variant(variant, all_impact_rows)
+        _run_stage7_variant(variant)
+        _run_stage8_variant(variant)
+
+    _write_csv(
+        IMPACT_OUTPUT_FILE,
+        [
+            "Variant_Label",
+            "Construction_Method",
+            "Improvement_Method",
+            "Config_ID",
+            "Layout_ID",
+            "Style",
+            "Beam_Relocations_Before_Any_Improvement",
+            "Beam_Relocations_After_Beam_Optimizer",
+            "Beam_Relocations_After_Local_Search",
+            "Beam_Optimizer_Delta",
+            "Local_Search_Delta",
+            "Total_Delta",
+            "Beam_Optimizer_Changed_Assignments",
+            "Local_Search_Enabled",
+            "Local_Search_Accepted_Moves",
+        ],
+        all_impact_rows,
+    )
+
+    output_path = _build_wide_comparison()
+    _cleanup_variant_outputs()
+    return output_path
+
+
+if __name__ == "__main__":
+    output_path = run_layout_heuristic_comparison()
+    print(f"Wide heuristic comparison written to: {output_path}")

@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 import shutil
 from pathlib import Path
 import sys
+from typing import Any
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
@@ -135,7 +136,7 @@ def _merge_fixed_prefixes(
 
 
 def build_layout_generation_greedy_anchor() -> Path:
-    stage6 = _load_base_stage6_module()
+    stage6: Any = _load_base_stage6_module()
 
     output_dir = common.OUTPUT_ROOT / "06_Layout_Generation_Greedy"
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -14,8 +14,8 @@ import run_ordered_pipeline as common
 INPUT_CONFIG_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
 INPUT_CAPACITY_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
 INPUT_PREPARED = common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv"
-INPUT_LOCATION_BEAM_MAP = common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Location_Beam_Map.csv"
-INPUT_BEAM_HEIGHT_COORDS = common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Beam_Height_Coordinates.csv"
+INPUT_LOCATION_BEAM_MAP = common.STAGE1_OUTPUT_DIR / "Location_Beam_Map.csv"
+INPUT_BEAM_HEIGHT_COORDS = common.STAGE1_OUTPUT_DIR / "Beam_Height_Coordinates.csv"
 LAYOUT_OUTPUT_DIR = common.STAGE6_OUTPUT_DIR
 LAYOUT_TOPFILLED_DIR = LAYOUT_OUTPUT_DIR
 LAYOUT_DIAGNOSTICS_DIR = LAYOUT_OUTPUT_DIR

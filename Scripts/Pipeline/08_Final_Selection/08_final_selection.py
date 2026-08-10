@@ -489,8 +489,8 @@ def build_final_selection() -> list[dict[str, str]]:
                 finalist_location_rows.append(row)
 
     prepared_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv")
-    beam_map_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Location_Beam_Map.csv")
-    beam_height_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Beam_Grid_Mapping" / "Beam_Height_Coordinates.csv")
+    beam_map_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Location_Beam_Map.csv")
+    beam_height_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Beam_Height_Coordinates.csv")
     _current_units, beam_segments, current_unit_heights = common._build_current_beam_units_and_segments(
         beam_map_rows,
         prepared_rows,

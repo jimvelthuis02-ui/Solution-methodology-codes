@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 ROOT = Path(__file__).resolve().parents[3]
 INPUT_DIR = ROOT / "Input files" / "Locations"
 PREPARED_OUTPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
-BEAM_OUTPUT_DIR = ROOT / "Output" / "01_Data_Preparation" / "Beam_Grid_Mapping"
+BEAM_OUTPUT_DIR = ROOT / "Output" / "01_Data_Preparation"
 
 BEAM_HEIGHT_CM = 16.0
 ROW_ORDER_PATTERN = re.compile(r"^(\d+)([A-Za-z]?)$")
@@ -378,7 +378,6 @@ def build_beam_grid_map() -> Path:
 
     location_file = BEAM_OUTPUT_DIR / "Location_Beam_Map.csv"
     beam_height_file = BEAM_OUTPUT_DIR / "Beam_Height_Coordinates.csv"
-    summary_file = BEAM_OUTPUT_DIR / "Beam_Grid_Summary.csv"
 
     with location_file.open("w", newline="", encoding="utf-8") as target:
         fieldnames = [
@@ -412,22 +411,6 @@ def build_beam_grid_map() -> Path:
         writer = csv.DictWriter(target, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(beam_height_rows)
-
-    summary_rows = [
-        {"Metric": "Total locations", "Value": str(len(rows))},
-        {"Metric": "Beam-supported locations", "Value": str(sum(1 for row in location_map if row["Beam_Supported"] == "YES"))},
-        {"Metric": "Non-beam locations (floor)", "Value": str(sum(1 for row in location_map if row["Beam_Supported"] == "NO"))},
-        {"Metric": "Beam objects (actual horizontal spans)", "Value": str(len(beam_segments))},
-        {"Metric": "Columns with beam support", "Value": str(len({(row["Rack"], row["Column"]) for row in rows if str(row.get("Beam column count", "")).strip()}))},
-        {"Metric": "Beam height objects", "Value": str(len(beam_height_rows))},
-        {"Metric": "Total grids per height objects", "Value": str(sum(grid_counts_by_beam.values()))},
-        {"Metric": "Beam thickness (cm)", "Value": f"{BEAM_HEIGHT_CM:.0f}"},
-    ]
-
-    with summary_file.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(target, fieldnames=["Metric", "Value"])
-        writer.writeheader()
-        writer.writerows(summary_rows)
 
     return BEAM_OUTPUT_DIR
 

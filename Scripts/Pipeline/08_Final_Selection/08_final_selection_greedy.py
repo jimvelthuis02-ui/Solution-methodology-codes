@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+from typing import Any
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
@@ -20,7 +21,7 @@ def _load_base_stage8_module():
 
 
 def build_final_selection_greedy_anchor() -> Path:
-    stage8 = _load_base_stage8_module()
+    stage8: Any = _load_base_stage8_module()
 
     stage6_dir = common.OUTPUT_ROOT / "06_Layout_Generation_Greedy"
     stage7_dir = common.OUTPUT_ROOT / "07_Robustness_Evaluation_Greedy"
