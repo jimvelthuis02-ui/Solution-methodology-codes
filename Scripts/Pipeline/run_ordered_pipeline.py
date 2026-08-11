@@ -1036,10 +1036,10 @@ ORDERED_SCRIPTS = [
     "07_Robustness_Evaluation/07_robustness_evaluation_greedy.py",
     "08_Final_Selection/08_final_selection.py",
     "08_Final_Selection/08_final_selection_greedy.py",
+    "08_Final_Selection/08_heuristic_variants_common.py",
     "06_Layout_Generation/06_layout_generation_heuristics.py",
     "07_Robustness_Evaluation/07_robustness_heuristics.py",
     "08_Final_Selection/08_final_selection_heuristics.py",
-    "09_Heuristic_Comparison/09_layout_heuristic_comparison.py",
 ]
 
 

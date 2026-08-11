@@ -3,103 +3,35 @@ import importlib.util
 from pathlib import Path
 import shutil
 import sys
-from typing import Any
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
+STAGE8_DIR = PIPELINE_ROOT / "08_Final_Selection"
+if str(STAGE8_DIR) not in sys.path:
+    sys.path.insert(0, str(STAGE8_DIR))
 
 import run_ordered_pipeline as common
+
+
+def _load_variants_common_module():
+    module_path = STAGE8_DIR / "08_heuristic_variants_common.py"
+    spec = importlib.util.spec_from_file_location("heuristic_variants_common_for_stage7", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load shared helper module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+variants_common = _load_variants_common_module()
 
 
 OUTPUT_DIR = common.OUTPUT_ROOT / "07_Robustness_Evaluation_Comparison"
 VARIANTS_ROOT = OUTPUT_DIR / "Variants"
 
-VARIANTS = [
-    {
-        "label": "Baseline_None",
-        "construction_method": "baseline",
-        "use_beam_optimizer": False,
-        "use_local_search": False,
-        "improvement_method": "none",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Baseline_LocalSearch",
-        "construction_method": "baseline",
-        "use_beam_optimizer": False,
-        "use_local_search": True,
-        "improvement_method": "local_search",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "YES",
-    },
-    {
-        "label": "Baseline_BeamPreserving",
-        "construction_method": "baseline",
-        "use_beam_optimizer": True,
-        "use_local_search": False,
-        "improvement_method": "beam_preserving",
-        "beam_preserving_optimizer": "YES",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Baseline_BeamPlusLocalSearch",
-        "construction_method": "baseline",
-        "use_beam_optimizer": True,
-        "use_local_search": True,
-        "improvement_method": "beam_preserving_plus_local_search",
-        "beam_preserving_optimizer": "YES",
-        "local_search_optimizer": "YES",
-    },
-    {
-        "label": "Greedy_None",
-        "construction_method": "greedy",
-        "use_beam_optimizer": False,
-        "use_local_search": False,
-        "improvement_method": "none",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Greedy_LocalSearch",
-        "construction_method": "greedy",
-        "use_beam_optimizer": False,
-        "use_local_search": True,
-        "improvement_method": "local_search",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "YES",
-    },
-    {
-        "label": "Greedy_BeamPreserving",
-        "construction_method": "greedy",
-        "use_beam_optimizer": True,
-        "use_local_search": False,
-        "improvement_method": "beam_preserving",
-        "beam_preserving_optimizer": "YES",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Greedy_BeamPlusLocalSearch",
-        "construction_method": "greedy",
-        "use_beam_optimizer": True,
-        "use_local_search": True,
-        "improvement_method": "beam_preserving_plus_local_search",
-        "beam_preserving_optimizer": "YES",
-        "local_search_optimizer": "YES",
-    },
-]
-
-HEURISTIC_FIELDS = [
-    "Heuristic_Label",
-    "Construction_Method",
-    "Improvement_Method",
-    "Beam_Preserving_Optimizer",
-    "Local_Search_Optimizer",
-]
-
-# Exact beam-order search can become expensive on long columns.
-BEAM_ORDER_EXACT_SLOT_LIMIT = 14
+VARIANTS = variants_common.VARIANTS
+HEURISTIC_FIELDS = variants_common.HEURISTIC_FIELDS
 
 
 def _read_csv_with_fieldnames(path: Path) -> tuple[list[dict[str, str]], list[str]]:
@@ -121,57 +53,8 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) ->
         writer.writerows(rows)
 
 
-def _make_bounded_best_slot_order(original_fn):
-    def _bounded(slot_sizes: list[float], target_heights: list[float]) -> list[float]:
-        if len(slot_sizes) <= BEAM_ORDER_EXACT_SLOT_LIMIT:
-            return original_fn(slot_sizes, target_heights)
-        if len(slot_sizes) <= 1 or not target_heights:
-            return list(slot_sizes)
-
-        remaining = [int(round(value)) for value in slot_sizes]
-        ordered: list[int] = []
-        prefix_height = 0
-        tolerance = float(getattr(common, "BEAM_RELOCATION_TOLERANCE_CM", 1e-9))
-
-        while remaining:
-            best_idx = 0
-            best_key: tuple[int, float, int] | None = None
-            seen: dict[int, int] = {}
-
-            for idx, size in enumerate(remaining):
-                if size in seen:
-                    continue
-                seen[size] = idx
-                next_prefix = prefix_height + size
-                min_delta = min(abs(next_prefix - float(target)) for target in target_heights)
-                match = 1 if min_delta <= tolerance else 0
-                candidate_key = (match, -min_delta, size)
-                if best_key is None or candidate_key > best_key:
-                    best_key = candidate_key
-                    best_idx = idx
-
-            chosen = remaining.pop(best_idx)
-            ordered.append(chosen)
-            prefix_height += chosen
-
-        return [float(value) for value in ordered]
-
-    return _bounded
-
-
-def _load_stage9_module() -> Any:
-    stage9_path = PIPELINE_ROOT / "09_Heuristic_Comparison" / "09_layout_heuristic_comparison.py"
-    spec = importlib.util.spec_from_file_location("stage9_for_stage7_variants", stage9_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load Stage 9 module from {stage9_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _stage7_variant_file(variant: dict[str, object]) -> Path:
-    folder = "07_Robustness_Evaluation_Greedy" if str(variant["construction_method"]) == "greedy" else "07_Robustness_Evaluation"
-    return VARIANTS_ROOT / str(variant["label"]) / folder / "Candidate_Layout_Robustness_Summary.csv"
+    return variants_common.stage7_dir(VARIANTS_ROOT, variant) / "Candidate_Layout_Robustness_Summary.csv"
 
 
 def _generate_stage7_variants() -> None:
@@ -179,21 +62,17 @@ def _generate_stage7_variants() -> None:
         shutil.rmtree(VARIANTS_ROOT)
     VARIANTS_ROOT.mkdir(parents=True, exist_ok=True)
 
-    stage9: Any = _load_stage9_module()
-    stage9.VARIANTS_ROOT = VARIANTS_ROOT
-
-    original_best_slot_order = common._best_slot_order_for_targets
-    common._best_slot_order_for_targets = _make_bounded_best_slot_order(original_best_slot_order)
+    original_best_slot_order = variants_common.apply_bounded_beam_order()
 
     stage6_impact_rows: list[dict[str, str]] = []
     try:
         for variant in VARIANTS:
             print(f"Running Stage 7 variant: {variant['label']}", flush=True)
-            stage9._run_stage6_variant(variant, stage6_impact_rows)
-            stage9._run_stage7_variant(variant)
+            variants_common.run_stage6_variant(VARIANTS_ROOT, variant, stage6_impact_rows)
+            variants_common.run_stage7_variant(VARIANTS_ROOT, variant)
             print(f"Completed Stage 7 variant: {variant['label']}", flush=True)
     finally:
-        common._best_slot_order_for_targets = original_best_slot_order
+        variants_common.restore_bounded_beam_order(original_best_slot_order)
 
 
 def _decorate_row(row: dict[str, str], variant: dict[str, object]) -> dict[str, str]:
