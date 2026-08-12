@@ -1,8 +1,13 @@
 import csv
 import importlib.util
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
 

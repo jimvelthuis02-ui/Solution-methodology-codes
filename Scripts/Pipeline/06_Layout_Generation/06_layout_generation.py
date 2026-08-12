@@ -312,6 +312,7 @@ def _slot_distribution_signature(column_assignments: dict[str, list[float]]) -> 
     for slots in column_assignments.values():
         for slot_size in slots:
             counts[int(round(slot_size))] += 1
+    counts = common._exclude_fixed_doorgang_slot_counts(counts)
     return "|".join(f"{size}:{count}" for size, count in sorted(counts.items()))
 
 
@@ -413,7 +414,9 @@ def _empty_locations_rows_by_slot_size(
             continue
 
         minimum_counts = _parse_count_signature(str(row.get("Minimum_Required_Counts", "")))
-        total_counts = _parse_count_signature(str(row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+        total_counts = common._exclude_fixed_doorgang_slot_counts(
+            _parse_count_signature(str(row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+        )
         occupied_exact = _occupied_allocation_by_exact_slot_size(minimum_counts, total_counts)
 
         all_sizes = sorted(set(total_counts.keys()) | set(occupied_exact.keys()))
@@ -587,7 +590,8 @@ def _cumulative_coverage_signature(column_assignments: dict[str, list[float]]) -
 
 
 def _slot_signatures_from_location_rows(location_rows: list[dict[str, str]]) -> tuple[str, str]:
-    # Recompute slot-distribution signatures directly from location-level rows.
+    # Recompute slot-distribution signatures directly from location-level rows,
+    # excluding the fixed physical doorgang rows from the storage-capacity totals.
     exact_counts: dict[int, int] = defaultdict(int)
     for row in location_rows:
         slot_size = common._to_float(row.get("Assigned_Slot_Size_cm"))
@@ -595,6 +599,7 @@ def _slot_signatures_from_location_rows(location_rows: list[dict[str, str]]) -> 
             continue
         exact_counts[int(round(slot_size))] += 1
 
+    exact_counts = common._exclude_fixed_doorgang_slot_counts(exact_counts)
     distribution = "|".join(f"{size}:{count}" for size, count in sorted(exact_counts.items()))
 
     running = 0
@@ -1139,7 +1144,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         )
 
         # Compute utilization and implementation-effort KPIs per configuration.
-        assigned_total = len(generated_location_rows)
+        assigned_total = max(len(generated_location_rows) - common._fixed_doorgang_location_total(), 0)
         layout_physical_locations = assigned_total
         required_locations_total = sum(base_exact_counts.values())
         total_used_height = sum(used_by_column.values())

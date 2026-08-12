@@ -7,16 +7,16 @@ import sys
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
-STAGE8_DIR = PIPELINE_ROOT / "08_Final_Selection"
-if str(STAGE8_DIR) not in sys.path:
-    sys.path.insert(0, str(STAGE8_DIR))
+HEURISTIC_DIR = PIPELINE_ROOT / "Heuristic_Variants"
+if str(HEURISTIC_DIR) not in sys.path:
+    sys.path.insert(0, str(HEURISTIC_DIR))
 
 import run_ordered_pipeline as common
 
 
 def _load_variants_common_module():
-    module_path = STAGE8_DIR / "08_heuristic_variants_common.py"
-    spec = importlib.util.spec_from_file_location("heuristic_variants_common_for_stage8", module_path)
+    module_path = HEURISTIC_DIR / "heuristic_variants.py"
+    spec = importlib.util.spec_from_file_location("heuristic_variants_for_stage8", module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load shared helper module from {module_path}")
     module = importlib.util.module_from_spec(spec)

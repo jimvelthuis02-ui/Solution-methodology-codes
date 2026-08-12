@@ -238,10 +238,48 @@ def _parse_size_count_signature(value: str) -> dict[int, int]:
     return counts
 
 
+def _actual_occupied_by_size(layout_row: dict[str, str]) -> dict[int, int]:
+    """Use the same best-fit exact-slot allocation used during layout generation so
+    extra occupied slot sizes in the realized layout are included in KPI math."""
+    minimum_by_size = _parse_size_count_signature(str(layout_row.get("Minimum_Required_Counts", "")))
+    total_by_size = common._exclude_fixed_doorgang_slot_counts(
+        _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+    )
+
+    remaining_capacity = {size: max(int(count), 0) for size, count in total_by_size.items()}
+    occupied_by_size: dict[int, int] = {}
+    capacity_sizes = sorted(remaining_capacity.keys())
+
+    for demand_size in sorted(minimum_by_size.keys(), reverse=True):
+        remaining_demand = max(int(minimum_by_size.get(demand_size, 0)), 0)
+        if remaining_demand <= 0:
+            continue
+
+        for capacity_size in capacity_sizes:
+            if capacity_size < demand_size:
+                continue
+            available = remaining_capacity.get(capacity_size, 0)
+            if available <= 0:
+                continue
+
+            used = min(available, remaining_demand)
+            occupied_by_size[capacity_size] = occupied_by_size.get(capacity_size, 0) + used
+            remaining_capacity[capacity_size] = available - used
+            remaining_demand -= used
+
+            if remaining_demand <= 0:
+                break
+
+    return occupied_by_size
+
+
 def _space_utilization_metrics(layout_row: dict[str, str]) -> tuple[int, int, int, int, int, float]:
-    # Compare occupied vs empty layout space at the fixed Base_Count demand.
-    occupied_by_size = _parse_size_count_signature(str(layout_row.get("Minimum_Required_Counts", "")))
-    total_by_size = _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+    # Compare actual occupied layout space against the realized top-filled layout,
+    # including any extra slot sizes that appear in the final layout.
+    occupied_by_size = _actual_occupied_by_size(layout_row)
+    total_by_size = common._exclude_fixed_doorgang_slot_counts(
+        _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+    )
 
     all_sizes = sorted(set(occupied_by_size.keys()) | set(total_by_size.keys()))
     occupied_locations = 0
@@ -416,7 +454,7 @@ def build_final_selection() -> list[dict[str, str]]:
             "Rank_Additional_Fill_Extra_Slot_Size_Variants",
             False,
         ),
-        ("Space_Utilization_Pct", "Rank_Space_Utilization_Pct", True),
+        ("Space_Utilization_Pct", "Rank_Space_Utilization_Pct", False),
         ("Occupancy_Rate", "Rank_Occupancy_Rate", False),
     ]
 

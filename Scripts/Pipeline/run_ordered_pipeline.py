@@ -157,6 +157,24 @@ def _slot_size_variable_name(slot_size: float) -> str:
     return f"x_{int(round(slot_size))}"
 
 
+FIXED_DOORGANG_SLOT_COUNTS = {
+    224: 4,
+    229: 6,
+    234: 1,
+}
+
+
+def _fixed_doorgang_location_total() -> int:
+    return sum(FIXED_DOORGANG_SLOT_COUNTS.values())
+
+
+def _exclude_fixed_doorgang_slot_counts(counts: dict[int, int]) -> dict[int, int]:
+    adjusted = {size: max(int(count), 0) for size, count in counts.items()}
+    for size, doorway_count in FIXED_DOORGANG_SLOT_COUNTS.items():
+        adjusted[size] = max(adjusted.get(size, 0) - doorway_count, 0)
+    return {size: count for size, count in sorted(adjusted.items()) if count > 0}
+
+
 def _is_split_location(location: str) -> bool:
     match = LOCATION_CODE_PATTERN.match(location)
     if not match:
@@ -1036,7 +1054,7 @@ ORDERED_SCRIPTS = [
     "07_Robustness_Evaluation/07_robustness_evaluation_greedy.py",
     "08_Final_Selection/08_final_selection.py",
     "08_Final_Selection/08_final_selection_greedy.py",
-    "08_Final_Selection/08_heuristic_variants_common.py",
+    "Heuristic_Variants/heuristic_variants.py",
     "06_Layout_Generation/06_layout_generation_heuristics.py",
     "07_Robustness_Evaluation/07_robustness_heuristics.py",
     "08_Final_Selection/08_final_selection_heuristics.py",
