@@ -90,6 +90,19 @@ def _decorate_row(row: dict[str, str], variant: dict[str, object]) -> dict[str, 
     return merged
 
 
+def _rank_rows_globally(rows: list[dict[str, str]], metric_name: str, rank_field: str) -> None:
+    values: list[float] = []
+    for row in rows:
+        value = common._to_float(row.get(metric_name))
+        values.append(value if value is not None else 0.0)
+
+    ordered_unique = sorted(set(values), reverse=False)
+    rank_by_value = {value: index + 1 for index, value in enumerate(ordered_unique)}
+    for row in rows:
+        value = common._to_float(row.get(metric_name))
+        row[rank_field] = str(rank_by_value.get(value if value is not None else 0.0, len(ordered_unique) + 1))
+
+
 def _merge_variant_file(output_name: str) -> Path:
     merged_rows: list[dict[str, str]] = []
     base_fieldnames: list[str] = []
@@ -114,6 +127,16 @@ def _merge_variant_file(output_name: str) -> Path:
             f"No Stage 8 source files available to build: {output_path}"
         )
 
+    for metric_name, rank_field in [
+        ("Beam_Relocations_Total", "Rank_Beam_Relocations_Total"),
+        ("Empty_Slot_Space_m3", "Rank_Empty_Slot_Space_m3"),
+        ("Total_Slot_Space_m3", "Rank_Total_Slot_Space_m3"),
+        ("Space_Utilization_Pct", "Rank_Space_Utilization_Pct"),
+        ("Occupancy_Rate", "Rank_Occupancy_Rate"),
+    ]:
+        if any(metric_name in row for row in merged_rows):
+            _rank_rows_globally(merged_rows, metric_name, rank_field)
+
     _write_csv(output_path, HEURISTIC_FIELDS + base_fieldnames, merged_rows)
     return output_path
 
@@ -126,9 +149,7 @@ def build_merged_final_selection_outputs() -> list[Path]:
         _merge_variant_file("Final_Layout_By_Rack_Column.csv"),
         _merge_variant_file("Final_Layout_By_Location.csv"),
         _merge_variant_file("Final_Layout_By_Segment.csv"),
-        variants_common.write_variant_definitions(OUTPUT_DIR / "Heuristic_Variant_Definitions.csv"),
         variants_common.write_stage6_impact_output(OUTPUT_DIR / "Stage6_Heuristic_Impact_All.csv", stage6_impact_rows),
-        variants_common.build_wide_comparison(OUTPUT_DIR / "Layout_Heuristic_Wide.csv", VARIANTS_ROOT),
     ]
 
     if VARIANTS_ROOT.exists():

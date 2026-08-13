@@ -168,7 +168,61 @@ def _fixed_doorgang_location_total() -> int:
     return sum(FIXED_DOORGANG_SLOT_COUNTS.values())
 
 
+def _explicit_occupied_target_total() -> int:
+    # The 890 target is the working occupied-location demand. Physical fixed
+    # doorway slots (including the 234 cm slot) remain in the layout but are
+    # excluded from the storage-demand total used for matching this target.
+    return max(int(BASE_OCCUPIED_LOCATIONS_COUNT), 0)
+
+
+def _enforce_occupied_location_target(
+    counts: dict[float, int],
+    target_total: int | None = None,
+) -> dict[float, int]:
+    """Normalize exact slot counts so the base occupied-demand target is explicit."""
+    if not counts:
+        return {}
+
+    target = int(BASE_OCCUPIED_LOCATIONS_COUNT if target_total is None else target_total)
+    normalized = {float(size): max(int(value), 0) for size, value in counts.items() if float(size) > 0.0}
+    if not normalized:
+        return {}
+
+    current_total = sum(normalized.values())
+    if current_total == target:
+        return dict(sorted(normalized.items()))
+
+    delta = target - current_total
+    if delta > 0:
+        anchor_size = min(normalized)
+        normalized[anchor_size] = normalized.get(anchor_size, 0) + delta
+    elif delta < 0:
+        remaining = -delta
+        for size in sorted(normalized.keys(), reverse=True):
+            if remaining <= 0:
+                break
+            remove = min(normalized[size], remaining)
+            normalized[size] -= remove
+            remaining -= remove
+        normalized = {size: count for size, count in normalized.items() if count > 0}
+        while remaining > 0 and normalized:
+            for size in sorted(normalized.keys()):
+                if remaining <= 0:
+                    break
+                remove = min(normalized[size], remaining)
+                normalized[size] -= remove
+                remaining -= remove
+            normalized = {size: count for size, count in normalized.items() if count > 0}
+            if remaining > 0 and not normalized:
+                break
+
+    return dict(sorted(normalized.items()))
+
+
 def _exclude_fixed_doorgang_slot_counts(counts: dict[int, int]) -> dict[int, int]:
+    # Physical doorway slots such as 224, 229, and 234 are not active SKU-demand
+    # locations. They are removed from the effective storage count, while the
+    # base occupied-location target remains the business target to satisfy.
     adjusted = {size: max(int(count), 0) for size, count in counts.items()}
     for size, doorway_count in FIXED_DOORGANG_SLOT_COUNTS.items():
         adjusted[size] = max(adjusted.get(size, 0) - doorway_count, 0)
@@ -848,14 +902,29 @@ def _best_slot_order_for_targets(
     return [float(value) for value in order] if order else list(slot_sizes)
 
 
-def _optimize_column_slot_order_for_beam_preservation(
+def _count_prefix_matches(slot_sequence: list[float], target_heights: list[float]) -> int:
+    """Return how many baseline beam bottoms are matched by cumulative slot heights."""
+    if not slot_sequence or not target_heights:
+        return 0
+
+    matched = 0
+    seen_targets: set[float] = set()
+    cumulative = 0.0
+    for slot_size in slot_sequence:
+        cumulative += float(slot_size)
+        for target in target_heights:
+            if abs(cumulative - float(target)) <= BEAM_RELOCATION_TOLERANCE_CM + 1e-9:
+                seen_targets.add(float(target))
+    return len(seen_targets)
+
+
+def _constructive_beam_preservation_pass(
     column_assignments: dict[str, list[float]],
     segments: set[tuple[str, int, int]],
     baseline_beam_heights: dict[str, float],
     fixed_prefix_by_column: dict[str, list[float]] | None = None,
 ) -> dict[str, list[float]]:
-    # Reorder each column's slot stack to preserve as many baseline beam heights
-    # as possible within the column's structural segment.
+    """Constructively reorder each segment to maximize the number of existing beam bottoms that can stay in place."""
     if not column_assignments:
         return {}
 
@@ -875,32 +944,63 @@ def _optimize_column_slot_order_for_beam_preservation(
         for col in range(c0, c1 + 1):
             column_segment[f"{rack}{col:02d}"] = (rack, c0, c1)
 
-    optimized: dict[str, list[float]] = {}
     fixed_prefix_by_column = fixed_prefix_by_column or {}
-    for column_key, slots in column_assignments.items():
-        segment = column_segment.get(column_key)
-        targets = segment_targets.get(segment, []) if segment is not None else []
+    optimized = {column_key: [float(value) for value in values] for column_key, values in column_assignments.items()}
 
-        fixed_prefix = list(fixed_prefix_by_column.get(column_key, []))
-        movable_slots = list(slots)
-        if fixed_prefix and len(movable_slots) >= len(fixed_prefix):
-            prefix_match = True
-            for idx, value in enumerate(fixed_prefix):
-                if abs(float(movable_slots[idx]) - float(value)) > 1e-9:
-                    prefix_match = False
-                    break
-            if prefix_match:
-                movable_slots = movable_slots[len(fixed_prefix):]
+    for segment in sorted(segments):
+        segment_columns = [f"{segment[0]}{col:02d}" for col in range(segment[1], segment[2] + 1)]
+        targets = segment_targets.get(segment, [])
+        if not targets:
+            continue
 
-        if fixed_prefix:
-            fixed_height = sum(float(value) for value in fixed_prefix)
+        best_score = -1
+        best_orderings: dict[str, list[float]] = {}
+        for column_key in segment_columns:
+            if column_key not in optimized:
+                continue
+            slots = [float(value) for value in optimized.get(column_key, [])]
+            fixed_prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
+            movable = list(slots)
+            if fixed_prefix and len(movable) >= len(fixed_prefix):
+                prefix_match = True
+                for idx, value in enumerate(fixed_prefix):
+                    if abs(float(movable[idx]) - float(value)) > 1e-9:
+                        prefix_match = False
+                        break
+                if prefix_match:
+                    movable = movable[len(fixed_prefix):]
+
+            fixed_height = sum(fixed_prefix)
             adjusted_targets = [target - fixed_height for target in targets if target > fixed_height]
-            ordered_tail = _best_slot_order_for_targets(movable_slots, adjusted_targets)
-            optimized[column_key] = fixed_prefix + ordered_tail
-        else:
-            optimized[column_key] = _best_slot_order_for_targets(movable_slots, targets)
+            ordered_moves = _best_slot_order_for_targets(movable, adjusted_targets)
+            candidate = fixed_prefix + ordered_moves
+            score = _count_prefix_matches(candidate, targets)
+            if score > best_score:
+                best_score = score
+                best_orderings = {column_key: candidate}
+            elif score == best_score and candidate:
+                best_orderings[column_key] = candidate
+
+        if best_score > 0:
+            for column_key, candidate in best_orderings.items():
+                optimized[column_key] = candidate
 
     return optimized
+
+
+def _optimize_column_slot_order_for_beam_preservation(
+    column_assignments: dict[str, list[float]],
+    segments: set[tuple[str, int, int]],
+    baseline_beam_heights: dict[str, float],
+    fixed_prefix_by_column: dict[str, list[float]] | None = None,
+) -> dict[str, list[float]]:
+    # Backward-compatible wrapper around the constructive beam-preservation pass.
+    return _constructive_beam_preservation_pass(
+        column_assignments=column_assignments,
+        segments=segments,
+        baseline_beam_heights=baseline_beam_heights,
+        fixed_prefix_by_column=fixed_prefix_by_column,
+    )
 
 
 def _beam_relocations(

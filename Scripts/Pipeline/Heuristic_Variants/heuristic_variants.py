@@ -23,33 +23,6 @@ VARIANTS = [
         "local_search_optimizer": "NO",
     },
     {
-        "label": "Baseline_LocalSearch",
-        "construction_method": "baseline",
-        "use_beam_optimizer": False,
-        "use_local_search": True,
-        "improvement_method": "local_search",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "YES",
-    },
-    {
-        "label": "Baseline_BeamPreserving",
-        "construction_method": "baseline",
-        "use_beam_optimizer": True,
-        "use_local_search": False,
-        "improvement_method": "beam_preserving",
-        "beam_preserving_optimizer": "YES",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Baseline_BeamPlusLocalSearch",
-        "construction_method": "baseline",
-        "use_beam_optimizer": True,
-        "use_local_search": True,
-        "improvement_method": "beam_preserving_plus_local_search",
-        "beam_preserving_optimizer": "YES",
-        "local_search_optimizer": "YES",
-    },
-    {
         "label": "Greedy_None",
         "construction_method": "greedy",
         "use_beam_optimizer": False,
@@ -57,6 +30,24 @@ VARIANTS = [
         "improvement_method": "none",
         "beam_preserving_optimizer": "NO",
         "local_search_optimizer": "NO",
+    },
+    {
+        "label": "ConstructiveBeam_None",
+        "construction_method": "constructive_beam",
+        "use_beam_optimizer": False,
+        "use_local_search": False,
+        "improvement_method": "constructive_beam_preservation",
+        "beam_preserving_optimizer": "CONSTRUCTIVE",
+        "local_search_optimizer": "NO",
+    },
+    {
+        "label": "Baseline_LocalSearch",
+        "construction_method": "baseline",
+        "use_beam_optimizer": False,
+        "use_local_search": True,
+        "improvement_method": "local_search",
+        "beam_preserving_optimizer": "NO",
+        "local_search_optimizer": "YES",
     },
     {
         "label": "Greedy_LocalSearch",
@@ -68,21 +59,12 @@ VARIANTS = [
         "local_search_optimizer": "YES",
     },
     {
-        "label": "Greedy_BeamPreserving",
-        "construction_method": "greedy",
-        "use_beam_optimizer": True,
-        "use_local_search": False,
-        "improvement_method": "beam_preserving",
-        "beam_preserving_optimizer": "YES",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Greedy_BeamPlusLocalSearch",
-        "construction_method": "greedy",
-        "use_beam_optimizer": True,
+        "label": "ConstructiveBeam_LocalSearch",
+        "construction_method": "constructive_beam",
+        "use_beam_optimizer": False,
         "use_local_search": True,
-        "improvement_method": "beam_preserving_plus_local_search",
-        "beam_preserving_optimizer": "YES",
+        "improvement_method": "constructive_beam_preservation_plus_local_search",
+        "beam_preserving_optimizer": "CONSTRUCTIVE",
         "local_search_optimizer": "YES",
     },
 ]
@@ -297,7 +279,7 @@ def _make_greedy_allocate_wrapper(stage6: Any, greedy_helpers: Any):
 
 
 def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_rows: list[dict[str, str]]):
-    use_beam = bool(variant.get("use_beam_optimizer"))
+    use_beam = str(variant.get("beam_preserving_optimizer", "NO")).upper() == "CONSTRUCTIVE"
     use_local = bool(variant.get("use_local_search"))
     original_local_search = stage6._local_search_minimize_beam_relocations
 
@@ -331,7 +313,7 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
         after_beam = before_any
         beam_changed = False
         if use_beam:
-            working_assignments = common._optimize_column_slot_order_for_beam_preservation(
+            working_assignments = common._constructive_beam_preservation_pass(
                 column_assignments=column_assignments,
                 segments=beam_segments,
                 baseline_beam_heights=current_beam_heights,
@@ -390,8 +372,6 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 "Construction_Method": str(variant["construction_method"]),
                 "Improvement_Method": str(variant["improvement_method"]),
                 "Config_ID": str(config_id),
-                "Layout_ID": str(layout_id),
-                "Style": str(style),
                 "Beam_Relocations_Before_Any_Improvement": str(before_any),
                 "Beam_Relocations_After_Beam_Optimizer": str(after_beam),
                 "Beam_Relocations_After_Local_Search": str(reloc_after_search),
@@ -519,8 +499,6 @@ def write_stage6_impact_output(output_file: Path, impact_rows: list[dict[str, st
             "Construction_Method",
             "Improvement_Method",
             "Config_ID",
-            "Layout_ID",
-            "Style",
             "Beam_Relocations_Before_Any_Improvement",
             "Beam_Relocations_After_Beam_Optimizer",
             "Beam_Relocations_After_Local_Search",

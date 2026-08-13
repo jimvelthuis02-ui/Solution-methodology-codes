@@ -126,9 +126,8 @@ def _base_exact_counts(rows: list[dict[str, str]]) -> dict[float, int]:
         for row in rows
         if str(row.get("SKU_Scenario", "")).strip() == "Base_Count"
     ]
-    if base_rows:
-        return _worst_case_exact_counts(base_rows)
-    return _worst_case_exact_counts(rows)
+    exact_counts = _worst_case_exact_counts(base_rows) if base_rows else _worst_case_exact_counts(rows)
+    return common._enforce_occupied_location_target(exact_counts)
 
 
 def _layout_signature(generated_location_rows: list[dict[str, str]]) -> tuple[str, ...]:
@@ -1082,6 +1081,12 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             beam_segments,
             fixed_prefix_by_column=fixed_prefix_by_column,
             doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+        )
+        column_assignments = common._constructive_beam_preservation_pass(
+            column_assignments=column_assignments,
+            segments=beam_segments,
+            baseline_beam_heights=current_beam_heights,
+            fixed_prefix_by_column=fixed_prefix_by_column,
         )
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
         if smallest_config_slot > 0.0:

@@ -87,6 +87,7 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
             next_required = cumulative_required_by_size.get(next_size, 0) if next_size is not None else 0
             exact_required_by_size[slot_size] = max(cumulative_required_by_size.get(slot_size, 0) - next_required, 0)
 
+        exact_required_by_size = common._enforce_occupied_location_target(exact_required_by_size)
         exact_total = sum(exact_required_by_size.values())
         summary_rows.append(
             {

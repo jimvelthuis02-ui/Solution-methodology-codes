@@ -412,6 +412,10 @@ def build_final_selection() -> list[dict[str, str]]:
         )
         required_locations_total = common._to_int_default(row.get("Required_Locations_Total"), 0)
 
+        occupied_space_m3 = occupied_space / 100.0
+        empty_space_m3 = empty_space / 100.0
+        total_space_m3 = total_space / 100.0
+
         candidate_rows.append(
             {
                 "Config_ID": str(row.get("Config_ID", "")),
@@ -426,6 +430,9 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Occupied_Slot_Space_cm": str(occupied_space),
                 "Empty_Slot_Space_cm": str(empty_space),
                 "Total_Slot_Space_cm": str(total_space),
+                "Occupied_Slot_Space_m3": f"{occupied_space_m3:.6f}",
+                "Empty_Slot_Space_m3": f"{empty_space_m3:.6f}",
+                "Total_Slot_Space_m3": f"{total_space_m3:.6f}",
                 "Space_Utilization_Pct": f"{utilization_pct:.4f}",
                 "Beam_Relocations_Total": str(common._to_int_default(row.get("Beam_Relocations_Total"), 0)),
                 "Additional_Beams_Required": str(common._to_int_default(row.get("Additional_Beams_Required"), 0)),
@@ -454,6 +461,8 @@ def build_final_selection() -> list[dict[str, str]]:
             "Rank_Additional_Fill_Extra_Slot_Size_Variants",
             False,
         ),
+        ("Empty_Slot_Space_m3", "Rank_Empty_Slot_Space_m3", False),
+        ("Total_Slot_Space_m3", "Rank_Total_Slot_Space_m3", False),
         ("Space_Utilization_Pct", "Rank_Space_Utilization_Pct", False),
         ("Occupancy_Rate", "Rank_Occupancy_Rate", False),
     ]
@@ -487,6 +496,11 @@ def build_final_selection() -> list[dict[str, str]]:
             "Occupied_Slot_Space_cm",
             "Empty_Slot_Space_cm",
             "Total_Slot_Space_cm",
+            "Occupied_Slot_Space_m3",
+            "Empty_Slot_Space_m3",
+            "Rank_Empty_Slot_Space_m3",
+            "Total_Slot_Space_m3",
+            "Rank_Total_Slot_Space_m3",
             "Space_Utilization_Pct",
             "Rank_Space_Utilization_Pct",
             "Beam_Relocations_Total",
