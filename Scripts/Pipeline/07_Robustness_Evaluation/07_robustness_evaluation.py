@@ -125,6 +125,10 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 or layout.get("Layout_Slot_Size_Distribution", "")
             )
         )
+        doorgang_alignment_allowance = common._to_int_default(
+            layout.get("Doorgang_Usable_Alignment_Conversions"),
+            0,
+        )
 
         for sku_scenario, sku_count in OCCUPIED_LOCATION_SCENARIOS.items():
             occupancy = sku_count / max(assigned_locations_total, 1)
@@ -136,9 +140,13 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
 
             required_by_size = scenario_requirements.get((str(layout.get("Config_ID", "")), sku_scenario), {})
             slot_coverage_pass = True
+            largest_required_size = max(required_by_size.keys(), default=-1)
             for size, required in required_by_size.items():
                 available = _available_at_or_above(layout_slot_counts, size)
-                if required - available > 0:
+                deficit = required - available
+                if deficit > 0:
+                    if size == largest_required_size and deficit <= doorgang_alignment_allowance:
+                        continue
                     slot_coverage_pass = False
                     break
 

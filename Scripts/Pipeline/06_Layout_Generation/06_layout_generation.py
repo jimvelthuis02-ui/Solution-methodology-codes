@@ -463,26 +463,44 @@ def _enforce_segment_uniform_slot_profiles(
     for rack, c0, c1 in sorted(segments):
         segment_columns = [f"{rack}{col:02d}" for col in range(c0, c1 + 1)]
         threshold = doorgang_thresholds_by_rack.get(rack)
+        locked_prefix_by_column: dict[str, list[float]] = {
+            column_key: [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
+            for column_key in segment_columns
+        }
         if threshold is not None:
-            doorgang_column, _doorgang_height = threshold
-            # Doorgang-adjacent 3-column segment: keep the left pair uniformized
-            # together and do not force the doorgang column into that same stack.
+            doorgang_column, doorgang_height = threshold
+            # Doorgang-adjacent 3-column segment: below the doorgang beam top, the
+            # left pair may still differ from the doorgang column. Above that beam,
+            # all three columns must share the same slot-size order.
             if c1 == doorgang_column and c0 == doorgang_column - 2:
-                segment_columns = [f"{rack}{col:02d}" for col in range(c0, c1)]
+                uniform_from_height = float(doorgang_height) + float(common.BEAM_HEIGHT)
+                for column_key in segment_columns:
+                    slots = uniform.get(column_key, [])
+                    if not slots:
+                        continue
+                    running_height = 0.0
+                    split_index = len(slots)
+                    for idx, slot_size in enumerate(slots):
+                        slot_bottom = running_height + (float(common.BEAM_HEIGHT) * idx)
+                        if slot_bottom >= uniform_from_height - 1e-9:
+                            split_index = idx
+                            break
+                        running_height += float(slot_size)
+                    locked_prefix_by_column[column_key] = [float(value) for value in slots[:split_index]]
         profiles: dict[tuple[int, ...], tuple[int, float, int]] = {}
         minimum_locations = max(int(common.MIN_LOCATIONS_PER_COLUMN), 1)
         required_suffix_len = 0
         for column_key in segment_columns:
             if column_key not in uniform:
                 continue
-            prefix_len = len(fixed_prefix_by_column.get(column_key, []))
+            prefix_len = len(locked_prefix_by_column.get(column_key, []))
             required_suffix_len = max(required_suffix_len, max(minimum_locations - prefix_len, 0))
 
         def _suffix_is_feasible(suffix: list[float]) -> bool:
             for column_key in segment_columns:
                 if column_key not in uniform:
                     continue
-                prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
+                prefix = [float(value) for value in locked_prefix_by_column.get(column_key, [])]
                 total_slots = len(prefix) + len(suffix)
                 allowed = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(total_slots - 1, common.MIN_BEAMS_PER_COLUMN)
                 used = sum(prefix) + sum(suffix)
@@ -494,7 +512,7 @@ def _enforce_segment_uniform_slot_profiles(
             slots = uniform.get(column_key, [])
             if not slots:
                 continue
-            prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
+            prefix = [float(value) for value in locked_prefix_by_column.get(column_key, [])]
             suffix_slots = list(slots)
             if prefix and len(slots) >= len(prefix):
                 prefix_matches = True
@@ -567,10 +585,153 @@ def _enforce_segment_uniform_slot_profiles(
 
         for column_key in segment_columns:
             if column_key in uniform:
-                prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
+                prefix = [float(value) for value in locked_prefix_by_column.get(column_key, [])]
                 uniform[column_key] = prefix + list(canonical_suffix)
 
     return uniform
+
+
+def _enforce_doorgang_spanning_beam_alignment(
+    column_assignments: dict[str, list[float]],
+    segments: set[tuple[str, int, int]],
+    doorgang_thresholds_by_rack: dict[str, tuple[int, float]],
+    fixed_prefix_by_column: dict[str, list[float]] | None = None,
+) -> tuple[dict[str, list[float]], int]:
+    # Physical rule: the doorgang beam elevation must exist across the full
+    # 3-column segment. Left columns may use multiple slots below that level,
+    # but above the doorgang beam the dominant (doorgang) column pattern rules.
+    if not column_assignments:
+        return {}, 0
+
+    adjusted: dict[str, list[float]] = {
+        column_key: [float(value) for value in slots]
+        for column_key, slots in column_assignments.items()
+    }
+    fixed_prefix_by_column = fixed_prefix_by_column or {}
+    lost_large_slot_allowance = 0
+
+    available_sizes = sorted(
+        {
+            int(round(float(value)))
+            for slots in adjusted.values()
+            for value in slots
+            if float(value) > 0.0
+        }
+    )
+
+    def _split_index_at_exact_beam_height(slots: list[float], threshold: float) -> int | None:
+        running = 0.0
+        for n, slot in enumerate(slots, start=1):
+            running += float(slot)
+            beam_bottom = running + float(common.BEAM_HEIGHT) * float(n - 1)
+            if abs(beam_bottom - float(threshold)) <= 1e-9:
+                return n
+        return None
+
+    def _split_index_first_at_or_above(slots: list[float], threshold: float) -> int:
+        running = 0.0
+        for n, slot in enumerate(slots, start=1):
+            running += float(slot)
+            beam_bottom = running + float(common.BEAM_HEIGHT) * float(n - 1)
+            if beam_bottom >= float(threshold) - 1e-9:
+                return n
+        return len(slots)
+
+    def _candidate_prefixes_for_threshold(threshold: int) -> list[list[float]]:
+        candidates: list[list[float]] = []
+        max_rows = 6
+
+        for n in range(1, max_rows + 1):
+            target_sum = int(threshold - int(common.BEAM_HEIGHT) * (n - 1))
+            if target_sum <= 0:
+                continue
+
+            def _dfs(remaining: int, depth: int, partial: list[int]) -> None:
+                if depth == n:
+                    if remaining == 0:
+                        candidates.append([float(value) for value in partial])
+                    return
+                for size in available_sizes:
+                    if size > remaining:
+                        break
+                    _dfs(remaining - size, depth + 1, partial + [size])
+
+            _dfs(target_sum, 0, [])
+
+        return candidates
+
+    prefix_candidates_cache: dict[int, list[list[float]]] = {}
+
+    def _best_prefix(existing_prefix: list[float], threshold: int) -> list[float] | None:
+        if threshold not in prefix_candidates_cache:
+            prefix_candidates_cache[threshold] = _candidate_prefixes_for_threshold(threshold)
+        candidates = prefix_candidates_cache.get(threshold, [])
+        if not candidates:
+            return None
+
+        existing_int = [int(round(value)) for value in existing_prefix]
+
+        def _score(candidate: list[float]) -> tuple[float, int, int]:
+            cand_int = [int(round(value)) for value in candidate]
+            overlap = min(len(cand_int), len(existing_int))
+            diff = sum(abs(cand_int[idx] - existing_int[idx]) for idx in range(overlap))
+            if len(cand_int) > overlap:
+                diff += sum(cand_int[overlap:])
+            if len(existing_int) > overlap:
+                diff += sum(existing_int[overlap:])
+            return (float(diff), abs(len(cand_int) - len(existing_int)), len(cand_int))
+
+        return min(candidates, key=_score)
+
+    for rack, c0, c1 in sorted(segments):
+        threshold = doorgang_thresholds_by_rack.get(rack)
+        if threshold is None:
+            continue
+
+        doorgang_column, doorgang_height = threshold
+        if not (c1 == doorgang_column and c0 == doorgang_column - 2):
+            continue
+
+        dominant_column_key = f"{rack}{doorgang_column:02d}"
+        dominant_slots = adjusted.get(dominant_column_key, [])
+        if not dominant_slots:
+            continue
+
+        dominant_split = _split_index_at_exact_beam_height(dominant_slots, float(doorgang_height))
+        if dominant_split is None:
+            dominant_split = _split_index_first_at_or_above(dominant_slots, float(doorgang_height))
+        dominant_suffix = [float(value) for value in dominant_slots[dominant_split:]]
+
+        for column_num in (doorgang_column - 2, doorgang_column - 1):
+            column_key = f"{rack}{column_num:02d}"
+            if column_key not in adjusted:
+                continue
+
+            # If this column has its own fixed doorgang row (for example rack K),
+            # do not force a second conversion.
+            if fixed_prefix_by_column.get(column_key):
+                continue
+
+            slots = adjusted[column_key]
+            if not slots:
+                continue
+
+            threshold_int = int(round(float(doorgang_height)))
+            split_at_or_above = _split_index_first_at_or_above(slots, float(doorgang_height))
+            existing_prefix = [float(value) for value in slots[:split_at_or_above]]
+            chosen_prefix = _best_prefix(existing_prefix, threshold_int)
+            if chosen_prefix is None:
+                # Fallback keeps the physical beam at threshold even without a
+                # combinational exact match in available representative sizes.
+                chosen_prefix = [float(doorgang_height)]
+
+            old_large = sum(1 for value in existing_prefix if float(value) >= float(doorgang_height) - 1e-9)
+            new_large = sum(1 for value in chosen_prefix if float(value) >= float(doorgang_height) - 1e-9)
+            lost_large_slot_allowance += max(old_large - new_large, 0)
+
+            adjusted[column_key] = list(chosen_prefix) + list(dominant_suffix)
+
+    return adjusted, lost_large_slot_allowance
 
 
 def _cumulative_coverage_signature(column_assignments: dict[str, list[float]]) -> str:
@@ -590,15 +751,15 @@ def _cumulative_coverage_signature(column_assignments: dict[str, list[float]]) -
 
 def _slot_signatures_from_location_rows(location_rows: list[dict[str, str]]) -> tuple[str, str]:
     # Recompute slot-distribution signatures directly from location-level rows,
-    # excluding the fixed physical doorgang rows from the storage-capacity totals.
+    # excluding only the actual non-usable doorgang rows from capacity totals.
     exact_counts: dict[int, int] = defaultdict(int)
     for row in location_rows:
+        if str(row.get("Usable_Location", "YES")).strip().upper() == "NO":
+            continue
         slot_size = common._to_float(row.get("Assigned_Slot_Size_cm"))
         if slot_size is None:
             continue
         exact_counts[int(round(slot_size))] += 1
-
-    exact_counts = common._exclude_fixed_doorgang_slot_counts(exact_counts)
     distribution = "|".join(f"{size}:{count}" for size, count in sorted(exact_counts.items()))
 
     running = 0
@@ -609,6 +770,21 @@ def _slot_signatures_from_location_rows(location_rows: list[dict[str, str]]) -> 
     cumulative_signature = "|".join(f"{size}:{cumulative[size]}" for size in sorted(cumulative.keys()))
 
     return distribution, cumulative_signature
+
+
+def _apply_nonusable_location_flags(
+    location_rows: list[dict[str, str]],
+    fixed_prefix_by_column: dict[str, list[float]],
+) -> list[dict[str, str]]:
+    flagged_rows: list[dict[str, str]] = []
+    nonusable_columns = set(fixed_prefix_by_column.keys())
+    for row in location_rows:
+        updated = dict(row)
+        column_key = f"{str(updated.get('Rack', '')).strip()}{str(updated.get('Column', '')).strip()}"
+        is_nonusable = column_key in nonusable_columns and str(updated.get("Row", "")).strip() == "01"
+        updated["Usable_Location"] = "NO" if is_nonusable else "YES"
+        flagged_rows.append(updated)
+    return flagged_rows
 
 
 def _enforce_min_locations_per_column(
@@ -758,6 +934,12 @@ def _local_search_minimize_beam_relocations(
                     fixed_prefix_by_column=fixed_prefix_by_column,
                     doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
                 )
+                proposal, _ = _enforce_doorgang_spanning_beam_alignment(
+                    proposal,
+                    beam_segments,
+                    doorgang_thresholds_by_rack,
+                    fixed_prefix_by_column=fixed_prefix_by_column,
+                )
                 if smallest_config_slot > 0.0:
                     proposal = _enforce_min_locations_per_column(
                         proposal,
@@ -816,6 +998,12 @@ def _local_search_minimize_beam_relocations(
                         beam_segments,
                         fixed_prefix_by_column=fixed_prefix_by_column,
                         doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+                    )
+                    proposal, _ = _enforce_doorgang_spanning_beam_alignment(
+                        proposal,
+                        beam_segments,
+                        doorgang_thresholds_by_rack,
+                        fixed_prefix_by_column=fixed_prefix_by_column,
                     )
                     if smallest_config_slot > 0.0:
                         proposal = _enforce_min_locations_per_column(
@@ -1082,12 +1270,25 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             fixed_prefix_by_column=fixed_prefix_by_column,
             doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
         )
+        column_assignments, doorgang_alignment_conversions = _enforce_doorgang_spanning_beam_alignment(
+            column_assignments,
+            beam_segments,
+            doorgang_thresholds_by_rack,
+            fixed_prefix_by_column=fixed_prefix_by_column,
+        )
         column_assignments = common._constructive_beam_preservation_pass(
             column_assignments=column_assignments,
             segments=beam_segments,
             baseline_beam_heights=current_beam_heights,
             fixed_prefix_by_column=fixed_prefix_by_column,
         )
+        column_assignments, extra_conversions = _enforce_doorgang_spanning_beam_alignment(
+            column_assignments,
+            beam_segments,
+            doorgang_thresholds_by_rack,
+            fixed_prefix_by_column=fixed_prefix_by_column,
+        )
+        doorgang_alignment_conversions += extra_conversions
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
         if smallest_config_slot > 0.0:
             column_assignments = _enforce_min_locations_per_column(
@@ -1127,6 +1328,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             segments=beam_segments,
             doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
         )
+        generated_location_rows = _apply_nonusable_location_flags(
+            generated_location_rows,
+            fixed_prefix_by_column,
+        )
+        layout_slot_distribution, layout_slot_cumulative = _slot_signatures_from_location_rows(generated_location_rows)
         layout_signature = _layout_signature(generated_location_rows)
         proposed_beam_units, proposed_beam_heights = common._build_proposed_beam_units_from_layout_rows(
             generated_location_rows,
@@ -1202,9 +1408,10 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 "Minimum_Required_Counts": "|".join(f"{int(size)}:{count}" for size, count in sorted(base_exact_counts.items())),
                 "Additional_Fill_Counts": _additional_fill_signature(column_assignments, base_exact_counts),
                 "Slot_Composition_Signature": "|".join(f"{int(size)}:{count}" for size, count in sorted(base_exact_counts.items())),
-                "Layout_Slot_Size_Distribution": _slot_distribution_signature(column_assignments),
-                "Layout_Slot_Size_Cumulative_Coverage": _cumulative_coverage_signature(column_assignments),
+                "Layout_Slot_Size_Distribution": layout_slot_distribution,
+                "Layout_Slot_Size_Cumulative_Coverage": layout_slot_cumulative,
                 "Source_Slot_Sizes": common._encode_excel_text(",".join(f"{int(size)}" for size in config_slot_sizes)),
+                "Doorgang_Usable_Alignment_Conversions": str(doorgang_alignment_conversions),
                 "Feasible_Columns_Considered_Total": str(int(allocation_diagnostics.get("Feasible_Columns_Considered_Total", 0.0))),
                 "Feasible_Columns_Min": str(int(allocation_diagnostics.get("Feasible_Columns_Min", 0.0))),
                 "Feasible_Columns_Max": str(int(allocation_diagnostics.get("Feasible_Columns_Max", 0.0))),
@@ -1337,6 +1544,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "TopFill_Layout_Slot_Size_Distribution",
         "TopFill_Layout_Slot_Size_Cumulative_Coverage",
         "Source_Slot_Sizes",
+        "Doorgang_Usable_Alignment_Conversions",
         "Feasible_Columns_Considered_Total",
         "Feasible_Columns_Min",
         "Feasible_Columns_Max",
@@ -1413,6 +1621,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             "Beam_Coordinate",
             "Beam_Height_Range_cm",
             "Assigned_Slot_Size_cm",
+            "Usable_Location",
         ],
         [
             {
@@ -1426,6 +1635,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                     "Beam_Coordinate",
                     "Beam_Height_Range_cm",
                     "Assigned_Slot_Size_cm",
+                    "Usable_Location",
                 ]
             }
             for row in top_filled_location_rows

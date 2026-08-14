@@ -33,6 +33,46 @@ VARIANTS_ROOT = OUTPUT_DIR / "Variants"
 VARIANTS = variants_common.VARIANTS
 HEURISTIC_FIELDS = variants_common.HEURISTIC_FIELDS
 
+OUTPUT_PREFIX_FIELDS = [
+    "Heuristic_Label",
+    "Construction_Method",
+    "Improvement_Method",
+]
+
+DROP_FIELDS_BY_OUTPUT = {
+    "Candidate_Layout_Summary_TopFilled.csv": {
+        "Beam_Preserving_Optimizer",
+        "Local_Search_Optimizer",
+        "Layout_Feasible",
+        "Allocation_Feasible_Initial",
+        "Required_Locations_Total",
+        "Total_Locations",
+        "Capacity_Margin",
+        "Assigned_Used_Height_Total",
+        "Total_Allowed_Height",
+        "Space_Left",
+        "Percentage_Rack_Height_Used",
+        "Feasible_Columns_Average",
+    },
+    "Candidate_Layout_By_Rack_Column_TopFilled.csv": {
+        "Beam_Preserving_Optimizer",
+        "Local_Search_Optimizer",
+        "Assigned_Used_Height_cm",
+        "Remaining_Height_cm",
+        "Fill_Ratio",
+        "TopFill_Adjusted_Row",
+    },
+    "Candidate_Layout_By_Location_TopFilled.csv": {
+        "Beam_Preserving_Optimizer",
+        "Local_Search_Optimizer",
+    },
+    "Empty_Locations_By_Slot_Size.csv": {
+        "Beam_Preserving_Optimizer",
+        "Local_Search_Optimizer",
+        "Method",
+    },
+}
+
 
 def _read_csv_with_fieldnames(path: Path) -> tuple[list[dict[str, str]], list[str]]:
     if not path.exists():
@@ -110,7 +150,17 @@ def _merge_variant_file(output_name: str) -> Path:
             f"No Stage 6 source files available to build: {output_path}"
         )
 
-    _write_csv(output_path, HEURISTIC_FIELDS + base_fieldnames, merged_rows)
+    drop_fields = DROP_FIELDS_BY_OUTPUT.get(output_name, set())
+    fieldnames = [
+        field
+        for field in OUTPUT_PREFIX_FIELDS + base_fieldnames
+        if field not in drop_fields
+    ]
+    _write_csv(
+        output_path,
+        fieldnames,
+        [{field: str(row.get(field, "")) for field in fieldnames} for row in merged_rows],
+    )
     return output_path
 
 

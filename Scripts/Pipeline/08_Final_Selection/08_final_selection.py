@@ -242,9 +242,7 @@ def _actual_occupied_by_size(layout_row: dict[str, str]) -> dict[int, int]:
     """Use the same best-fit exact-slot allocation used during layout generation so
     extra occupied slot sizes in the realized layout are included in KPI math."""
     minimum_by_size = _parse_size_count_signature(str(layout_row.get("Minimum_Required_Counts", "")))
-    total_by_size = common._exclude_fixed_doorgang_slot_counts(
-        _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
-    )
+    total_by_size = _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
 
     remaining_capacity = {size: max(int(count), 0) for size, count in total_by_size.items()}
     occupied_by_size: dict[int, int] = {}
@@ -277,9 +275,7 @@ def _space_utilization_metrics(layout_row: dict[str, str]) -> tuple[int, int, in
     # Compare actual occupied layout space against the realized top-filled layout,
     # including any extra slot sizes that appear in the final layout.
     occupied_by_size = _actual_occupied_by_size(layout_row)
-    total_by_size = common._exclude_fixed_doorgang_slot_counts(
-        _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
-    )
+    total_by_size = _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
 
     all_sizes = sorted(set(occupied_by_size.keys()) | set(total_by_size.keys()))
     occupied_locations = 0
@@ -461,8 +457,8 @@ def build_final_selection() -> list[dict[str, str]]:
             "Rank_Additional_Fill_Extra_Slot_Size_Variants",
             False,
         ),
-        ("Empty_Slot_Space_m3", "Rank_Empty_Slot_Space_m3", False),
-        ("Total_Slot_Space_m3", "Rank_Total_Slot_Space_m3", False),
+        ("Empty_Slot_Space_m3", "Rank_Empty_Slot_Space_m3", True),
+        ("Total_Slot_Space_m3", "Rank_Total_Slot_Space_m3", True),
         ("Space_Utilization_Pct", "Rank_Space_Utilization_Pct", False),
         ("Occupancy_Rate", "Rank_Occupancy_Rate", False),
     ]
@@ -593,6 +589,7 @@ def build_final_selection() -> list[dict[str, str]]:
             "Beam_Coordinate",
             "Beam_Height_Range_cm",
             "Assigned_Slot_Size_cm",
+            "Usable_Location",
         ],
         [
             {
@@ -606,6 +603,7 @@ def build_final_selection() -> list[dict[str, str]]:
                     "Beam_Coordinate",
                     "Beam_Height_Range_cm",
                     "Assigned_Slot_Size_cm",
+                    "Usable_Location",
                 ]
             }
             for row in finalist_location_rows

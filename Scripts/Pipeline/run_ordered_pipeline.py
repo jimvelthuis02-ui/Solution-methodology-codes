@@ -337,7 +337,7 @@ def _build_generated_layout_location_rows(
                     # a 2-column beam, while the doorgang column itself has no beam.
                     # Once the row height exceeds the doorgang threshold, the full
                     # 3-column span can resume.
-                    if seg_c1 == doorgang_column and beam_elevation <= doorgang_height:
+                    if seg_c1 == doorgang_column and beam_elevation < doorgang_height:
                         if column_num in {doorgang_column - 2, doorgang_column - 1}:
                             beam_coordinate = f"{seg_rack}[{doorgang_column - 2:02d}-{doorgang_column - 1:02d}]:{row_index:02d}"
                         elif column_num == doorgang_column:

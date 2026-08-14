@@ -27,6 +27,7 @@ SCENARIO_LABELS = {
 }
 CLUSTER_COUNTS = (3, 4, 5, 6, 7)
 CLEARANCE_CM = 5.0
+MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,7 @@ def _round_up_to_next_4_or_9(value: float) -> float:
     candidate = math.ceil(value)
     while candidate % 10 not in (4, 9):
         candidate += 1
-    return float(candidate)
+    return float(min(candidate, int(MAX_REPRESENTATIVE_SLOT_SIZE_CM)))
 
 
 def _read_input_rows() -> list[dict[str, str]]:

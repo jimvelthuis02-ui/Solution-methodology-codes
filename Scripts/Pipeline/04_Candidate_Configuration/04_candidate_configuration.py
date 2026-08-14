@@ -11,6 +11,7 @@ import run_ordered_pipeline as common
 
 
 OUTPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
+MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
 def _read_stage3_rows() -> list[dict[str, str]]:
@@ -90,7 +91,10 @@ def build_candidate_configuration() -> Path:
     output_rows: list[dict[str, str]] = []
     for index, ((method, scenario, k), rows) in enumerate(grouped_items, start=1):
         ordered_rows = sorted(rows, key=lambda row: common._to_float(row.get("Representative Slot Size")) or 0.0)
-        slot_sizes = [common._to_float(row.get("Representative Slot Size")) or 0.0 for row in ordered_rows]
+        slot_sizes = [
+            min(common._to_float(row.get("Representative Slot Size")) or 0.0, MAX_REPRESENTATIVE_SLOT_SIZE_CM)
+            for row in ordered_rows
+        ]
         distribution = [_parse_percent(row.get("Cluster Count Percentage")) for row in ordered_rows]
 
         output_rows.append(

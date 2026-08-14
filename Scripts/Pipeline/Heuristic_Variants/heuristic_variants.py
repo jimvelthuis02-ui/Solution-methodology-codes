@@ -36,7 +36,7 @@ VARIANTS = [
         "construction_method": "constructive_beam",
         "use_beam_optimizer": False,
         "use_local_search": False,
-        "improvement_method": "constructive_beam_preservation",
+        "improvement_method": "none",
         "beam_preserving_optimizer": "CONSTRUCTIVE",
         "local_search_optimizer": "NO",
     },
@@ -63,7 +63,7 @@ VARIANTS = [
         "construction_method": "constructive_beam",
         "use_beam_optimizer": False,
         "use_local_search": True,
-        "improvement_method": "constructive_beam_preservation_plus_local_search",
+        "improvement_method": "local_search",
         "beam_preserving_optimizer": "CONSTRUCTIVE",
         "local_search_optimizer": "YES",
     },
@@ -297,20 +297,7 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
         current_beam_heights: dict[str, float],
         current_beam_units_by_column: dict[str, set[str]],
     ) -> tuple[dict[str, list[float]], int, int, int]:
-        before_any, _by_col0, _r0, _a0, _rows0, _units0 = stage6._evaluate_relocations_for_assignments(
-            column_assignments,
-            layout_id,
-            config_id,
-            style,
-            beam_segments,
-            doorgang_thresholds_by_rack,
-            current_beam_units,
-            current_beam_heights,
-            current_beam_units_by_column,
-        )
-
         working_assignments = column_assignments
-        after_beam = before_any
         beam_changed = False
         if use_beam:
             working_assignments = common._constructive_beam_preservation_pass(
@@ -325,25 +312,34 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 fixed_prefix_by_column=fixed_prefix_by_column,
                 doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
             )
+            working_assignments, _doorgang_conversions = stage6._enforce_doorgang_spanning_beam_alignment(
+                working_assignments,
+                beam_segments,
+                doorgang_thresholds_by_rack,
+                fixed_prefix_by_column=fixed_prefix_by_column,
+            )
             if smallest_config_slot > 0.0:
                 working_assignments = stage6._enforce_min_locations_per_column(
                     working_assignments,
                     layout_columns,
                     float(smallest_config_slot),
                 )
-
-            after_beam, _by_col1, _r1, _a1, _rows1, _units1 = stage6._evaluate_relocations_for_assignments(
-                working_assignments,
-                layout_id,
-                config_id,
-                style,
-                beam_segments,
-                doorgang_thresholds_by_rack,
-                current_beam_units,
-                current_beam_heights,
-                current_beam_units_by_column,
-            )
             beam_changed = working_assignments != column_assignments
+
+        # The constructive beam pass is a construction heuristic, so the impact
+        # baseline starts after construction is complete.
+        before_any, _by_col0, _r0, _a0, _rows0, _units0 = stage6._evaluate_relocations_for_assignments(
+            working_assignments,
+            layout_id,
+            config_id,
+            style,
+            beam_segments,
+            doorgang_thresholds_by_rack,
+            current_beam_units,
+            current_beam_heights,
+            current_beam_units_by_column,
+        )
+        after_beam = before_any
 
         if use_local:
             final_assignments, reloc_before_search, reloc_after_search, accepted_search_moves = original_local_search(
@@ -375,10 +371,10 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 "Beam_Relocations_Before_Any_Improvement": str(before_any),
                 "Beam_Relocations_After_Beam_Optimizer": str(after_beam),
                 "Beam_Relocations_After_Local_Search": str(reloc_after_search),
-                "Beam_Optimizer_Delta": str(after_beam - before_any),
+                "Beam_Optimizer_Delta": "0",
                 "Local_Search_Delta": str(reloc_after_search - after_beam),
                 "Total_Delta": str(reloc_after_search - before_any),
-                "Beam_Optimizer_Changed_Assignments": "YES" if beam_changed else "NO",
+                "Beam_Optimizer_Changed_Assignments": "NO",
                 "Local_Search_Enabled": "YES" if use_local else "NO",
                 "Local_Search_Accepted_Moves": str(accepted_search_moves),
             }
@@ -500,16 +496,17 @@ def write_stage6_impact_output(output_file: Path, impact_rows: list[dict[str, st
             "Improvement_Method",
             "Config_ID",
             "Beam_Relocations_Before_Any_Improvement",
-            "Beam_Relocations_After_Beam_Optimizer",
-            "Beam_Relocations_After_Local_Search",
-            "Beam_Optimizer_Delta",
-            "Local_Search_Delta",
-            "Total_Delta",
-            "Beam_Optimizer_Changed_Assignments",
-            "Local_Search_Enabled",
-            "Local_Search_Accepted_Moves",
         ],
-        impact_rows,
+        [
+            {
+                "Variant_Label": str(row.get("Variant_Label", "")),
+                "Construction_Method": str(row.get("Construction_Method", "")),
+                "Improvement_Method": str(row.get("Improvement_Method", "")),
+                "Config_ID": str(row.get("Config_ID", "")),
+                "Beam_Relocations_Before_Any_Improvement": str(row.get("Beam_Relocations_Before_Any_Improvement", "")),
+            }
+            for row in impact_rows
+        ],
     )
     return output_file
 

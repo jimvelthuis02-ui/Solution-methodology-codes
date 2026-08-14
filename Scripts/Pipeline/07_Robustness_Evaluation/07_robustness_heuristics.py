@@ -33,6 +33,27 @@ VARIANTS_ROOT = OUTPUT_DIR / "Variants"
 VARIANTS = variants_common.VARIANTS
 HEURISTIC_FIELDS = variants_common.HEURISTIC_FIELDS
 
+OUTPUT_PREFIX_FIELDS = [
+    "Heuristic_Label",
+    "Construction_Method",
+    "Improvement_Method",
+]
+
+DROP_FIELDS = {
+    "Beam_Preserving_Optimizer",
+    "Local_Search_Optimizer",
+    "Layout_Feasible",
+    "Worst_Occupancy_Rate",
+    "Worst_Utilization_Rate",
+    "Worst_Capacity_Margin",
+    "Minimum_Capacity_Ratio",
+    "Minimum_Normalized_Slack",
+    "Robustness",
+    "Scenario_Pass_Count",
+    "Scenario_Total_Count",
+    "Space_Left",
+}
+
 
 def _read_csv_with_fieldnames(path: Path) -> tuple[list[dict[str, str]], list[str]]:
     if not path.exists():
@@ -113,7 +134,16 @@ def build_merged_robustness_outputs() -> Path:
             f"No Stage 7 source files available to build: {output_path}"
         )
 
-    _write_csv(output_path, HEURISTIC_FIELDS + base_fieldnames, merged_rows)
+    fieldnames = [
+        field
+        for field in OUTPUT_PREFIX_FIELDS + base_fieldnames
+        if field not in DROP_FIELDS
+    ]
+    _write_csv(
+        output_path,
+        fieldnames,
+        [{field: str(row.get(field, "")) for field in fieldnames} for row in merged_rows],
+    )
 
     if VARIANTS_ROOT.exists():
         shutil.rmtree(VARIANTS_ROOT)
