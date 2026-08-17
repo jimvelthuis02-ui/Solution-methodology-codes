@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[3]
 INPUT_DIR = ROOT / "Input files" / "Locations"
 PREPARED_OUTPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
 BEAM_OUTPUT_DIR = ROOT / "Output" / "01_Data_Preparation"
+CURRENT_SPACE_UTILIZATION_FILE = BEAM_OUTPUT_DIR / "Current_Layout_Space_Utilization.csv"
 
 BEAM_HEIGHT_CM = 16.0
 ROW_ORDER_PATTERN = re.compile(r"^(\d+)([A-Za-z]?)$")
@@ -23,6 +24,7 @@ FORCED_BEAM_POINTS: set[tuple[str, int, str]] = {
     ("F", 4, "06"),
     ("F", 5, "06"),
     ("F", 6, "06"),
+    ("K", 7, "2a"),
     ("K", 7, "2b"),
 }
 
@@ -71,6 +73,72 @@ def _row_sort_key(row_label: object) -> tuple[int, str]:
 
 def _location_sort_key(row: dict[str, str]) -> tuple[int, str, str]:
     return (*_row_sort_key(row.get("Row")), str(row.get("Location", "")).strip())
+
+
+def calculate_current_layout_space_utilization() -> Path:
+    """Calculate occupancy and space utilization for each recorded status snapshot."""
+    rows = _read_prepared_rows()
+    status_columns = [
+        "Status Initial",
+        "Status 7-7",
+        "Status 4-8",
+        "Status 11-8",
+    ]
+    summary_rows: list[dict[str, str]] = []
+
+    for status_column in status_columns:
+        total_locations = 0
+        occupied_locations = 0
+        empty_locations = 0
+        occupied_space_cm = 0.0
+        empty_space_cm = 0.0
+
+        for row in rows:
+            status = str(row.get(status_column, "")).strip().lower()
+            slot_size_cm = _to_float_optional(row.get("Location height"))
+            if status not in {"occupied", "empty"} or slot_size_cm is None or slot_size_cm < 0.0:
+                continue
+
+            total_locations += 1
+            if status == "occupied":
+                occupied_locations += 1
+                occupied_space_cm += slot_size_cm
+            else:
+                empty_locations += 1
+                empty_space_cm += slot_size_cm
+
+        total_space_cm = occupied_space_cm + empty_space_cm
+        summary_rows.append(
+            {
+                "Status_Measurement": status_column,
+                "Total_Locations": str(total_locations),
+                "Occupied_Locations": str(occupied_locations),
+                "Empty_Locations": str(empty_locations),
+                "Occupancy_Rate": f"{(occupied_locations / total_locations) if total_locations else 0.0:.6f}",
+                "Occupied_Slot_Space_m3": f"{occupied_space_cm / 100.0:.6f}",
+                "Empty_Slot_Space_m3": f"{empty_space_cm / 100.0:.6f}",
+                "Total_Slot_Space_m3": f"{total_space_cm / 100.0:.6f}",
+                "Space_Utilization_Pct": f"{(occupied_space_cm / total_space_cm * 100.0) if total_space_cm else 0.0:.4f}",
+            }
+        )
+
+    with CURRENT_SPACE_UTILIZATION_FILE.open("w", newline="", encoding="utf-8") as target:
+        fieldnames = [
+            "Status_Measurement",
+            "Total_Locations",
+            "Occupied_Locations",
+            "Empty_Locations",
+            "Occupancy_Rate",
+            "Occupied_Slot_Space_m3",
+            "Empty_Slot_Space_m3",
+            "Total_Slot_Space_m3",
+            "Space_Utilization_Pct",
+        ]
+        writer = csv.DictWriter(target, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    return CURRENT_SPACE_UTILIZATION_FILE
 
 
 def _segment_bounds(max_col: int) -> list[tuple[int, int]]:
@@ -418,6 +486,8 @@ def build_beam_grid_map() -> Path:
 if __name__ == "__main__":
     # Stage 01 entrypoint: prepare location table, then derive beam/grid mappings.
     output_path = prepare_location_data()
+    utilization_path = calculate_current_layout_space_utilization()
     beam_output_path = build_beam_grid_map()
     print(f"Data preparation complete. Output written to: {output_path}")
+    print(f"Current layout space utilization written to: {utilization_path}")
     print(f"Beam mapping complete. Output written to: {beam_output_path}")

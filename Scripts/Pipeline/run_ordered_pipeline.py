@@ -381,7 +381,6 @@ def _allocate_layout_by_column(
     used_height_by_column: dict[str, float] = defaultdict(float)
     counts_by_column: dict[str, int] = defaultdict(int)
     assignments_by_column: dict[str, list[float]] = defaultdict(list)
-    beam_preference = style_context.get("beam_preference", {}) if isinstance(style_context, dict) else {}
     fixed_prefix_by_column = style_context.get("fixed_prefix_by_column", {}) if isinstance(style_context, dict) else {}
 
     # Seed fixed per-column rows (for example doorgang rows) before allocation so
@@ -401,69 +400,14 @@ def _allocate_layout_by_column(
     feasible_total = 0
     feasible_min: int | None = None
     feasible_max = 0
-    style_rejected_total = 0
-    style_influenced_total = 0
     forced_total = 0
 
-    def _rack_loads() -> dict[str, int]:
-        loads: dict[str, int] = defaultdict(int)
-        for column_key, count in counts_by_column.items():
-            if count > 0:
-                loads[column_key[0]] += count
-        return dict(loads)
-
-    def _candidate_score(candidate: dict[str, float | int | str], selected_style: str) -> tuple[float, float, float, str]:
+    def _candidate_score(candidate: dict[str, float | int | str]) -> tuple[float, float, float, str]:
         projected_fill = float(candidate["projected_fill"])
         remaining_after = float(candidate["remaining_after"])
         current_count = float(candidate["current_count"])
-        relocation_proxy = float(candidate["relocation_proxy"])
-        imbalance_after = float(candidate["imbalance_after"])
-        future_adaptability = float(candidate["future_adaptability"])
         column_key = str(candidate["column_key"])
-
-        if selected_style == "utilization":
-            return (-projected_fill, -current_count, remaining_after, column_key)
-        if selected_style == "relocation":
-            return (relocation_proxy, current_count * -1.0, projected_fill, column_key)
-        if selected_style == "balanced":
-            return (imbalance_after, projected_fill, remaining_after, column_key)
-        if selected_style == "future_flexibility":
-            return (-future_adaptability, projected_fill, current_count, column_key)
         return (remaining_after, current_count, projected_fill, column_key)
-
-    def _style_filter(candidates: list[dict[str, float | int | str]], selected_style: str) -> list[dict[str, float | int | str]]:
-        if not candidates:
-            return []
-
-        if selected_style == "utilization":
-            ranked = sorted(candidates, key=lambda c: (-float(c["projected_fill"]), str(c["column_key"])))
-            keep = max(1, len(ranked) // 4)
-            return ranked[:keep]
-
-        if selected_style == "relocation":
-            ranked = sorted(candidates, key=lambda c: (float(c["relocation_proxy"]), str(c["column_key"])))
-            keep = max(1, len(ranked) // 3)
-            return ranked[:keep]
-
-        if selected_style == "balanced":
-            ranked = sorted(candidates, key=lambda c: (float(c["imbalance_after"]), str(c["column_key"])))
-            keep = max(1, len(ranked) // 4)
-            return ranked[:keep]
-
-        if selected_style == "future_flexibility":
-            flexibility_ready = [
-                candidate
-                for candidate in candidates
-                if float(candidate["projected_fill"]) <= 0.80
-            ]
-            ranked = sorted(
-                flexibility_ready if flexibility_ready else candidates,
-                key=lambda c: (-float(c["future_adaptability"]), str(c["column_key"])),
-            )
-            keep = max(1, len(ranked) // 4)
-            return ranked[:keep]
-
-        return list(candidates)
 
     slot_sizes_desc = sorted(target_exact_counts.keys(), reverse=True)
     smallest_slot_size = min(slot_sizes_desc) if slot_sizes_desc else 0.0
@@ -473,11 +417,6 @@ def _allocate_layout_by_column(
         while needed > 0:
             decisions_total += 1
             candidates: list[dict[str, float | int | str]] = []
-            rack_loads_before = _rack_loads()
-            avg_fill_before = (
-                sum(used_height_by_column.get(column, 0.0) / max(MAX_USED_HEIGHT_BASE, 1e-9) for column in column_keys)
-                / max(len(column_keys), 1)
-            )
             for column_key in column_keys:
                 current_count = counts_by_column.get(column_key, 0)
                 next_count = current_count + 1
@@ -498,21 +437,6 @@ def _allocate_layout_by_column(
 
                 remaining_after = allowed_after - proposed_used
                 projected_fill = proposed_used / max(allowed_after, 1e-9)
-                beam_pref = float(beam_preference.get(column_key, 0)) if isinstance(beam_preference, dict) else 0.0
-                target_depth = max(int(round(beam_pref)) + 1, 1)
-                # Relocation effort proxy: stay close to existing beam-derived depth and
-                # avoid columns without beam support.
-                relocation_proxy = (
-                    abs((current_count + 1) - target_depth)
-                    + (0.0 if beam_pref > 0 else 2.0)
-                    + (0.0 if current_count > 0 else 0.5)
-                )
-
-                rack_key = column_key[0]
-                rack_load_after = rack_loads_before.get(rack_key, 0) + 1
-                rack_mean_after = (sum(rack_loads_before.values()) + 1) / max(len({key[0] for key in column_keys}), 1)
-                imbalance_after = abs(rack_load_after - rack_mean_after) + abs(projected_fill - avg_fill_before)
-                future_adaptability = remaining_after / max(allowed_after, 1e-9)
 
                 candidates.append(
                     {
@@ -520,9 +444,6 @@ def _allocate_layout_by_column(
                         "current_count": current_count,
                         "remaining_after": remaining_after,
                         "projected_fill": projected_fill,
-                        "relocation_proxy": relocation_proxy,
-                        "imbalance_after": imbalance_after,
-                        "future_adaptability": future_adaptability,
                     }
                 )
 
@@ -533,8 +454,6 @@ def _allocate_layout_by_column(
                     "Feasible_Columns_Min": float(feasible_min or 0),
                     "Feasible_Columns_Max": float(feasible_max),
                     "Feasible_Columns_Average": (feasible_total / decisions_total) if decisions_total else 0.0,
-                    "Candidates_Rejected_By_Style_Total": float(style_rejected_total),
-                    "Decisions_Influenced_By_Style": float(style_influenced_total),
                     "Forced_By_Feasibility_Count": float(forced_total),
                 }
                 return False, assigned_exact_counts, dict(used_height_by_column), dict(assignments_by_column), f"No allocatable column found for slot size {slot_size:.0f} with remaining demand {needed}.", diagnostics
@@ -546,21 +465,8 @@ def _allocate_layout_by_column(
             if feasible_count == 1:
                 forced_total += 1
 
-            baseline_sorted = sorted(
-                candidates,
-                key=lambda c: (float(c["remaining_after"]), int(c["current_count"]), str(c["column_key"])),
-            )
-            baseline_choice = baseline_sorted[0]
-
-            style_candidates = _style_filter(candidates, style)
-            style_rejected_total += max(feasible_count - len(style_candidates), 0)
-            chosen_pool = style_candidates if style_candidates else candidates
-
-            chosen_sorted = sorted(chosen_pool, key=lambda c: _candidate_score(c, style))
+            chosen_sorted = sorted(candidates, key=_candidate_score)
             chosen = chosen_sorted[0]
-
-            if str(chosen["column_key"]) != str(baseline_choice["column_key"]):
-                style_influenced_total += 1
 
             chosen_column = str(chosen["column_key"])
             assignments_by_column[chosen_column].append(slot_size)
@@ -577,11 +483,9 @@ def _allocate_layout_by_column(
         "Feasible_Columns_Min": float(feasible_min or 0),
         "Feasible_Columns_Max": float(feasible_max),
         "Feasible_Columns_Average": (feasible_total / decisions_total) if decisions_total else 0.0,
-        "Candidates_Rejected_By_Style_Total": float(style_rejected_total),
-        "Decisions_Influenced_By_Style": float(style_influenced_total),
         "Forced_By_Feasibility_Count": float(forced_total),
     }
-    return True, assigned_exact_counts, dict(used_height_by_column), assignments_by_column, "Style-specific constrained allocation succeeded.", diagnostics
+    return True, assigned_exact_counts, dict(used_height_by_column), assignments_by_column, "Implementation-style constrained allocation succeeded.", diagnostics
 
 
 def _normalize_beam_level(level: str) -> str:
@@ -1098,20 +1002,20 @@ def _initial_beam_grid_counts(
     prepared_rows: list[dict[str, str]] | None,
     current_units: set[str],
 ) -> tuple[int, int]:
-    # Derive baseline counts directly from Stage 1 prepared/beam data.
+    # Derive baseline counts directly from Stage 1 prepared/beam data. Explicit
+    # beam support includes supported 1b/1c and split locations; floor-level
+    # 01/1a positions remain excluded.
     baseline_beams = len(current_units)
     baseline_grids = 0
     for row in prepared_rows or []:
-        row_index = _to_int_default(row.get("Row"), 0)
-        if row_index <= 1:
-            continue
         location_type = str(row.get("Location Type", "")).strip().lower()
         if location_type == "doorgang":
             continue
         location = str(row.get("Location", "")).strip()
-        if location and _is_split_location(location):
-            continue
-        baseline_grids += 1
+        row_label = str(row.get("Row", "")).strip().lower()
+        beam_column_count = str(row.get("Beam column count", "")).strip()
+        if location and beam_column_count and row_label not in {"01", "1a"}:
+            baseline_grids += 1
 
     return baseline_beams, baseline_grids
 

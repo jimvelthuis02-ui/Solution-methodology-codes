@@ -79,7 +79,6 @@ HEURISTIC_FIELDS = [
 
 BEAM_ORDER_EXACT_SLOT_LIMIT = 14
 
-
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as target:

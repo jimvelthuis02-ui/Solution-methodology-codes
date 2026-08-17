@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import shutil
 import sys
+import time
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
@@ -42,7 +43,6 @@ OUTPUT_PREFIX_FIELDS = [
 AVERAGE_KPI_FIELDS = [
     "Assigned_Locations_Total",
     "Occupancy_Rate",
-    "Occupied_Locations",
     "Empty_Locations",
     "Occupied_Slot_Space_m3",
     "Empty_Slot_Space_m3",
@@ -51,21 +51,9 @@ AVERAGE_KPI_FIELDS = [
     "Beam_Relocations_Total",
     "Additional_Beams_Required",
     "Additional_Grids_Required",
-    "Implementation_Effort_Total",
     "Standardization_Unique_Slot_Sizes",
     "Additional_Fill_Height_Total_cm",
     "Additional_Fill_Extra_Slot_Size_Variants",
-    "Rank_Occupancy_Rate",
-    "Rank_Empty_Slot_Space_m3",
-    "Rank_Total_Slot_Space_m3",
-    "Rank_Space_Utilization_Pct",
-    "Rank_Beam_Relocations_Total",
-    "Rank_Additional_Required_Beams",
-    "Rank_Additional_Required_Grids",
-    "Rank_Implementation_Effort_Total",
-    "Rank_Standardization",
-    "Rank_Additional_Fill_Height_Total_cm",
-    "Rank_Additional_Fill_Extra_Slot_Size_Variants",
 ]
 
 DROP_FIELDS_BY_OUTPUT = {
@@ -73,9 +61,11 @@ DROP_FIELDS_BY_OUTPUT = {
         "Beam_Preserving_Optimizer",
         "Local_Search_Optimizer",
         "Capacity_Margin",
+        "Occupied_Locations",
         "Occupied_Slot_Space_cm",
         "Empty_Slot_Space_cm",
         "Total_Slot_Space_cm",
+        "Implementation_Effort_Total",
     },
     "Final_Layout_By_Rack_Column.csv": {
         "Beam_Preserving_Optimizer",
@@ -126,16 +116,42 @@ def _generate_stage8_variants() -> list[dict[str, str]]:
     original_best_slot_order = variants_common.apply_bounded_beam_order()
 
     stage6_impact_rows: list[dict[str, str]] = []
+    runtime_rows: list[dict[str, str]] = []
     try:
         for variant in VARIANTS:
             print(f"Running Stage 8 variant: {variant['label']}", flush=True)
+            variant_start = time.perf_counter()
             variants_common.run_stage6_variant(VARIANTS_ROOT, variant, stage6_impact_rows)
             variants_common.run_stage7_variant(VARIANTS_ROOT, variant)
             variants_common.run_stage8_variant(VARIANTS_ROOT, variant)
+            elapsed_seconds = time.perf_counter() - variant_start
+            hours = int(elapsed_seconds // 3600)
+            minutes = int((elapsed_seconds % 3600) // 60)
+            seconds = elapsed_seconds % 60
+            runtime_rows.append(
+                {
+                    "Heuristic_Label": str(variant["label"]),
+                    "Construction_Method": str(variant["construction_method"]),
+                    "Improvement_Method": str(variant["improvement_method"]),
+                    "Runtime_Seconds": f"{elapsed_seconds:.3f}",
+                    "Runtime_HH_MM_SS": f"{hours:02d}:{minutes:02d}:{seconds:06.3f}",
+                }
+            )
             print(f"Completed Stage 8 variant: {variant['label']}", flush=True)
     finally:
         variants_common.restore_bounded_beam_order(original_best_slot_order)
 
+    _write_csv(
+        OUTPUT_DIR / "Heuristic_Combination_Runtime.csv",
+        [
+            "Heuristic_Label",
+            "Construction_Method",
+            "Improvement_Method",
+            "Runtime_Seconds",
+            "Runtime_HH_MM_SS",
+        ],
+        runtime_rows,
+    )
     return stage6_impact_rows
 
 
@@ -214,6 +230,8 @@ def _merge_variant_file(output_name: str) -> Path:
             _rank_rows_globally(merged_rows, metric_name, rank_field, higher_is_better)
 
     drop_fields = DROP_FIELDS_BY_OUTPUT.get(output_name, set())
+    if output_name == "Candidate_Layout_Metric_Ranking.csv":
+        drop_fields = drop_fields | {field for field in base_fieldnames if field.startswith("Rank_")}
     fieldnames = [
         field
         for field in OUTPUT_PREFIX_FIELDS + base_fieldnames
@@ -273,6 +291,7 @@ def build_merged_final_selection_outputs() -> list[Path]:
     outputs = [
         ranking_file,
         _write_heuristic_combination_averages(ranking_file, OUTPUT_DIR / "Heuristic_Combination_KPI_Averages.csv"),
+        OUTPUT_DIR / "Heuristic_Combination_Runtime.csv",
         _merge_variant_file("Final_Layout_By_Rack_Column.csv"),
         _merge_variant_file("Final_Layout_By_Location.csv"),
         _merge_variant_file("Final_Layout_By_Segment.csv"),
