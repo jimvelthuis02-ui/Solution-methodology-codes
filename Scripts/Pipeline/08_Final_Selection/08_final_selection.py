@@ -1,4 +1,5 @@
 import csv
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -9,11 +10,23 @@ if str(PIPELINE_ROOT) not in sys.path:
 import run_ordered_pipeline as common
 
 
+def _load_figures_module():
+    module_path = Path(__file__).resolve().parent / "08_final_selection_figures.py"
+    spec = importlib.util.spec_from_file_location("stage8_figures", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load Stage 8 figures module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
 LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
 LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column_TopFilled.csv"
 LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location_TopFilled.csv"
 OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Candidate_Layout_Metric_Ranking.csv"
+WSM_WEIGHTS_FILE = common.ROOT / "Input files" / "WSM_Weights.csv"
+WSM_OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Weighted_Sum_Method_Ranking.csv"
 FINAL_LAYOUT_BY_COLUMN_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
 FINAL_LAYOUT_BY_LOCATION_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
 FINAL_LAYOUT_BY_SEGMENT_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Segment.csv"
@@ -216,6 +229,90 @@ def _dense_ranks(values: list[float], higher_is_better: bool) -> list[int]:
     ordered_unique = sorted(set(values), reverse=higher_is_better)
     value_to_rank = {value: index for index, value in enumerate(ordered_unique, start=1)}
     return [value_to_rank[value] for value in values]
+
+
+WSM_METRIC_SPECS = [
+    ("Assigned_Locations_Total", "max"),
+    ("Empty_Locations", "max"),
+    ("Occupancy_Rate", "min"),
+    ("Total_Slot_Space_m3", "max"),
+    ("Occupied_Slot_Space_m3", "min"),
+    ("Empty_Slot_Space_m3", "max"),
+    ("Space_Utilization_Pct", "min"),
+    ("Beam_Relocations_Total", "min"),
+    ("Additional_Beams_Required", "min"),
+    ("Additional_Grids_Required", "min"),
+    ("Standardization_Unique_Slot_Sizes", "min"),
+    ("Additional_Fill_Extra_Slot_Size_Variants", "min"),
+    ("Additional_Fill_Height_Total_cm", "min"),
+]
+
+
+def _read_wsm_weights() -> dict[str, float]:
+    if not WSM_WEIGHTS_FILE.exists():
+        raise FileNotFoundError(f"Missing WSM weights file: {WSM_WEIGHTS_FILE}")
+
+    rows = _read_csv(WSM_WEIGHTS_FILE)
+    weights: dict[str, float] = {}
+    for row in rows:
+        metric = str(row.get("Metric", "")).strip()
+        if not metric:
+            continue
+        if metric in weights:
+            raise ValueError(f"Duplicate WSM metric in {WSM_WEIGHTS_FILE}: {metric}")
+        weight = common._to_float(row.get("Weight"))
+        if weight is None or not 0.0 <= weight <= 1.0:
+            raise ValueError(f"WSM weight for {metric} must be between 0 and 1")
+        weights[metric] = weight
+
+    expected_metrics = {metric for metric, _direction in WSM_METRIC_SPECS}
+    if set(weights) != expected_metrics:
+        missing = sorted(expected_metrics - set(weights))
+        extra = sorted(set(weights) - expected_metrics)
+        raise ValueError(f"WSM weights must contain exactly the configured metrics. Missing: {missing}; extra: {extra}")
+    total = sum(weights.values())
+    if abs(total - 1.0) > 1e-9:
+        raise ValueError(f"WSM weights must sum to 1.0; got {total:.12f}")
+    return weights
+
+
+def _normalise_wsm_value(value: float, values: list[float], direction: str) -> float:
+    reference = max(values) if direction == "max" else min(values)
+    if abs(reference) <= 1e-12:
+        return 1.0 if abs(value) <= 1e-12 else 0.0
+    return value / reference if direction == "max" else reference / value
+
+
+def _write_weighted_sum_ranking(candidate_rows: list[dict[str, str]]) -> None:
+    weights = _read_wsm_weights()
+    metric_values = {
+        metric: [common._to_float(row.get(metric)) or 0.0 for row in candidate_rows]
+        for metric, _direction in WSM_METRIC_SPECS
+    }
+    scored_rows: list[dict[str, str]] = []
+    for row in candidate_rows:
+        scored = {"Config_ID": str(row.get("Config_ID", ""))}
+        score = 0.0
+        for metric, direction in WSM_METRIC_SPECS:
+            value = common._to_float(row.get(metric)) or 0.0
+            normalized = _normalise_wsm_value(value, metric_values[metric], direction)
+            contribution = normalized * weights[metric]
+            scored[f"{metric}_Raw"] = f"{value:.6f}"
+            scored[f"{metric}_Normalized"] = f"{normalized:.6f}"
+            scored[f"{metric}_Weighted"] = f"{contribution:.6f}"
+            score += contribution
+        scored["Weighted_Sum_Score"] = f"{score:.6f}"
+        scored_rows.append(scored)
+
+    scored_rows.sort(key=lambda item: (-float(item["Weighted_Sum_Score"]), item["Config_ID"]))
+    for rank, row in enumerate(scored_rows, start=1):
+        row["Weighted_Sum_Rank"] = str(rank)
+
+    fields = ["Weighted_Sum_Rank", "Config_ID"]
+    for metric, _direction in WSM_METRIC_SPECS:
+        fields.extend([f"{metric}_Raw", f"{metric}_Normalized", f"{metric}_Weighted"])
+    fields.append("Weighted_Sum_Score")
+    _write_csv_preserve(WSM_OUTPUT_FILE, fields, scored_rows)
 
 
 def _parse_size_count_signature(value: str) -> dict[int, int]:
@@ -431,7 +528,9 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Total_Slot_Space_m3": f"{total_space_m3:.6f}",
                 "Space_Utilization_Pct": f"{utilization_pct:.4f}",
                 "Beam_Relocations_Total": str(common._to_int_default(row.get("Beam_Relocations_Total"), 0)),
+                "Required_Beams_Total": str(common._to_int_default(row.get("Required_Beams_Total"), 0)),
                 "Additional_Beams_Required": str(common._to_int_default(row.get("Additional_Beams_Required"), 0)),
+                "Required_Grids_Total": str(common._to_int_default(row.get("Required_Grids_Total"), 0)),
                 "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
                 "Implementation_Effort_Total": str(implementation_effort_total),
                 "Standardization_Unique_Slot_Sizes": str(common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0)),
@@ -501,8 +600,10 @@ def build_final_selection() -> list[dict[str, str]]:
             "Rank_Space_Utilization_Pct",
             "Beam_Relocations_Total",
             "Rank_Beam_Relocations_Total",
+            "Required_Beams_Total",
             "Additional_Beams_Required",
             "Rank_Additional_Required_Beams",
+            "Required_Grids_Total",
             "Additional_Grids_Required",
             "Rank_Additional_Required_Grids",
             "Implementation_Effort_Total",
@@ -517,6 +618,7 @@ def build_final_selection() -> list[dict[str, str]]:
         ],
         candidate_rows,
     )
+    _write_weighted_sum_ranking(candidate_rows)
 
     candidate_ids = {
         str(row.get("Config_ID", "")).strip()
@@ -623,6 +725,9 @@ def build_final_selection() -> list[dict[str, str]]:
         ],
         segment_rows,
     )
+
+    figures_module = _load_figures_module()
+    figures_module.generate_figures(WSM_OUTPUT_FILE, common.STAGE8_OUTPUT_DIR / "Figures")
 
     for legacy_file in LEGACY_OUTPUT_FILES:
         if legacy_file.exists():

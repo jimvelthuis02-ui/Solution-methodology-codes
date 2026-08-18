@@ -28,8 +28,22 @@ def _load_variants_common_module():
 variants_common = _load_variants_common_module()
 
 
+def _load_stage8_common_module():
+    module_path = PIPELINE_ROOT / "08_Final_Selection" / "08_final_selection.py"
+    spec = importlib.util.spec_from_file_location("stage8_wsm_common", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load Stage 8 module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+stage8_common = _load_stage8_common_module()
+
+
 OUTPUT_DIR = common.OUTPUT_ROOT / "08_Final_Selection_Comparison_AllHeuristics"
 VARIANTS_ROOT = OUTPUT_DIR / "Variants"
+WSM_OUTPUT_FILE = OUTPUT_DIR / "Weighted_Sum_Method_Ranking.csv"
 
 VARIANTS = variants_common.VARIANTS
 HEURISTIC_FIELDS = variants_common.HEURISTIC_FIELDS
@@ -245,6 +259,52 @@ def _merge_variant_file(output_name: str) -> Path:
     return output_path
 
 
+def _write_merged_weighted_sum_ranking(source_rows: list[dict[str, str]]) -> Path:
+    weights = stage8_common._read_wsm_weights()
+    metric_specs = stage8_common.WSM_METRIC_SPECS
+    metric_values = {
+        metric: [common._to_float(row.get(metric)) or 0.0 for row in source_rows]
+        for metric, _direction in metric_specs
+    }
+    scored_rows: list[dict[str, str]] = []
+    for row in source_rows:
+        scored = {
+            field: str(row.get(field, ""))
+            for field in OUTPUT_PREFIX_FIELDS + ["Config_ID"]
+        }
+        scored["Required_Beams_Total_Raw"] = str(row.get("Required_Beams_Total", ""))
+        scored["Required_Grids_Total_Raw"] = str(row.get("Required_Grids_Total", ""))
+        score = 0.0
+        for metric, direction in metric_specs:
+            value = common._to_float(row.get(metric)) or 0.0
+            normalized = stage8_common._normalise_wsm_value(value, metric_values[metric], direction)
+            contribution = normalized * weights[metric]
+            scored[f"{metric}_Raw"] = f"{value:.6f}"
+            scored[f"{metric}_Normalized"] = f"{normalized:.6f}"
+            scored[f"{metric}_Weighted"] = f"{contribution:.6f}"
+            score += contribution
+        scored["Weighted_Sum_Score"] = f"{score:.6f}"
+        scored_rows.append(scored)
+
+    scored_rows.sort(
+        key=lambda item: (
+            -float(item["Weighted_Sum_Score"]),
+            item.get("Heuristic_Label", ""),
+            item.get("Config_ID", ""),
+        )
+    )
+    for rank, row in enumerate(scored_rows, start=1):
+        row["Weighted_Sum_Rank"] = str(rank)
+
+    fields = ["Weighted_Sum_Rank"] + OUTPUT_PREFIX_FIELDS + ["Config_ID"]
+    fields.extend(["Required_Beams_Total_Raw", "Required_Grids_Total_Raw"])
+    for metric, _direction in metric_specs:
+        fields.extend([f"{metric}_Raw", f"{metric}_Normalized", f"{metric}_Weighted"])
+    fields.append("Weighted_Sum_Score")
+    _write_csv(WSM_OUTPUT_FILE, fields, scored_rows)
+    return WSM_OUTPUT_FILE
+
+
 def _write_heuristic_combination_averages(source_file: Path, output_file: Path) -> Path:
     if not source_file.exists():
         raise FileNotFoundError(f"Missing source file for heuristic averages: {source_file}")
@@ -288,8 +348,11 @@ def build_merged_final_selection_outputs() -> list[Path]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stage6_impact_rows = _generate_stage8_variants()
     ranking_file = _merge_variant_file("Candidate_Layout_Metric_Ranking.csv")
+    figures_file = _write_merged_weighted_sum_ranking(_read_csv_with_fieldnames(ranking_file)[0])
+    figures_module = _load_stage8_common_module()
     outputs = [
         ranking_file,
+        figures_file,
         _write_heuristic_combination_averages(ranking_file, OUTPUT_DIR / "Heuristic_Combination_KPI_Averages.csv"),
         OUTPUT_DIR / "Heuristic_Combination_Runtime.csv",
         _merge_variant_file("Final_Layout_By_Rack_Column.csv"),
@@ -297,6 +360,14 @@ def build_merged_final_selection_outputs() -> list[Path]:
         _merge_variant_file("Final_Layout_By_Segment.csv"),
         variants_common.write_stage6_impact_output(OUTPUT_DIR / "Stage6_Heuristic_Impact_All.csv", stage6_impact_rows),
     ]
+
+    figures_module_path = PIPELINE_ROOT / "08_Final_Selection" / "08_final_selection_figures.py"
+    figures_spec = importlib.util.spec_from_file_location("stage8_figures_for_comparison", figures_module_path)
+    if figures_spec is None or figures_spec.loader is None:
+        raise ImportError(f"Could not load Stage 8 figures module from {figures_module_path}")
+    figures_module = importlib.util.module_from_spec(figures_spec)
+    figures_spec.loader.exec_module(figures_module)
+    figures_module.generate_figures(figures_file, OUTPUT_DIR / "Figures")
 
     if VARIANTS_ROOT.exists():
         shutil.rmtree(VARIANTS_ROOT)

@@ -1276,19 +1276,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             doorgang_thresholds_by_rack,
             fixed_prefix_by_column=fixed_prefix_by_column,
         )
-        column_assignments = common._constructive_beam_preservation_pass(
-            column_assignments=column_assignments,
-            segments=beam_segments,
-            baseline_beam_heights=current_beam_heights,
-            fixed_prefix_by_column=fixed_prefix_by_column,
-        )
-        column_assignments, extra_conversions = _enforce_doorgang_spanning_beam_alignment(
-            column_assignments,
-            beam_segments,
-            doorgang_thresholds_by_rack,
-            fixed_prefix_by_column=fixed_prefix_by_column,
-        )
-        doorgang_alignment_conversions += extra_conversions
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
         if smallest_config_slot > 0.0:
             column_assignments = _enforce_min_locations_per_column(
