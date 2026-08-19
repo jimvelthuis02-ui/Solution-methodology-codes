@@ -295,6 +295,7 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
         current_beam_units: set[str],
         current_beam_heights: dict[str, float],
         current_beam_units_by_column: dict[str, set[str]],
+        constructive_slot_sizes: list[float] | None = None,
     ) -> tuple[dict[str, list[float]], int, int, int]:
         working_assignments = column_assignments
         beam_changed = False
@@ -304,6 +305,7 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 segments=beam_segments,
                 baseline_beam_heights=current_beam_heights,
                 fixed_prefix_by_column=fixed_prefix_by_column,
+                configuration_slot_sizes=constructive_slot_sizes,
             )
             working_assignments = stage6._enforce_segment_uniform_slot_profiles(
                 working_assignments,
@@ -354,6 +356,7 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 current_beam_units=current_beam_units,
                 current_beam_heights=current_beam_heights,
                 current_beam_units_by_column=current_beam_units_by_column,
+                constructive_slot_sizes=constructive_slot_sizes,
             )
         else:
             final_assignments = working_assignments
@@ -373,7 +376,7 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 "Beam_Optimizer_Delta": "0",
                 "Local_Search_Delta": str(reloc_after_search - after_beam),
                 "Total_Delta": str(reloc_after_search - before_any),
-                "Beam_Optimizer_Changed_Assignments": "NO",
+                "Beam_Optimizer_Changed_Assignments": "YES" if beam_changed else "NO",
                 "Local_Search_Enabled": "YES" if use_local else "NO",
                 "Local_Search_Accepted_Moves": str(accepted_search_moves),
             }
@@ -434,6 +437,8 @@ def run_stage7_variant(variants_root: Path, variant: dict[str, object]) -> Path:
 
     stage7.LAYOUT_SUMMARY_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_Summary_TopFilled.csv"
     stage7.ROBUSTNESS_SUMMARY_FILE = output_file
+    stage7.NON_FEASIBLE_OUTPUT_FILE = output_file.parent / "Non_Feasible_Layouts.csv"
+    stage7.NON_ROBUST_OUTPUT_FILE = output_file.parent / "Non_Robust_Layouts.csv"
 
     stage7.build_robustness_evaluation()
     return output_file
@@ -495,15 +500,31 @@ def write_stage6_impact_output(output_file: Path, impact_rows: list[dict[str, st
             "Improvement_Method",
             "Config_ID",
             "Beam_Relocations_Before_Any_Improvement",
+            "Beam_Relocations_After_Beam_Optimizer",
+            "Beam_Relocations_After_Local_Search",
+            "Beam_Optimizer_Delta",
+            "Local_Search_Delta",
+            "Total_Delta",
+            "Beam_Optimizer_Changed_Assignments",
+            "Local_Search_Enabled",
+            "Local_Search_Accepted_Moves",
         ],
         [
-            {
-                "Variant_Label": str(row.get("Variant_Label", "")),
-                "Construction_Method": str(row.get("Construction_Method", "")),
-                "Improvement_Method": str(row.get("Improvement_Method", "")),
-                "Config_ID": str(row.get("Config_ID", "")),
-                "Beam_Relocations_Before_Any_Improvement": str(row.get("Beam_Relocations_Before_Any_Improvement", "")),
-            }
+            {field: str(row.get(field, "")) for field in [
+                "Variant_Label",
+                "Construction_Method",
+                "Improvement_Method",
+                "Config_ID",
+                "Beam_Relocations_Before_Any_Improvement",
+                "Beam_Relocations_After_Beam_Optimizer",
+                "Beam_Relocations_After_Local_Search",
+                "Beam_Optimizer_Delta",
+                "Local_Search_Delta",
+                "Total_Delta",
+                "Beam_Optimizer_Changed_Assignments",
+                "Local_Search_Enabled",
+                "Local_Search_Accepted_Moves",
+            ]}
             for row in impact_rows
         ],
     )

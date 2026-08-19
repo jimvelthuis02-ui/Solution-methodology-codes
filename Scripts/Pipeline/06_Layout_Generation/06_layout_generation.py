@@ -23,7 +23,6 @@ PRE_ROBUST_LAYOUT_LIMIT = 8
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
 LOCAL_SEARCH_MAX_ITERATIONS = 6
-LOCAL_SEARCH_MAX_COLUMNS_PER_ITER = 12
 
 SummaryRow: TypeAlias = dict[str, str]
 DetailRows: TypeAlias = list[dict[str, str]]
@@ -817,6 +816,97 @@ def _enforce_min_locations_per_column(
             slots.append(float(min_slot_size))
 
     return {key: values for key, values in adjusted.items() if values}
+def _repair_slot_coverage_after_doorway(
+    column_assignments: dict[str, list[float]],
+    target_exact_counts: dict[float, int],
+    segments: set[tuple[str, int, int]],
+    fixed_prefix_by_column: dict[str, list[float]] | None = None,
+) -> dict[str, list[float]]:
+    """Repair cumulative high-slot deficits with segment-wide four-for-one conversions."""
+    if not column_assignments or not target_exact_counts:
+        return column_assignments
+
+    fixed_prefix_by_column = fixed_prefix_by_column or {}
+    repaired = _clone_column_assignments(column_assignments)
+
+    def _counts() -> dict[int, int]:
+        counts: dict[int, int] = defaultdict(int)
+        for slots in repaired.values():
+            for value in slots:
+                counts[int(round(value))] += 1
+        return counts
+
+    def _segment_suffix(segment: tuple[str, int, int], assignments: dict[str, list[float]]) -> tuple[tuple[float, ...], ...] | None:
+        rack, c0, c1 = segment
+        suffixes: list[tuple[float, ...]] = []
+        for column in range(c0, c1 + 1):
+            key = f"{rack}{column:02d}"
+            slots = assignments.get(key)
+            if slots is None:
+                return None
+            prefix_len = len(fixed_prefix_by_column.get(key, []))
+            suffixes.append(tuple(float(value) for value in slots[prefix_len:]))
+        if not suffixes or any(suffix != suffixes[0] for suffix in suffixes[1:]):
+            return None
+        return tuple(suffixes)
+
+    for target_size in sorted((int(round(size)) for size in target_exact_counts), reverse=True):
+        required_at_or_above = sum(
+            count for size, count in target_exact_counts.items() if int(round(size)) >= target_size
+        )
+        while True:
+            counts = _counts()
+            available_at_or_above = sum(size_count for size, size_count in counts.items() if size >= target_size)
+            deficit = required_at_or_above - available_at_or_above
+            if deficit <= 0:
+                break
+
+            source_candidates = [
+                int(round(size))
+                for size, required in target_exact_counts.items()
+                if int(round(size)) < target_size
+                and counts.get(int(round(size)), 0) - int(required) >= 4
+            ]
+            if not source_candidates:
+                break
+
+            repaired_one = False
+            for segment in sorted(segments):
+                rack, c0, c1 = segment
+                width = c1 - c0 + 1
+                suffixes = _segment_suffix(segment, repaired)
+                if suffixes is None:
+                    continue
+                source_size = min(source_candidates)
+                if counts.get(source_size, 0) - next(
+                    int(required)
+                    for size, required in target_exact_counts.items()
+                    if int(round(size)) == source_size
+                ) < 4 * width:
+                    continue
+                if sum(value == source_size for value in suffixes[0]) < 4:
+                    continue
+
+                new_suffix: list[float] = list(suffixes[0])
+                source_indices = [index for index, value in enumerate(new_suffix) if value == source_size][:4]
+                if len(source_indices) < 4:
+                    continue
+                insert_at = source_indices[0]
+                for index in reversed(source_indices):
+                    del new_suffix[index]
+                new_suffix.insert(insert_at, float(target_size))
+
+                for column in range(c0, c1 + 1):
+                    key = f"{rack}{column:02d}"
+                    prefix_len = len(fixed_prefix_by_column.get(key, []))
+                    repaired[key] = repaired[key][:prefix_len] + list(new_suffix)
+                repaired_one = True
+                break
+
+            if not repaired_one:
+                break
+
+    return repaired
 
 
 def _clone_column_assignments(column_assignments: dict[str, list[float]]) -> dict[str, list[float]]:
@@ -878,8 +968,9 @@ def _local_search_minimize_beam_relocations(
     current_beam_units: set[str],
     current_beam_heights: dict[str, float],
     current_beam_units_by_column: dict[str, set[str]],
+    constructive_slot_sizes: list[float] | None = None,
 ) -> tuple[dict[str, list[float]], int, int, int]:
-    # First-improvement hill climb using adjacent swaps to reduce beam relocations.
+    # First-improvement hill climb using swaps of complete physical segments.
     if not column_assignments:
         return column_assignments, 0, 0, 0
 
@@ -895,104 +986,107 @@ def _local_search_minimize_beam_relocations(
         current_beam_heights,
         current_beam_units_by_column,
     )
+
     initial_relocations = current_relocations
     accepted_moves = 0
     completed_iterations = 0
+    evaluation_cache: dict[tuple[tuple[tuple[str, tuple[float, ...]], ...]], tuple[int, dict[str, int]]] = {}
+
+    def _segment_template(segment: tuple[str, int, int], assignments: dict[str, list[float]]) -> tuple[tuple[float, ...], ...]:
+        rack, c0, c1 = segment
+        return tuple(
+            tuple(float(value) for value in assignments.get(f"{rack}{column:02d}", []))
+            for column in range(c0, c1 + 1)
+        )
+
+    def _swap_segment_templates(
+        assignments: dict[str, list[float]],
+        segment_a: tuple[str, int, int],
+        segment_b: tuple[str, int, int],
+    ) -> dict[str, list[float]]:
+        proposal = _clone_column_assignments(assignments)
+        template_a = _segment_template(segment_a, assignments)
+        template_b = _segment_template(segment_b, assignments)
+        for segment, template in ((segment_a, template_b), (segment_b, template_a)):
+            rack, c0, c1 = segment
+            for offset, column in enumerate(range(c0, c1 + 1)):
+                proposal[f"{rack}{column:02d}"] = list(template[offset])
+        return proposal
+
+    def _segment_swap_pools() -> list[list[tuple[str, int, int]]]:
+        standard_pool: list[tuple[str, int, int]] = []
+        middle_pool: list[tuple[str, int, int]] = []
+        doorgang_229_pool: list[tuple[str, int, int]] = []
+        for segment in sorted(beam_segments):
+            _rack, c0, c1 = segment
+            if (c0, c1) == (0, 3):
+                standard_pool.append(segment)
+            elif (c0, c1) in {(4, 6), (7, 9), (10, 12), (13, 15), (16, 18)}:
+                middle_pool.append(segment)
+            elif (c0, c1) == (19, 21):
+                rack = segment[0]
+                threshold = doorgang_thresholds_by_rack.get(rack)
+                if threshold is not None and abs(float(threshold[1]) - 229.0) <= 1e-9:
+                    doorgang_229_pool.append(segment)
+        return [pool for pool in (standard_pool, middle_pool, doorgang_229_pool) if len(pool) >= 2]
+
+    swap_pools = _segment_swap_pools()
+
+    def _assignment_cache_key(assignments: dict[str, list[float]]) -> tuple[tuple[str, tuple[float, ...]], ...]:
+        return tuple(sorted((column, tuple(float(value) for value in values)) for column, values in assignments.items()))
+
+    current_segment_heights: dict[tuple[str, int, int], list[float]] = defaultdict(list)
+    for beam_unit, height in current_beam_heights.items():
+        parsed = common._parse_beam_coordinate_parts(beam_unit)
+        if parsed is not None:
+            current_segment_heights[parsed[:3]].append(float(height))
+
+    def _template_beam_heights(template: tuple[tuple[float, ...], ...]) -> list[float]:
+        if not template:
+            return []
+        slots = template[0]
+        heights: list[float] = []
+        cumulative = 0.0
+        for index, slot_size in enumerate(slots):
+            if index > 0:
+                heights.append(cumulative + (index - 1) * common.BEAM_HEIGHT)
+            cumulative += float(slot_size)
+        return heights
+
+    def _segment_height_mismatch_lower_bound(
+        segment: tuple[str, int, int],
+        template: tuple[tuple[float, ...], ...],
+    ) -> int:
+        # For ordinary segments there are no partial doorgang beams, so the
+        # height comparison is an exact lower bound before physical checks.
+        if segment[1:] == (19, 21):
+            return 0
+        proposed = sorted(_template_beam_heights(template))
+        current = sorted(current_segment_heights.get(segment, []))
+        return sum(
+            abs(current[index] - proposed[index]) > 1e-9
+            for index in range(min(len(current), len(proposed)))
+        )
 
     for _iter in range(LOCAL_SEARCH_MAX_ITERATIONS):
         improved = False
         completed_iterations += 1
+        for pool in swap_pools:
+            for index_a, segment_a in enumerate(pool):
+                for segment_b in pool[index_a + 1 :]:
+                    template_a = _segment_template(segment_a, current_assignments)
+                    template_b = _segment_template(segment_b, current_assignments)
+                    if template_a == template_b:
+                        continue
 
-        candidate_columns = sorted(
-            [
-                column_key
-                for column_key, slots in current_assignments.items()
-                if len(slots) - len(fixed_prefix_by_column.get(column_key, [])) >= 2
-            ],
-            key=lambda key: (-relocation_by_column.get(key, 0), key),
-        )
-        candidate_columns = candidate_columns[:LOCAL_SEARCH_MAX_COLUMNS_PER_ITER]
-
-        for column_key in candidate_columns:
-            slots = current_assignments.get(column_key, [])
-            prefix_len = len(fixed_prefix_by_column.get(column_key, []))
-            if len(slots) - prefix_len < 2:
-                continue
-
-            for idx in range(prefix_len, len(slots) - 1):
-                if abs(float(slots[idx]) - float(slots[idx + 1])) <= 1e-9:
-                    continue
-
-                proposal = _clone_column_assignments(current_assignments)
-                proposal_slots = proposal.get(column_key, [])
-                proposal_slots[idx], proposal_slots[idx + 1] = proposal_slots[idx + 1], proposal_slots[idx]
-                proposal[column_key] = proposal_slots
-
-                proposal = _enforce_segment_uniform_slot_profiles(
-                    proposal,
-                    beam_segments,
-                    fixed_prefix_by_column=fixed_prefix_by_column,
-                    doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
-                )
-                proposal, _ = _enforce_doorgang_spanning_beam_alignment(
-                    proposal,
-                    beam_segments,
-                    doorgang_thresholds_by_rack,
-                    fixed_prefix_by_column=fixed_prefix_by_column,
-                )
-                if smallest_config_slot > 0.0:
-                    proposal = _enforce_min_locations_per_column(
-                        proposal,
-                        layout_columns,
-                        float(smallest_config_slot),
+                    lower_bound = (
+                        _segment_height_mismatch_lower_bound(segment_a, template_b)
+                        + _segment_height_mismatch_lower_bound(segment_b, template_a)
                     )
-
-                proposal_relocations, proposal_by_column, _r, _a, _rows, _units = _evaluate_relocations_for_assignments(
-                    proposal,
-                    layout_id,
-                    config_id,
-                    style,
-                    beam_segments,
-                    doorgang_thresholds_by_rack,
-                    current_beam_units,
-                    current_beam_heights,
-                    current_beam_units_by_column,
-                )
-
-                if proposal_relocations < current_relocations:
-                    current_assignments = proposal
-                    current_relocations = proposal_relocations
-                    relocation_by_column = proposal_by_column
-                    accepted_moves += 1
-                    improved = True
-                    break
-
-            if improved:
-                break
-
-        if not improved and len(candidate_columns) >= 2:
-            pair_columns = candidate_columns[: min(len(candidate_columns), 8)]
-            for idx_a, column_a in enumerate(pair_columns):
-                slots_a = current_assignments.get(column_a, [])
-                prefix_a = len(fixed_prefix_by_column.get(column_a, []))
-                suffix_a = list(slots_a[prefix_a:])
-                if len(suffix_a) <= 0:
-                    continue
-
-                for column_b in pair_columns[idx_a + 1:]:
-                    slots_b = current_assignments.get(column_b, [])
-                    prefix_b = len(fixed_prefix_by_column.get(column_b, []))
-                    suffix_b = list(slots_b[prefix_b:])
-                    if len(suffix_b) <= 0:
+                    if lower_bound >= current_relocations:
                         continue
 
-                    if suffix_a == suffix_b:
-                        continue
-
-                    proposal = _clone_column_assignments(current_assignments)
-                    proposal[column_a] = list(proposal[column_a][:prefix_a]) + list(suffix_b)
-                    proposal[column_b] = list(proposal[column_b][:prefix_b]) + list(suffix_a)
-
+                    proposal = _swap_segment_templates(current_assignments, segment_a, segment_b)
                     proposal = _enforce_segment_uniform_slot_profiles(
                         proposal,
                         beam_segments,
@@ -1012,18 +1106,24 @@ def _local_search_minimize_beam_relocations(
                             float(smallest_config_slot),
                         )
 
-                    proposal_relocations, proposal_by_column, _r, _a, _rows, _units = _evaluate_relocations_for_assignments(
-                        proposal,
-                        layout_id,
-                        config_id,
-                        style,
-                        beam_segments,
-                        doorgang_thresholds_by_rack,
-                        current_beam_units,
-                        current_beam_heights,
-                        current_beam_units_by_column,
-                    )
-
+                    cache_key = _assignment_cache_key(proposal)
+                    cached = evaluation_cache.get(cache_key)
+                    if cached is None:
+                        evaluated = _evaluate_relocations_for_assignments(
+                            proposal,
+                            layout_id,
+                            config_id,
+                            style,
+                            beam_segments,
+                            doorgang_thresholds_by_rack,
+                            current_beam_units,
+                            current_beam_heights,
+                            current_beam_units_by_column,
+                        )
+                        proposal_relocations, proposal_by_column = evaluated[0], evaluated[1]
+                        evaluation_cache[cache_key] = (proposal_relocations, proposal_by_column)
+                    else:
+                        proposal_relocations, proposal_by_column = cached
                     if proposal_relocations < current_relocations:
                         current_assignments = proposal
                         current_relocations = proposal_relocations
@@ -1031,12 +1131,12 @@ def _local_search_minimize_beam_relocations(
                         accepted_moves += 1
                         improved = True
                         break
-
+                    if improved:
+                        break
                 if improved:
                     break
-
-        if not improved:
-            break
+            if not improved:
+                break
 
     return current_assignments, initial_relocations, current_relocations, accepted_moves if accepted_moves >= 0 else 0
 
@@ -1283,6 +1383,12 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 layout_columns,
                 float(smallest_config_slot),
             )
+        column_assignments = _repair_slot_coverage_after_doorway(
+            column_assignments,
+            base_exact_counts,
+            beam_segments,
+            fixed_prefix_by_column=fixed_prefix_by_column,
+        )
         used_by_column = {
             column_key: sum(float(value) for value in slots)
             for column_key, slots in column_assignments.items()
@@ -1301,6 +1407,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             current_beam_units=current_beam_units,
             current_beam_heights=current_beam_heights,
             current_beam_units_by_column=current_beam_units_by_column,
+            constructive_slot_sizes=config_slot_sizes,
         )
         used_by_column = {
             column_key: sum(float(value) for value in slots)

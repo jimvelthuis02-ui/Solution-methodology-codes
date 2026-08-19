@@ -78,12 +78,15 @@ def _location_sort_key(row: dict[str, str]) -> tuple[int, str, str]:
 def calculate_current_layout_space_utilization() -> Path:
     """Calculate occupancy and space utilization for each recorded status snapshot."""
     rows = _read_prepared_rows()
-    status_columns = [
-        "Status Initial",
-        "Status 7-7",
-        "Status 4-8",
-        "Status 11-8",
-    ]
+    status_columns = list(
+        dict.fromkeys(
+            status_column
+            for row in rows
+            for status_column in row
+            if str(status_column).strip().startswith("Status ")
+        )
+    )
+    status_columns.sort(key=lambda status: (status != "Status Initial", status))
     summary_rows: list[dict[str, str]] = []
 
     for status_column in status_columns:

@@ -822,72 +822,111 @@ def _count_prefix_matches(slot_sequence: list[float], target_heights: list[float
     return len(seen_targets)
 
 
+@lru_cache(maxsize=4096)
+def _exact_beam_height_sequences(
+    slot_sizes: tuple[int, ...],
+    target_height: int,
+    max_slots: int,
+    beam_height: int = 16,
+) -> tuple[tuple[int, ...], ...]:
+    """Return every slot-type sequence whose slots plus internal beams hit a target exactly."""
+    if target_height <= 0 or max_slots <= 0 or not slot_sizes:
+        return ()
+
+    @lru_cache(maxsize=None)
+    def _compositions(total: int, length: int) -> tuple[tuple[int, ...], ...]:
+        if length == 0:
+            return ((),) if total == 0 else ()
+        if total < length * min(slot_sizes) or total > length * max(slot_sizes):
+            return ()
+        solutions: list[tuple[int, ...]] = []
+        for slot_size in slot_sizes:
+            for suffix in _compositions(total - slot_size, length - 1):
+                solutions.append((slot_size,) + suffix)
+        return tuple(sorted(set(solutions)))
+
+    solutions: list[tuple[int, ...]] = []
+    for length in range(1, max_slots + 1):
+        slot_total = target_height - beam_height * (length - 1)
+        if slot_total <= 0:
+            continue
+        solutions.extend(_compositions(slot_total, length))
+    return tuple(sorted(set(solutions)))
+
+
 def _constructive_beam_preservation_pass(
     column_assignments: dict[str, list[float]],
     segments: set[tuple[str, int, int]],
     baseline_beam_heights: dict[str, float],
     fixed_prefix_by_column: dict[str, list[float]] | None = None,
+    configuration_slot_sizes: list[float] | None = None,
 ) -> dict[str, list[float]]:
-    """Constructively reorder each segment to maximize the number of existing beam bottoms that can stay in place."""
-    if not column_assignments:
-        return {}
+    """Build segment-wide slot templates from exact original beam-height matches."""
+    if not column_assignments or not configuration_slot_sizes:
+        return {key: [float(value) for value in values] for key, values in column_assignments.items()}
 
-    segment_targets: dict[tuple[str, int, int], list[float]] = defaultdict(list)
+    slot_sizes = tuple(sorted({int(round(value)) for value in configuration_slot_sizes if float(value) > 0.0}))
+    if not slot_sizes:
+        return {key: [float(value) for value in values] for key, values in column_assignments.items()}
+
+    segment_targets: dict[tuple[str, int, int], list[int]] = defaultdict(list)
     for beam_unit, height in baseline_beam_heights.items():
         parsed = _parse_beam_coordinate_parts(beam_unit)
         if parsed is None:
             continue
         rack, c0, c1, _level = parsed
-        segment_targets[(rack, c0, c1)].append(float(height))
-
-    for segment in segment_targets:
-        segment_targets[segment] = sorted(segment_targets[segment])
-
-    column_segment: dict[str, tuple[str, int, int]] = {}
-    for rack, c0, c1 in segments:
-        for col in range(c0, c1 + 1):
-            column_segment[f"{rack}{col:02d}"] = (rack, c0, c1)
+        segment_targets[(rack, c0, c1)].append(int(round(float(height))))
 
     fixed_prefix_by_column = fixed_prefix_by_column or {}
-    optimized = {column_key: [float(value) for value in values] for column_key, values in column_assignments.items()}
+    optimized = {key: [float(value) for value in values] for key, values in column_assignments.items()}
 
     for segment in sorted(segments):
-        segment_columns = [f"{segment[0]}{col:02d}" for col in range(segment[1], segment[2] + 1)]
-        targets = segment_targets.get(segment, [])
+        targets = sorted(set(segment_targets.get(segment, [])))
         if not targets:
             continue
 
-        best_score = -1
-        best_orderings: dict[str, list[float]] = {}
-        for column_key in segment_columns:
-            if column_key not in optimized:
-                continue
-            slots = [float(value) for value in optimized.get(column_key, [])]
-            fixed_prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
-            movable = list(slots)
-            if fixed_prefix and len(movable) >= len(fixed_prefix):
-                prefix_match = True
-                for idx, value in enumerate(fixed_prefix):
-                    if abs(float(movable[idx]) - float(value)) > 1e-9:
-                        prefix_match = False
-                        break
-                if prefix_match:
-                    movable = movable[len(fixed_prefix):]
+        segment_columns = [f"{segment[0]}{col:02d}" for col in range(segment[1], segment[2] + 1)]
+        available_columns = [key for key in segment_columns if key in optimized]
+        if not available_columns:
+            continue
+        max_slots = max(
+            max(len(optimized[key]) for key in available_columns),
+            len(targets) + 1,
+        )
+        fixed_prefix = [float(value) for value in fixed_prefix_by_column.get(available_columns[0], [])]
+        fixed_height = int(round(sum(fixed_prefix)))
+        adjusted_targets = [target - fixed_height - 16 * len(fixed_prefix) for target in targets if target > fixed_height]
 
-            fixed_height = sum(fixed_prefix)
-            adjusted_targets = [target - fixed_height for target in targets if target > fixed_height]
-            ordered_moves = _best_slot_order_for_targets(movable, adjusted_targets)
-            candidate = fixed_prefix + ordered_moves
-            score = _count_prefix_matches(candidate, targets)
-            if score > best_score:
-                best_score = score
-                best_orderings = {column_key: candidate}
-            elif score == best_score and candidate:
-                best_orderings[column_key] = candidate
+        candidate_by_target = {
+            target: _exact_beam_height_sequences(slot_sizes, target, max_slots)
+            for target in adjusted_targets
+        }
+        candidate_sequences = sorted({sequence for sequences in candidate_by_target.values() for sequence in sequences})
+        if not candidate_sequences:
+            continue
 
-        if best_score > 0:
-            for column_key, candidate in best_orderings.items():
-                optimized[column_key] = candidate
+        def _score(sequence: tuple[int, ...]) -> tuple[int, int, tuple[int, ...]]:
+            prefix_height = 0
+            matched_targets = 0
+            for index, slot_size in enumerate(sequence):
+                prefix_height += slot_size
+                candidate_height = prefix_height + 16 * index
+                if candidate_height in adjusted_targets:
+                    matched_targets += 1
+            return matched_targets, -len(sequence), sequence
+
+        best_sequence = max(candidate_sequences, key=_score)
+        if _score(best_sequence)[0] <= 0:
+            continue
+
+        for column_key in available_columns:
+            existing = optimized[column_key]
+            prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
+            movable_count = max(len(existing) - len(prefix), 0)
+            template: list[float] = [float(value) for value in best_sequence[:movable_count]]
+            if len(template) < movable_count:
+                template.extend(existing[len(prefix) + len(template) : len(prefix) + movable_count])
+            optimized[column_key] = prefix + [float(value) for value in template]
 
     return optimized
 

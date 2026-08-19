@@ -12,6 +12,8 @@ import run_ordered_pipeline as common
 
 LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
+NON_FEASIBLE_OUTPUT_FILE = common.STAGE7_OUTPUT_DIR / "Non_Feasible_Layouts.csv"
+NON_ROBUST_OUTPUT_FILE = common.STAGE7_OUTPUT_DIR / "Non_Robust_Layouts.csv"
 CAPACITY_CONSTRAINT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
 
 
@@ -36,19 +38,32 @@ def _write_csv_preserve(path: Path, fieldnames: list[str], rows: list[dict[str, 
 
 
 def _layouts() -> list[dict[str, str]]:
-    """Load feasible Stage 6 layout summary rows for robustness evaluation."""
+    """Load all Stage 6 layouts so exclusions can be reported explicitly."""
     if not LAYOUT_SUMMARY_FILE.exists():
         raise FileNotFoundError(f"Missing layout summary file: {LAYOUT_SUMMARY_FILE}")
     rows = _read_csv(LAYOUT_SUMMARY_FILE)
-    if not rows:
-        return rows
+    return rows
 
-    feasible = [
-        row
-        for row in rows
-        if str(row.get("Layout_Feasible", "")).strip().upper() == "YES"
+
+def _write_exclusion_file(path: Path, rows: list[dict[str, str]]) -> None:
+    fields = [
+        "Config_ID",
+        "Layout_Feasible",
+        "Reason",
+        "Assigned_Locations_Total",
+        "Required_Locations_Total",
+        "Capacity_Margin",
+        "Space_Left",
+        "Required_Beams_Total",
+        "Required_Grids_Total",
+        "Additional_Beams_Required",
+        "Additional_Grids_Required",
+        "Robustness",
+        "Scenario_Pass_Count",
+        "Scenario_Total_Count",
+        "Failure_Reasons",
     ]
-    return feasible if feasible else rows
+    _write_csv_preserve(path, fields, [{field: str(row.get(field, "")) for field in fields} for row in rows])
 
 
 def _parse_slot_distribution(value: str) -> dict[int, int]:
@@ -116,6 +131,7 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
         capacity_margin_values: list[int] = []
         capacity_ratio_values: list[float] = []
         normalized_slack_values: list[float] = []
+        failure_reasons: set[str] = set()
         satisfied_count = 0
         total_count = 0
 
@@ -158,6 +174,17 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 and slot_coverage_pass
             )
 
+            if not layout_feasible_flag:
+                failure_reasons.add("Stage 6 Layout_Feasible != YES")
+            if capacity_margin < 0:
+                failure_reasons.add(f"capacity margin < 0 ({capacity_margin})")
+            if occupancy > 1.0:
+                failure_reasons.add(f"occupancy > 1.0 ({occupancy:.6f})")
+            if utilization > 1.0:
+                failure_reasons.add(f"utilization > 1.0 ({utilization:.6f})")
+            if not slot_coverage_pass:
+                failure_reasons.add("slot-size coverage requirement not met")
+
             occupancy_values.append(occupancy)
             utilization_values.append(utilization)
             capacity_margin_values.append(capacity_margin)
@@ -173,6 +200,8 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 "Config_ID": config_id,
                 "Layout_Feasible": str(layout.get("Layout_Feasible", "")),
                 "Assigned_Locations_Total": str(assigned_locations_total),
+                "Required_Locations_Total": str(common._to_int_default(layout.get("Required_Locations_Total"), 0)),
+                "Capacity_Margin": str(common._to_int_default(layout.get("Capacity_Margin"), assigned_locations_total - common._to_int_default(layout.get("Required_Locations_Total"), 0))),
                 "Mean_Occupancy_Rate": f"{(sum(occupancy_values) / len(occupancy_values)) if occupancy_values else 0.0:.6f}",
                 "Worst_Occupancy_Rate": f"{max(occupancy_values) if occupancy_values else 0.0:.6f}",
                 "Mean_Utilization_Rate": f"{(sum(utilization_values) / len(utilization_values)) if utilization_values else 0.0:.6f}",
@@ -184,19 +213,40 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 "Scenario_Pass_Count": str(satisfied_count),
                 "Scenario_Total_Count": str(total_count),
                 "Beam_Relocations_Total": str(beam_relocations_total),
+                "Required_Beams_Total": str(common._to_int_default(layout.get("Required_Beams_Total"), 0)),
                 "Additional_Beams_Required": str(additional_beams),
+                "Required_Grids_Total": str(common._to_int_default(layout.get("Required_Grids_Total"), 0)),
                 "Additional_Grids_Required": str(additional_grids),
                 "Space_Left": f"{space_left:.3f}",
+                "Failure_Reasons": "; ".join(sorted(failure_reasons)),
             }
         )
 
-    # Write layout-level robustness summary used by final ranking.
+    non_feasible_rows: list[dict[str, str]] = []
+    non_robust_rows: list[dict[str, str]] = []
+    robust_rows: list[dict[str, str]] = []
+    for row in robustness_rows:
+        if str(row.get("Layout_Feasible", "")).strip().upper() != "YES":
+            row["Reason"] = "Stage 6 layout feasibility failed"
+            non_feasible_rows.append(row)
+        elif common._to_int_default(row.get("Scenario_Pass_Count"), 0) < common._to_int_default(row.get("Scenario_Total_Count"), 0):
+            row["Reason"] = "One or more robustness scenarios failed"
+            non_robust_rows.append(row)
+        else:
+            robust_rows.append(row)
+
+    _write_exclusion_file(NON_FEASIBLE_OUTPUT_FILE, non_feasible_rows)
+    _write_exclusion_file(NON_ROBUST_OUTPUT_FILE, non_robust_rows)
+
+    # Write only feasible and robust layouts to the summary used by final ranking.
     _write_csv_preserve(
         ROBUSTNESS_SUMMARY_FILE,
         [
             "Config_ID",
             "Layout_Feasible",
             "Assigned_Locations_Total",
+            "Required_Locations_Total",
+            "Capacity_Margin",
             "Mean_Occupancy_Rate",
             "Worst_Occupancy_Rate",
             "Mean_Utilization_Rate",
@@ -208,14 +258,17 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
             "Scenario_Pass_Count",
             "Scenario_Total_Count",
             "Beam_Relocations_Total",
+            "Required_Beams_Total",
             "Additional_Beams_Required",
+            "Required_Grids_Total",
             "Additional_Grids_Required",
             "Space_Left",
+            "Failure_Reasons",
         ],
-        robustness_rows,
+        robust_rows,
     )
 
-    return robustness_rows
+    return robust_rows
 
 
 if __name__ == "__main__":

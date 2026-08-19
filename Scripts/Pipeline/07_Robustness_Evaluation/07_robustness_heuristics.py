@@ -78,6 +78,10 @@ def _stage7_variant_file(variant: dict[str, object]) -> Path:
     return variants_common.stage7_dir(VARIANTS_ROOT, variant) / "Candidate_Layout_Robustness_Summary.csv"
 
 
+def _stage7_variant_exclusion_file(variant: dict[str, object], filename: str) -> Path:
+    return variants_common.stage7_dir(VARIANTS_ROOT, variant) / filename
+
+
 def _generate_stage7_variants() -> None:
     if VARIANTS_ROOT.exists():
         shutil.rmtree(VARIANTS_ROOT)
@@ -144,6 +148,30 @@ def build_merged_robustness_outputs() -> Path:
         fieldnames,
         [{field: str(row.get(field, "")) for field in fieldnames} for row in merged_rows],
     )
+
+    for filename in ("Non_Feasible_Layouts.csv", "Non_Robust_Layouts.csv"):
+        exclusion_rows: list[dict[str, str]] = []
+        exclusion_fields: list[str] = []
+        for variant in VARIANTS:
+            source_path = _stage7_variant_exclusion_file(variant, filename)
+            if not source_path.exists():
+                continue
+            rows, source_fields = _read_csv_with_fieldnames(source_path)
+            if not exclusion_fields:
+                exclusion_fields = source_fields
+            exclusion_rows.extend(_decorate_row(row, variant) for row in rows)
+
+        exclusion_output = OUTPUT_DIR / filename
+        merged_exclusion_fields = [
+            field
+            for field in OUTPUT_PREFIX_FIELDS + exclusion_fields
+            if field not in {"Beam_Preserving_Optimizer", "Local_Search_Optimizer"}
+        ]
+        _write_csv(
+            exclusion_output,
+            merged_exclusion_fields,
+            [{field: str(row.get(field, "")) for field in merged_exclusion_fields} for row in exclusion_rows],
+        )
 
     if VARIANTS_ROOT.exists():
         shutil.rmtree(VARIANTS_ROOT)

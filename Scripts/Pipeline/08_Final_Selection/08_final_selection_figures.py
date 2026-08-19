@@ -73,12 +73,9 @@ def _status_metrics() -> dict[str, dict[str, float]]:
     references: dict[str, dict[str, float]] = {}
     for row in space_rows:
         status = str(row.get("Status_Measurement", "")).strip()
-        if status == "Status Initial":
-            label = "Initial"
-        elif status in {"Status 7-7", "Status 4-8", "Status 11-8"}:
-            label = status.replace("Status ", "")
-        else:
+        if not status.startswith("Status "):
             continue
+        label = "Initial" if status == "Status Initial" else status.removeprefix("Status ")
         references[label] = {
             "Assigned_Locations_Total": _number(row, "Total_Locations"),
             "Empty_Locations": _number(row, "Empty_Locations"),
@@ -93,6 +90,13 @@ def _status_metrics() -> dict[str, dict[str, float]]:
             "Standardization_Unique_Slot_Sizes": float(len(slot_sizes)),
         }
     return references
+
+
+def _status_reference_order(references: dict[str, dict[str, float]]) -> list[str]:
+    """Keep Initial first, then include all added status measurements in file order."""
+    return [label for label in references if label == "Initial"] + [
+        label for label in references if label != "Initial"
+    ]
 
 
 COMPARISON_METRICS = [
@@ -137,8 +141,12 @@ def _better_count(values: list[float], original: float, direction: str) -> int:
 
 def _write_original_comparison(rows: list[dict[str, str]], output_dir: Path) -> list[tuple[str, str, str]]:
     references = _status_metrics()
-    reference_order = [label for label in ("Initial", "7-7", "4-8", "11-8") if label in references]
-    reference_colors = {"Initial": "#dc2626", "7-7": "#d97706", "4-8": "#7c3aed", "11-8": "#059669"}
+    reference_order = _status_reference_order(references)
+    reference_palette = ("#dc2626", "#d97706", "#7c3aed", "#059669", "#0891b2", "#be123c", "#4d7c0f")
+    reference_colors = {
+        label: reference_palette[index % len(reference_palette)]
+        for index, label in enumerate(reference_order)
+    }
     entries: list[tuple[str, str, str]] = []
     for figure_number, metrics in enumerate((COMPARISON_METRICS[:6], COMPARISON_METRICS[6:]), start=1):
         figure, axes = plt.subplots(2, 3, figsize=(15, 9))
@@ -189,7 +197,12 @@ def _write_contributions(rows: list[dict[str, str]], output_dir: Path) -> tuple[
     labels = [f"{score} (n={len(group)})" for score, group in score_groups]
     figure, axis = plt.subplots(figsize=(22, max(9, len(labels) * 0.11)))
     left = [0.0] * len(representatives)
-    palette = plt.cm.tab20.colors
+    palette: tuple[str, ...] = (
+        "#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78", "#2ca02c",
+        "#98df8a", "#d62728", "#ff9896", "#9467bd", "#c5b0d5",
+        "#8c564b", "#c49c94", "#e377c2", "#f7b6d2", "#7f7f7f",
+        "#c7c7c7", "#bcbd22", "#dbdb8d", "#17becf", "#9edae5",
+    )
     for index, (metric, title) in enumerate(METRICS):
         values = [_number(row, f"{metric}_Weighted") for row in representatives]
         axis.barh(labels, values, left=left, label=title, color=palette[index % len(palette)])
