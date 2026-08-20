@@ -162,6 +162,16 @@ FIXED_DOORGANG_SLOT_COUNTS = {
     229: 6,
     234: 1,
 }
+MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
+
+
+def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> float:
+    """Clamp generated slot sizes to the working maximum representative size."""
+    capped_max = float(MAX_REPRESENTATIVE_SLOT_SIZE_CM if maximum is None else maximum)
+    slot_value = float(value)
+    if slot_value <= 0.0:
+        return 0.0
+    return min(slot_value, capped_max)
 
 
 def _fixed_doorgang_location_total() -> int:

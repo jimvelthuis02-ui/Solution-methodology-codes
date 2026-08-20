@@ -313,6 +313,11 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 fixed_prefix_by_column=fixed_prefix_by_column,
                 doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
             )
+            working_assignments = stage6._enforce_rack_row_count_consistency(
+                working_assignments,
+                available_slot_sizes=constructive_slot_sizes,
+                fixed_prefix_by_column=fixed_prefix_by_column,
+            )
             working_assignments, _doorgang_conversions = stage6._enforce_doorgang_spanning_beam_alignment(
                 working_assignments,
                 beam_segments,

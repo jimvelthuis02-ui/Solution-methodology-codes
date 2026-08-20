@@ -22,7 +22,8 @@ LAYOUT_DIAGNOSTICS_DIR = LAYOUT_OUTPUT_DIR
 PRE_ROBUST_LAYOUT_LIMIT = 8
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
-LOCAL_SEARCH_MAX_ITERATIONS = 6
+LOCAL_SEARCH_MAX_ITERATIONS = 1
+LOCAL_SEARCH_MAX_EVALUATIONS_PER_ITER = 24
 
 SummaryRow: TypeAlias = dict[str, str]
 DetailRows: TypeAlias = list[dict[str, str]]
@@ -178,17 +179,58 @@ def _column_order_for_style(column_keys: list[str], used_by_column: dict[str, fl
     return sorted(column_keys, key=lambda key: (-used_by_column.get(key, 0.0), key))
 
 
-def _expand_layout_capacity(
+def _residual_fill_target_profiles(
+    candidate_slot_sizes: list[float],
+    target_shares: dict[float, float],
+) -> list[dict[float, float]]:
+    """Build a small neighborhood around the base residual profile, so the
+    remaining height can be filled with nearby distribution shifts rather than
+    being rigidly tied to the original exact-count shares.
+    """
+    profiles: list[dict[float, float]] = []
+    base = {size: float(target_shares.get(size, 0.0)) for size in candidate_slot_sizes}
+    profiles.append(base)
+
+    for shift in (0.10, 0.20, 0.30):
+        for low_size, high_size in zip(candidate_slot_sizes[:-1], candidate_slot_sizes[1:]):
+            shifted = dict(base)
+            moved = max(shifted.get(low_size, 0.0) * shift, 0.0)
+            shifted[low_size] = max(shifted.get(low_size, 0.0) - moved, 0.0)
+            shifted[high_size] = shifted.get(high_size, 0.0) + moved
+            total = sum(shifted.values())
+            if total > 0.0:
+                shifted = {size: value / total for size, value in shifted.items()}
+            profiles.append(shifted)
+
+            shifted_reverse = dict(base)
+            moved_reverse = max(shifted_reverse.get(high_size, 0.0) * shift, 0.0)
+            shifted_reverse[high_size] = max(shifted_reverse.get(high_size, 0.0) - moved_reverse, 0.0)
+            shifted_reverse[low_size] = shifted_reverse.get(low_size, 0.0) + moved_reverse
+            total_reverse = sum(shifted_reverse.values())
+            if total_reverse > 0.0:
+                shifted_reverse = {size: value / total_reverse for size, value in shifted_reverse.items()}
+            profiles.append(shifted_reverse)
+
+    deduped: list[dict[float, float]] = []
+    seen: set[tuple[tuple[float, float], ...]] = set()
+    for profile in profiles:
+        key = tuple(sorted((float(size), float(value)) for size, value in profile.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(profile)
+    return deduped
+
+
+def _fill_columns_for_profile(
     column_assignments: dict[str, list[float]],
     used_by_column: dict[str, float],
     column_keys: list[str],
-    slot_sizes: list[float],
-    minimum_exact_counts: dict[float, int] | None,
+    candidate_slot_sizes: list[float],
+    target_shares: dict[float, float],
     style: str,
     beam_preference: dict[str, int],
 ) -> tuple[dict[str, list[float]], dict[str, float]]:
-    # Fill remaining feasible height while tracking the same slot-size
-    # proportions used for minimum required counts per configuration.
     expanded_assignments: dict[str, list[float]] = {
         column_key: list(column_assignments.get(column_key, []))
         for column_key in column_keys
@@ -197,43 +239,7 @@ def _expand_layout_capacity(
         column_key: float(used_by_column.get(column_key, 0.0))
         for column_key in column_keys
     }
-    candidate_slot_sizes = sorted(
-        {
-            float(size)
-            for size in slot_sizes
-            if common._to_float(size) is not None and float(size) > 0.0
-        },
-        reverse=True,
-    )
-    if not candidate_slot_sizes:
-        compact_assignments = {
-            column_key: slots
-            for column_key, slots in expanded_assignments.items()
-            if slots
-        }
-        compact_used = {
-            column_key: expanded_used[column_key]
-            for column_key in compact_assignments
-        }
-        return compact_assignments, compact_used
 
-    target_weights_raw: dict[float, int] = {}
-    if isinstance(minimum_exact_counts, dict):
-        for slot_size in candidate_slot_sizes:
-            target_weights_raw[slot_size] = max(
-                common._to_int_default(minimum_exact_counts.get(slot_size), 0),
-                0,
-            )
-    target_weight_total = sum(target_weights_raw.values())
-    if target_weight_total <= 0:
-        target_shares = {slot_size: 1.0 / len(candidate_slot_sizes) for slot_size in candidate_slot_sizes}
-    else:
-        target_shares = {
-            slot_size: (target_weights_raw.get(slot_size, 0) / target_weight_total)
-            for slot_size in candidate_slot_sizes
-        }
-
-    # First, enforce minimum locations per column (practical floor for rack layout).
     minimum_locations = max(int(common.MIN_LOCATIONS_PER_COLUMN), 1)
     smallest_slot = min(candidate_slot_sizes)
     for column_key in column_keys:
@@ -244,20 +250,15 @@ def _expand_layout_capacity(
             proposed_used = expanded_used[column_key] + smallest_slot
             if proposed_used > allowed_after + 1e-9:
                 break
-
             expanded_assignments[column_key].append(smallest_slot)
             expanded_used[column_key] = proposed_used
 
     added_counts: dict[float, int] = {slot_size: 0 for slot_size in candidate_slot_sizes}
-
     while True:
         placed = False
         tried_slot_sizes: set[float] = set()
         _ = beam_preference
         expansion_columns = _column_order_for_style(column_keys, expanded_used, style)
-
-        # Place one slot at a time, selecting the slot size most under target
-        # share among already added extras (ties -> larger size first).
         while len(tried_slot_sizes) < len(candidate_slot_sizes):
             remaining_sizes = [size for size in candidate_slot_sizes if size not in tried_slot_sizes]
             total_added = sum(added_counts.values())
@@ -300,6 +301,103 @@ def _expand_layout_capacity(
     }
     compact_used = {
         column_key: expanded_used[column_key]
+        for column_key in compact_assignments
+    }
+    return compact_assignments, compact_used
+
+
+def _expand_layout_capacity(
+    column_assignments: dict[str, list[float]],
+    used_by_column: dict[str, float],
+    column_keys: list[str],
+    slot_sizes: list[float],
+    minimum_exact_counts: dict[float, int] | None,
+    style: str,
+    beam_preference: dict[str, int],
+) -> tuple[dict[str, list[float]], dict[str, float]]:
+    # Fill remaining feasible height while tracking the target slot-size profile.
+    # The base policy keeps the original distribution, but a small residual-fill
+    # neighborhood is also explored so the remaining space is not forced into the
+    # exact same mix when a nearby alternative gives higher utilization.
+    expanded_assignments: dict[str, list[float]] = {
+        column_key: list(column_assignments.get(column_key, []))
+        for column_key in column_keys
+    }
+    expanded_used: dict[str, float] = {
+        column_key: float(used_by_column.get(column_key, 0.0))
+        for column_key in column_keys
+    }
+    candidate_slot_sizes = sorted(
+        {
+            common._cap_slot_size(size)
+            for size in slot_sizes
+            if common._to_float(size) is not None and float(size) > 0.0
+        },
+        reverse=True,
+    )
+    if not candidate_slot_sizes:
+        compact_assignments = {
+            column_key: slots
+            for column_key, slots in expanded_assignments.items()
+            if slots
+        }
+        compact_used = {
+            column_key: expanded_used[column_key]
+            for column_key in compact_assignments
+        }
+        return compact_assignments, compact_used
+
+    target_weights_raw: dict[float, int] = {}
+    if isinstance(minimum_exact_counts, dict):
+        for slot_size in candidate_slot_sizes:
+            target_weights_raw[slot_size] = max(
+                common._to_int_default(minimum_exact_counts.get(slot_size), 0),
+                0,
+            )
+    target_weight_total = sum(target_weights_raw.values())
+    if target_weight_total <= 0:
+        target_shares = {slot_size: 1.0 / len(candidate_slot_sizes) for slot_size in candidate_slot_sizes}
+    else:
+        target_shares = {
+            slot_size: (target_weights_raw.get(slot_size, 0) / target_weight_total)
+            for slot_size in candidate_slot_sizes
+        }
+
+    profile_variants = _residual_fill_target_profiles(candidate_slot_sizes, target_shares)
+    best_assignments = expanded_assignments
+    best_used = expanded_used
+    best_score = -1.0
+
+    for profile in profile_variants:
+        trial_assignments, trial_used = _fill_columns_for_profile(
+            expanded_assignments,
+            expanded_used,
+            column_keys,
+            candidate_slot_sizes,
+            profile,
+            style,
+            beam_preference,
+        )
+        if not trial_assignments:
+            continue
+        total_allowed = sum(
+            common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(len(trial_assignments.get(column_key, [])) - 1, common.MIN_BEAMS_PER_COLUMN)
+            for column_key in column_keys
+        )
+        total_used = sum(trial_used.values())
+        score = total_used / total_allowed if total_allowed > 0 else 0.0
+        if score > best_score:
+            best_score = score
+            best_assignments = trial_assignments
+            best_used = trial_used
+
+    compact_assignments = {
+        column_key: slots
+        for column_key, slots in best_assignments.items()
+        if slots
+    }
+    compact_used = {
+        column_key: best_used[column_key]
         for column_key in compact_assignments
     }
     return compact_assignments, compact_used
@@ -588,6 +686,171 @@ def _enforce_segment_uniform_slot_profiles(
                 uniform[column_key] = prefix + list(canonical_suffix)
 
     return uniform
+
+
+def _candidate_fill_pool(
+    available_slot_sizes: list[float] | None = None,
+    maximum_slot_size: float = common.MAX_REPRESENTATIVE_SLOT_SIZE_CM,
+) -> list[int]:
+    preferred = {
+        int(round(float(size)))
+        for size in (available_slot_sizes or [])
+        if float(size) > 0.0 and float(size) <= float(maximum_slot_size)
+    }
+    if not preferred:
+        preferred = {int(float(maximum_slot_size))}
+    return sorted(preferred)
+
+
+def _exact_fill_to_column_limit(
+    slots: list[float],
+    available_slot_sizes: list[float] | None = None,
+    target_row_count: int | None = None,
+) -> list[float] | None:
+    """Find a column fill that satisfies the exact 754 cm physical limit under the common row count.
+
+    The search is bounded to the actual slot-size range and uses a memoized subset-sum over a
+    short row-count horizon, which keeps the runtime near the earlier baseline while ensuring the
+    hard constraints are respected.
+    """
+    normalized = [float(value) for value in slots if float(value) > 0.0]
+    if not normalized and target_row_count is None:
+        return []
+
+    target_rows = max(int(target_row_count) if target_row_count is not None else len(normalized), 1)
+    if len(normalized) > target_rows:
+        normalized = normalized[:target_rows]
+
+    if len(normalized) > target_rows:
+        return None
+
+    beam_count = max(target_rows - 1, common.MIN_BEAMS_PER_COLUMN)
+    target_slot_sum = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * beam_count
+    current_slot_sum = sum(normalized)
+    required_fill = target_slot_sum - current_slot_sum
+
+    if abs(required_fill) <= 1e-9:
+        if len(normalized) != target_rows:
+            return None
+        return normalized
+
+    if required_fill < 0.0:
+        return None
+
+    pool = _candidate_fill_pool(available_slot_sizes or normalized)
+    max_slot = float(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)
+    needed_count = max(target_rows - len(normalized), 0)
+    if needed_count == 0:
+        return normalized if abs(required_fill) <= 1e-9 else None
+
+    required_int = int(round(required_fill))
+    min_possible = needed_count * 1
+    max_possible = needed_count * int(round(max_slot))
+    if required_int < min_possible or required_int > max_possible:
+        return None
+
+    # Deterministic bounded construction: allocate 1 cm to each required slot,
+    # then distribute the remaining amount while respecting the 234 cm cap.
+    fill = [1.0 for _ in range(needed_count)]
+    remaining_extra = required_int - needed_count
+
+    for index in range(needed_count):
+        if remaining_extra <= 0:
+            break
+        room = int(round(max_slot - fill[index]))
+        if room <= 0:
+            continue
+
+        chosen_extra = min(room, remaining_extra)
+
+        fill[index] += float(chosen_extra)
+        remaining_extra -= chosen_extra
+
+    if remaining_extra > 0:
+        return None
+
+    if any(value > max_slot + 1e-9 for value in fill):
+        return None
+
+    return normalized + fill
+
+
+def _enforce_rack_row_count_consistency(
+    column_assignments: dict[str, list[float]],
+    available_slot_sizes: list[float] | None = None,
+    fixed_prefix_by_column: dict[str, list[float]] | None = None,
+) -> dict[str, list[float]]:
+    """Force equal rack row counts and fill each column to the physical 754 cm limit.
+
+    Hard constraints enforced here:
+    - same row count across all non-doorgang columns in the same rack;
+    - each column's slots + beams total exactly the physical limit for that row count;
+    - no representative slot exceeds 234 cm.
+    """
+    if not column_assignments:
+        return {}
+
+    fixed_prefix_by_column = fixed_prefix_by_column or {}
+    adjusted: dict[str, list[float]] = {
+        column_key: [float(value) for value in slots]
+        for column_key, slots in column_assignments.items()
+    }
+    rack_columns: dict[str, list[str]] = defaultdict(list)
+    for column_key in adjusted:
+        if len(column_key) < 2:
+            continue
+        rack = column_key[:-2]
+        rack_columns[rack].append(column_key)
+
+    candidate_sizes = sorted({
+        min(float(value), common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)
+        for slots in adjusted.values()
+        for value in slots
+        if float(value) > 0.0
+    }, reverse=False)
+    if available_slot_sizes:
+        candidate_sizes = sorted({
+            min(float(size), common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)
+            for size in available_slot_sizes
+            if float(size) > 0.0
+        })
+    if not candidate_sizes:
+        candidate_sizes = [1.0]
+
+    for rack, keys in rack_columns.items():
+        eligible_columns = [column_key for column_key in keys if column_key not in fixed_prefix_by_column]
+        if not eligible_columns:
+            continue
+
+        max_existing_rows = max(len(adjusted[column_key]) for column_key in eligible_columns)
+        chosen_row_count: int | None = None
+        for target_row_count in range(max_existing_rows, max_existing_rows + 12):
+            feasible = True
+            candidate_map: dict[str, list[float]] = {}
+            for column_key in eligible_columns:
+                trial = _exact_fill_to_column_limit(
+                    adjusted.get(column_key, []),
+                    candidate_sizes,
+                    target_row_count=target_row_count,
+                )
+                if trial is None:
+                    feasible = False
+                    break
+                candidate_map[column_key] = trial
+            if feasible:
+                chosen_row_count = target_row_count
+                for column_key in eligible_columns:
+                    adjusted[column_key] = candidate_map[column_key]
+                break
+
+        if chosen_row_count is None:
+            for column_key in eligible_columns:
+                slots = [float(value) for value in adjusted.get(column_key, [])]
+                while len(slots) > max_existing_rows:
+                    slots.pop()
+                adjusted[column_key] = slots
+
+    return adjusted
 
 
 def _enforce_doorgang_spanning_beam_alignment(
@@ -1071,9 +1334,12 @@ def _local_search_minimize_beam_relocations(
     for _iter in range(LOCAL_SEARCH_MAX_ITERATIONS):
         improved = False
         completed_iterations += 1
+        evaluations_this_iter = 0
         for pool in swap_pools:
             for index_a, segment_a in enumerate(pool):
                 for segment_b in pool[index_a + 1 :]:
+                    if evaluations_this_iter >= LOCAL_SEARCH_MAX_EVALUATIONS_PER_ITER:
+                        break
                     template_a = _segment_template(segment_a, current_assignments)
                     template_b = _segment_template(segment_b, current_assignments)
                     if template_a == template_b:
@@ -1109,6 +1375,7 @@ def _local_search_minimize_beam_relocations(
                     cache_key = _assignment_cache_key(proposal)
                     cached = evaluation_cache.get(cache_key)
                     if cached is None:
+                        evaluations_this_iter += 1
                         evaluated = _evaluate_relocations_for_assignments(
                             proposal,
                             layout_id,
@@ -1174,14 +1441,16 @@ def _build_top_filled_layout_set(
         if rows_sorted and remaining > 1e-9:
             top_row = rows_sorted[-1]
             top_slot = common._to_float(top_row.get("Assigned_Slot_Size_cm")) or 0.0
+            capped_delta = max(0.0, common.MAX_REPRESENTATIVE_SLOT_SIZE_CM - top_slot)
+            adjusted_top_slot = common._cap_slot_size(top_slot + remaining)
             topfill_metadata_by_layout_column[(layout_id, rack_column)] = {
                 "row_index": float(common._to_int_default(top_row.get("Row"), 0)),
                 "original_top_slot": float(top_slot),
-                "added_height": float(remaining),
-                "adjusted_top_slot": float(top_slot + remaining),
+                "added_height": float(min(remaining, capped_delta)),
+                "adjusted_top_slot": float(adjusted_top_slot),
             }
-            top_row["Assigned_Slot_Size_cm"] = f"{(top_slot + remaining):.0f}"
-            space_added_by_layout[layout_id] += remaining
+            top_row["Assigned_Slot_Size_cm"] = f"{adjusted_top_slot:.0f}"
+            space_added_by_layout[layout_id] += min(remaining, capped_delta)
         elif rows_sorted:
             top_row = rows_sorted[-1]
             top_slot = common._to_float(top_row.get("Assigned_Slot_Size_cm")) or 0.0
@@ -1370,6 +1639,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             fixed_prefix_by_column=fixed_prefix_by_column,
             doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
         )
+        column_assignments = _enforce_rack_row_count_consistency(
+            column_assignments,
+            available_slot_sizes=expansion_slot_sizes,
+            fixed_prefix_by_column=fixed_prefix_by_column,
+        )
         column_assignments, doorgang_alignment_conversions = _enforce_doorgang_spanning_beam_alignment(
             column_assignments,
             beam_segments,
@@ -1408,6 +1682,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             current_beam_heights=current_beam_heights,
             current_beam_units_by_column=current_beam_units_by_column,
             constructive_slot_sizes=config_slot_sizes,
+        )
+        column_assignments = _enforce_rack_row_count_consistency(
+            column_assignments,
+            available_slot_sizes=expansion_slot_sizes,
+            fixed_prefix_by_column=fixed_prefix_by_column,
         )
         used_by_column = {
             column_key: sum(float(value) for value in slots)

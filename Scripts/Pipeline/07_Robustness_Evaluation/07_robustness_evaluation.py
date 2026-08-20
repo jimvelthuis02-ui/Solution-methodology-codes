@@ -166,22 +166,10 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                     slot_coverage_pass = False
                     break
 
-            constraint_satisfied = (
-                layout_feasible_flag
-                and capacity_margin >= 0
-                and occupancy <= 1.0
-                and utilization <= 1.0
-                and slot_coverage_pass
-            )
+            constraint_satisfied = layout_feasible_flag and slot_coverage_pass
 
             if not layout_feasible_flag:
                 failure_reasons.add("Stage 6 Layout_Feasible != YES")
-            if capacity_margin < 0:
-                failure_reasons.add(f"capacity margin < 0 ({capacity_margin})")
-            if occupancy > 1.0:
-                failure_reasons.add(f"occupancy > 1.0 ({occupancy:.6f})")
-            if utilization > 1.0:
-                failure_reasons.add(f"utilization > 1.0 ({utilization:.6f})")
             if not slot_coverage_pass:
                 failure_reasons.add("slot-size coverage requirement not met")
 

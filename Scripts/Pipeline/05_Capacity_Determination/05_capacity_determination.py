@@ -13,6 +13,23 @@ import run_ordered_pipeline as common
 INPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
 SUMMARY_OUTPUT_FILE = common.STAGE5_OUTPUT_DIR / "Capacity_Determination_Summary.csv"
 COUNT_OUTPUT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
+SCENARIO_HEIGHT_INPUT_FILE = common.STAGE2_OUTPUT_DIR / "02_Item_Height_Scenarios_Delta_Weighted.csv"
+SCENARIO_HEIGHT_COLUMNS = [
+    "Scenario_1_Item_Height",
+    "Scenario_2_Item_Height",
+    "Scenario_3_Item_Height",
+    "Scenario_4_Item_Height",
+    "Scenario_5_Item_Height",
+    "Scenario_6_Item_Height",
+]
+SCENARIO_HEIGHT_LABELS = {
+    "Scenario_1_Item_Height": "Scenario 1",
+    "Scenario_2_Item_Height": "Scenario 2",
+    "Scenario_3_Item_Height": "Scenario 3",
+    "Scenario_4_Item_Height": "Scenario 4",
+    "Scenario_5_Item_Height": "Scenario 5",
+    "Scenario_6_Item_Height": "Scenario 6",
+}
 
 
 def _read_candidate_configurations() -> list[dict[str, str]]:
@@ -60,6 +77,42 @@ def _distribution_value(config: dict[str, str]) -> str:
     return str(config.get("Relative_Slot_Size_Distribution", ""))
 
 
+def _scenario_aware_slot_size_counts(config: dict[str, str]) -> dict[str, dict[float, int]]:
+    """Map each scenario's measured item heights to the configuration's representative slot sizes."""
+    rows = []
+    if SCENARIO_HEIGHT_INPUT_FILE.exists():
+        with SCENARIO_HEIGHT_INPUT_FILE.open("r", newline="", encoding="utf-8-sig") as source:
+            reader = csv.DictReader(source)
+            rows = list(reader)
+
+    if not rows:
+        return {}
+
+    slot_sizes = sorted({float(value) for value in _parse_slot_sizes(config.get("Slot_Sizes", ""))})
+    if not slot_sizes:
+        return {}
+
+    by_scenario: dict[str, dict[float, int]] = {
+        label: defaultdict(int) for label in SCENARIO_HEIGHT_LABELS.values()
+    }
+
+    for row in rows:
+        location = str(row.get("Location", "")).strip()
+        if not location:
+            continue
+        for scenario_column, scenario_label in SCENARIO_HEIGHT_LABELS.items():
+            item_height = common._to_float(row.get(scenario_column))
+            if item_height is None:
+                continue
+            slot_size = min(
+                (size for size in slot_sizes if size >= item_height),
+                default=max(slot_sizes),
+            )
+            by_scenario[scenario_label][slot_size] += 1
+
+    return {scenario_name: dict(counts) for scenario_name, counts in by_scenario.items() if counts}
+
+
 def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, int]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Build per-scenario capacity summary and slot-size constraint rows for one config."""
     slot_sizes = _parse_slot_sizes(config.get("Slot_Sizes", ""))
@@ -67,8 +120,58 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
     if not slot_sizes or not distributions:
         return [], []
 
+    scenario_aware_counts = _scenario_aware_slot_size_counts(config)
     count_rows: list[dict[str, str]] = []
     summary_rows: list[dict[str, str]] = []
+
+    ordered_sizes = sorted(set(slot_sizes))
+    if scenario_aware_counts:
+        for scenario_name, exact_required_by_size in scenario_aware_counts.items():
+            cumulative_required_by_size: dict[float, int] = {}
+            running_required = 0
+            for slot_size in sorted(exact_required_by_size.keys(), reverse=True):
+                running_required += int(exact_required_by_size.get(slot_size, 0))
+                cumulative_required_by_size[slot_size] = running_required
+
+            for slot_size in ordered_sizes:
+                exact_required_by_size.setdefault(slot_size, 0)
+                cumulative_required_by_size.setdefault(slot_size, 0)
+
+            exact_total = sum(int(value) for value in exact_required_by_size.values())
+            summary_rows.append(
+                {
+                    "Config_ID": config.get("Config_ID", ""),
+                    "Method": config.get("Method", ""),
+                    "Scenario": config.get("Scenario", ""),
+                    "K": config.get("K", ""),
+                    "SKU_Scenario": scenario_name,
+                    "SKU_Count": str(exact_total),
+                    "Required_Locations_Total": str(exact_total),
+                    "Exact_Count_Distribution": "|".join(f"{int(size)}:{count}" for size, count in sorted(exact_required_by_size.items())),
+                    "Relative_Slot_Size_Distribution": _distribution_value(config),
+                }
+            )
+
+            for slot_size in ordered_sizes:
+                required_count = int(exact_required_by_size.get(slot_size, 0))
+                count_rows.append(
+                    {
+                        "Config_ID": config.get("Config_ID", ""),
+                        "Method": config.get("Method", ""),
+                        "Scenario": config.get("Scenario", ""),
+                        "K": config.get("K", ""),
+                        "SKU_Scenario": scenario_name,
+                        "SKU_Count": str(exact_total),
+                        "Representative_Slot_Size": f"{slot_size:.0f}",
+                        "Cluster_Count_Percentage": "",
+                        "Assigned_SKUs_At_Representative_Size": str(required_count),
+                        "Cumulative_Assigned_SKUs_At_Or_Above_Size": str(cumulative_required_by_size.get(slot_size, 0)),
+                        "Min_Required_Locations_At_Or_Above_Size": str(cumulative_required_by_size.get(slot_size, 0)),
+                        "Required_Locations_Total": str(exact_total),
+                    }
+                )
+
+        return summary_rows, count_rows
 
     for scenario_name, sku_count in sku_scenarios.items():
         # Allocate scenario SKU count across representative slot sizes.
@@ -81,7 +184,6 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
 
         # Convert cumulative at-or-above constraints to exact counts per slot size.
         exact_required_by_size: dict[float, int] = {}
-        ordered_sizes = sorted(slot_sizes)
         for index, slot_size in enumerate(ordered_sizes):
             next_size = ordered_sizes[index + 1] if index + 1 < len(ordered_sizes) else None
             next_required = cumulative_required_by_size.get(next_size, 0) if next_size is not None else 0
@@ -103,7 +205,6 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
             }
         )
 
-        # Emit one constraint row per representative slot size.
         for slot_size in ordered_sizes:
             count_rows.append(
                 {
