@@ -40,7 +40,7 @@ OUTPUT_PREFIX_FIELDS = [
 ]
 
 DROP_FIELDS_BY_OUTPUT = {
-    "Candidate_Layout_Summary_TopFilled.csv": {
+    "Candidate_Layout_Summary.csv": {
         "Beam_Preserving_Optimizer",
         "Local_Search_Optimizer",
         "Layout_Feasible",
@@ -54,15 +54,14 @@ DROP_FIELDS_BY_OUTPUT = {
         "Percentage_Rack_Height_Used",
         "Feasible_Columns_Average",
     },
-    "Candidate_Layout_By_Rack_Column_TopFilled.csv": {
+    "Candidate_Layout_By_Rack_Column.csv": {
         "Beam_Preserving_Optimizer",
         "Local_Search_Optimizer",
         "Assigned_Used_Height_cm",
         "Remaining_Height_cm",
         "Fill_Ratio",
-        "TopFill_Adjusted_Row",
     },
-    "Candidate_Layout_By_Location_TopFilled.csv": {
+    "Candidate_Layout_By_Location.csv": {
         "Beam_Preserving_Optimizer",
         "Local_Search_Optimizer",
     },
@@ -168,9 +167,9 @@ def build_merged_layout_generation_outputs() -> list[Path]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _generate_stage6_variants()
     outputs = [
-        _merge_variant_file("Candidate_Layout_Summary_TopFilled.csv"),
-        _merge_variant_file("Candidate_Layout_By_Rack_Column_TopFilled.csv"),
-        _merge_variant_file("Candidate_Layout_By_Location_TopFilled.csv"),
+        _merge_variant_file("Candidate_Layout_Summary.csv"),
+        _merge_variant_file("Candidate_Layout_By_Rack_Column.csv"),
+        _merge_variant_file("Candidate_Layout_By_Location.csv"),
         _merge_variant_file("Empty_Locations_By_Slot_Size.csv"),
     ]
 

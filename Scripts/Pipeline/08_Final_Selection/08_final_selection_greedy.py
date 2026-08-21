@@ -29,9 +29,9 @@ def build_final_selection_greedy_anchor() -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stage8.ROBUSTNESS_SUMMARY_FILE = stage7_dir / "Candidate_Layout_Robustness_Summary_greedy.csv"
-    stage8.LAYOUT_SUMMARY_FILE = stage6_dir / "Candidate_Layout_Summary_TopFilled_greedy.csv"
-    stage8.LAYOUT_BY_COLUMN_FILE = stage6_dir / "Candidate_Layout_By_Rack_Column_TopFilled_greedy.csv"
-    stage8.LAYOUT_BY_LOCATION_FILE = stage6_dir / "Candidate_Layout_By_Location_TopFilled_greedy.csv"
+    stage8.LAYOUT_SUMMARY_FILE = stage6_dir / "Candidate_Layout_Summary_greedy.csv"
+    stage8.LAYOUT_BY_COLUMN_FILE = stage6_dir / "Candidate_Layout_By_Rack_Column_greedy.csv"
+    stage8.LAYOUT_BY_LOCATION_FILE = stage6_dir / "Candidate_Layout_By_Location_greedy.csv"
     stage8.OUTPUT_FILE = output_dir / "Candidate_Layout_Metric_Ranking_greedy.csv"
     stage8.FINAL_LAYOUT_BY_COLUMN_FILE = output_dir / "Final_Layout_By_Rack_Column_greedy.csv"
     stage8.FINAL_LAYOUT_BY_LOCATION_FILE = output_dir / "Final_Layout_By_Location_greedy.csv"

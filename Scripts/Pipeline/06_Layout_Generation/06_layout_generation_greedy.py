@@ -142,7 +142,6 @@ def build_layout_generation_greedy_anchor() -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stage6.LAYOUT_OUTPUT_DIR = output_dir
-    stage6.LAYOUT_TOPFILLED_DIR = output_dir
     stage6.LAYOUT_DIAGNOSTICS_DIR = output_dir
 
     prepared_rows = common._read_csv(common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv")
@@ -211,9 +210,9 @@ def build_layout_generation_greedy_anchor() -> Path:
     finally:
         common._allocate_layout_by_column = original_allocate
 
-    _replace_with_suffix(output_dir / "Candidate_Layout_Summary_TopFilled.csv")
-    _replace_with_suffix(output_dir / "Candidate_Layout_By_Rack_Column_TopFilled.csv")
-    _replace_with_suffix(output_dir / "Candidate_Layout_By_Location_TopFilled.csv")
+    _replace_with_suffix(output_dir / "Candidate_Layout_Summary.csv")
+    _replace_with_suffix(output_dir / "Candidate_Layout_By_Rack_Column.csv")
+    _replace_with_suffix(output_dir / "Candidate_Layout_By_Location.csv")
     _replace_with_suffix(output_dir / "Empty_Locations_By_Slot_Size.csv")
 
     anchor_file = output_dir / "Greedy_Fixed_Slots_Summary_greedy.csv"

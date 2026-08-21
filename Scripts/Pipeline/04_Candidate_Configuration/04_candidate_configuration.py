@@ -14,6 +14,22 @@ OUTPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
 MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
+def _legal_slot_profile(slot_sizes: list[float]) -> bool:
+    """Reject any slot-size profile that cannot be represented with legal operating sizes."""
+    if not slot_sizes:
+        return False
+    min_size = min(slot_sizes)
+    max_size = max(slot_sizes)
+    if max_size > MAX_REPRESENTATIVE_SLOT_SIZE_CM:
+        return False
+    for slot_size in slot_sizes:
+        if slot_size < min_size - 1e-9:
+            return False
+        if int(round(slot_size)) % 10 not in (4, 9):
+            return False
+    return True
+
+
 def _read_stage3_rows() -> list[dict[str, str]]:
     """Read slot-size summaries from all Stage 3 clustering methods."""
     merged_summary = common.SLOT_SIZE_ROOT / "Stage3_Slot_Size_Configuration_Summary_All.csv"
@@ -95,6 +111,8 @@ def build_candidate_configuration() -> Path:
             min(common._to_float(row.get("Representative Slot Size")) or 0.0, MAX_REPRESENTATIVE_SLOT_SIZE_CM)
             for row in ordered_rows
         ]
+        if not _legal_slot_profile(slot_sizes):
+            continue
         distribution = [_parse_percent(row.get("Cluster Count Percentage")) for row in ordered_rows]
 
         output_rows.append(

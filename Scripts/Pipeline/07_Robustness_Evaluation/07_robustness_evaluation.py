@@ -10,7 +10,7 @@ if str(PIPELINE_ROOT) not in sys.path:
 import run_ordered_pipeline as common
 
 
-LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
+LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
 NON_FEASIBLE_OUTPUT_FILE = common.STAGE7_OUTPUT_DIR / "Non_Feasible_Layouts.csv"
 NON_ROBUST_OUTPUT_FILE = common.STAGE7_OUTPUT_DIR / "Non_Robust_Layouts.csv"
@@ -260,9 +260,9 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
 
 
 if __name__ == "__main__":
-    # Stage 7 entrypoint: TopFilled-only robustness evaluation for practical implementation output.
+    # Stage 7 evaluates the implemented layout without synthetic top-fill adjustments.
     robustness_rows = build_robustness_evaluation()
     print(
-        "Robustness evaluation complete (TopFilled). "
+        "Robustness evaluation complete. "
         f"Summary rows: {len(robustness_rows)}."
     )

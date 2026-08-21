@@ -21,9 +21,9 @@ def _load_figures_module():
 
 
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"
-LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary_TopFilled.csv"
-LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column_TopFilled.csv"
-LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location_TopFilled.csv"
+LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
+LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column.csv"
+LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location.csv"
 OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Candidate_Layout_Metric_Ranking.csv"
 WSM_WEIGHTS_FILE = common.ROOT / "Input files" / "WSM_Weights.csv"
 WSM_OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Weighted_Sum_Method_Ranking.csv"
@@ -93,29 +93,11 @@ def _final_column_fieldnames(rows: list[dict[str, str]]) -> list[str]:
         "Added_Beams_In_Column",
         "Slot_Size_Distribution",
     ]
-    topfill = [
-        "TopFill_Adjusted_Row",
-        "TopFill_Original_Top_Slot_cm",
-        "TopFill_Added_Height_cm",
-        "TopFill_Adjusted_Top_Slot_cm",
-    ]
-    has_topfill = any(any(str(row.get(field, "")).strip() for field in topfill) for row in rows)
-    if has_topfill:
-        return [field for field in base if field != "Slot_Size_Distribution"] + topfill + ["Slot_Size_Distribution"]
     return base
 
 
-def _topfill_added_height_by_layout() -> dict[str, float]:
-    totals: dict[str, float] = {}
-    if not LAYOUT_BY_COLUMN_FILE.exists():
-        return totals
-
-    for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-        config_id = str(row.get("Config_ID", "")).strip()
-        if not config_id:
-            continue
-        totals[config_id] = totals.get(config_id, 0.0) + (common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0)
-    return totals
+def _additional_fill_added_height_by_layout() -> dict[str, float]:
+    return {}
 
 
 def _source_slot_sizes_by_layout(layouts: dict[str, dict[str, str]]) -> dict[str, set[int]]:
@@ -136,73 +118,16 @@ def _source_slot_sizes_by_layout(layouts: dict[str, dict[str, str]]) -> dict[str
     return by_layout
 
 
-def _topfill_extra_slot_size_variants_by_layout(
+def _additional_fill_extra_slot_size_variants_by_layout(
     source_slot_sizes_by_layout: dict[str, set[int]],
 ) -> dict[str, int]:
-    # Count distinct adjusted top slot sizes introduced by topfill that are not
-    # part of the original configured slot-size set for each layout.
-    extra_sizes_by_layout: dict[str, set[int]] = {}
-    if not LAYOUT_BY_COLUMN_FILE.exists():
-        return {}
-
-    for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-        layout_id = str(row.get("Config_ID", "")).strip()
-        if not layout_id:
-            continue
-
-        added_height = common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0
-        if added_height <= 0.0:
-            continue
-
-        adjusted_size = common._to_int_default(row.get("TopFill_Adjusted_Top_Slot_cm"), -1)
-        if adjusted_size < 0:
-            continue
-
-        original_sizes = source_slot_sizes_by_layout.get(layout_id, set())
-        if adjusted_size in original_sizes:
-            continue
-
-        if layout_id not in extra_sizes_by_layout:
-            extra_sizes_by_layout[layout_id] = set()
-        extra_sizes_by_layout[layout_id].add(adjusted_size)
-
-    return {layout_id: len(sizes) for layout_id, sizes in extra_sizes_by_layout.items()}
+    return {}
 
 
-def _topfill_extra_slot_sizes_by_layout(
+def _additional_fill_extra_slot_sizes_by_layout(
     source_slot_sizes_by_layout: dict[str, set[int]],
 ) -> dict[str, str]:
-    # List distinct adjusted top slot sizes introduced by topfill that are not
-    # part of the original configured slot-size set for each layout.
-    extra_sizes_by_layout: dict[str, set[int]] = {}
-    if not LAYOUT_BY_COLUMN_FILE.exists():
-        return {}
-
-    for row in _read_csv(LAYOUT_BY_COLUMN_FILE):
-        layout_id = str(row.get("Config_ID", "")).strip()
-        if not layout_id:
-            continue
-
-        added_height = common._to_float(row.get("TopFill_Added_Height_cm")) or 0.0
-        if added_height <= 0.0:
-            continue
-
-        adjusted_size = common._to_int_default(row.get("TopFill_Adjusted_Top_Slot_cm"), -1)
-        if adjusted_size < 0:
-            continue
-
-        original_sizes = source_slot_sizes_by_layout.get(layout_id, set())
-        if adjusted_size in original_sizes:
-            continue
-
-        if layout_id not in extra_sizes_by_layout:
-            extra_sizes_by_layout[layout_id] = set()
-        extra_sizes_by_layout[layout_id].add(adjusted_size)
-
-    return {
-        layout_id: ",".join(str(size) for size in sorted(sizes))
-        for layout_id, sizes in extra_sizes_by_layout.items()
-    }
+    return {}
 
 
 def _count_unique_slot_sizes(layout_row: dict[str, str]) -> int:
@@ -243,8 +168,6 @@ WSM_METRIC_SPECS = [
     ("Additional_Beams_Required", "min"),
     ("Additional_Grids_Required", "min"),
     ("Standardization_Unique_Slot_Sizes", "min"),
-    ("Additional_Fill_Extra_Slot_Size_Variants", "min"),
-    ("Additional_Fill_Height_Total_cm", "min"),
 ]
 
 
@@ -260,16 +183,17 @@ def _read_wsm_weights() -> dict[str, float]:
             continue
         if metric in weights:
             raise ValueError(f"Duplicate WSM metric in {WSM_WEIGHTS_FILE}: {metric}")
+        if metric not in {name for name, _direction in WSM_METRIC_SPECS}:
+            continue
         weight = common._to_float(row.get("Weight"))
         if weight is None or not 0.0 <= weight <= 1.0:
             raise ValueError(f"WSM weight for {metric} must be between 0 and 1")
         weights[metric] = weight
 
     expected_metrics = {metric for metric, _direction in WSM_METRIC_SPECS}
-    if set(weights) != expected_metrics:
-        missing = sorted(expected_metrics - set(weights))
-        extra = sorted(set(weights) - expected_metrics)
-        raise ValueError(f"WSM weights must contain exactly the configured metrics. Missing: {missing}; extra: {extra}")
+    missing = sorted(expected_metrics - set(weights))
+    if missing:
+        raise ValueError(f"WSM weights file is missing required metrics: {missing}")
     total = sum(weights.values())
     if abs(total - 1.0) > 1e-9:
         raise ValueError(f"WSM weights must sum to 1.0; got {total:.12f}")
@@ -339,7 +263,7 @@ def _actual_occupied_by_size(layout_row: dict[str, str]) -> dict[int, int]:
     """Use the same best-fit exact-slot allocation used during layout generation so
     extra occupied slot sizes in the realized layout are included in KPI math."""
     minimum_by_size = _parse_size_count_signature(str(layout_row.get("Minimum_Required_Counts", "")))
-    total_by_size = _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+    total_by_size = _parse_size_count_signature(str(layout_row.get("Layout_Slot_Size_Distribution", "")))
 
     remaining_capacity = {size: max(int(count), 0) for size, count in total_by_size.items()}
     occupied_by_size: dict[int, int] = {}
@@ -369,10 +293,10 @@ def _actual_occupied_by_size(layout_row: dict[str, str]) -> dict[int, int]:
 
 
 def _space_utilization_metrics(layout_row: dict[str, str]) -> tuple[int, int, int, int, int, float]:
-    # Compare actual occupied layout space against the realized top-filled layout,
-    # including any extra slot sizes that appear in the final layout.
+    # Compare actual occupied layout space against the realized layout, including any
+    # extra slot sizes that appear in the final layout.
     occupied_by_size = _actual_occupied_by_size(layout_row)
-    total_by_size = _parse_size_count_signature(str(layout_row.get("TopFill_Layout_Slot_Size_Distribution", "")))
+    total_by_size = _parse_size_count_signature(str(layout_row.get("Layout_Slot_Size_Distribution", "")))
 
     all_sizes = sorted(set(occupied_by_size.keys()) | set(total_by_size.keys()))
     occupied_locations = 0
@@ -466,10 +390,10 @@ def build_final_selection() -> list[dict[str, str]]:
     """Build a full all-candidate metric table with per-metric ranks for weighted-sum analysis."""
     robustness_rows = [row for row in _robustness_rows() if _is_robustness_passing(row)]
     layouts = _layout_map()
-    topfill_added_height = _topfill_added_height_by_layout()
+    additional_fill_added_height = _additional_fill_added_height_by_layout()
     source_slot_sizes = _source_slot_sizes_by_layout(layouts)
-    topfill_extra_slot_size_variants = _topfill_extra_slot_size_variants_by_layout(source_slot_sizes)
-    topfill_extra_slot_sizes = _topfill_extra_slot_sizes_by_layout(source_slot_sizes)
+    additional_fill_extra_slot_size_variants = _additional_fill_extra_slot_size_variants_by_layout(source_slot_sizes)
+    additional_fill_extra_slot_sizes = _additional_fill_extra_slot_sizes_by_layout(source_slot_sizes)
 
     joined_rows: list[dict[str, str]] = []
     # Join Stage 6 layout metadata with Stage 7 robustness metrics.
@@ -534,12 +458,12 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
                 "Implementation_Effort_Total": str(implementation_effort_total),
                 "Standardization_Unique_Slot_Sizes": str(common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0)),
-                "Additional_Fill_Height_Total_cm": f"{topfill_added_height.get(str(row.get('Config_ID', '')).strip(), 0.0):.0f}",
+                "Additional_Fill_Height_Total_cm": f"{additional_fill_added_height.get(str(row.get('Config_ID', '')).strip(), 0.0):.0f}",
                 "Additional_Fill_Extra_Slot_Size_Variants": str(
-                    topfill_extra_slot_size_variants.get(str(row.get("Config_ID", "")).strip(), 0)
+                    additional_fill_extra_slot_size_variants.get(str(row.get("Config_ID", "")).strip(), 0)
                 ),
                 "Additional_Fill_Extra_Slot_Sizes": common._encode_excel_text(
-                    str(topfill_extra_slot_sizes.get(str(row.get("Config_ID", "")).strip(), ""))
+                    str(additional_fill_extra_slot_sizes.get(str(row.get("Config_ID", "")).strip(), ""))
                 ),
             }
         )
@@ -550,12 +474,6 @@ def build_final_selection() -> list[dict[str, str]]:
         ("Additional_Grids_Required", "Rank_Additional_Required_Grids", False),
         ("Implementation_Effort_Total", "Rank_Implementation_Effort_Total", False),
         ("Standardization_Unique_Slot_Sizes", "Rank_Standardization", False),
-        ("Additional_Fill_Height_Total_cm", "Rank_Additional_Fill_Height_Total_cm", False),
-        (
-            "Additional_Fill_Extra_Slot_Size_Variants",
-            "Rank_Additional_Fill_Extra_Slot_Size_Variants",
-            False,
-        ),
         ("Empty_Slot_Space_m3", "Rank_Empty_Slot_Space_m3", True),
         ("Total_Slot_Space_m3", "Rank_Total_Slot_Space_m3", True),
         ("Space_Utilization_Pct", "Rank_Space_Utilization_Pct", False),
@@ -611,10 +529,8 @@ def build_final_selection() -> list[dict[str, str]]:
             "Standardization_Unique_Slot_Sizes",
             "Rank_Standardization",
             "Additional_Fill_Height_Total_cm",
-            "Rank_Additional_Fill_Height_Total_cm",
             "Additional_Fill_Extra_Slot_Size_Variants",
             "Additional_Fill_Extra_Slot_Sizes",
-            "Rank_Additional_Fill_Extra_Slot_Size_Variants",
         ],
         candidate_rows,
     )
@@ -740,6 +656,6 @@ if __name__ == "__main__":
     # Stage 8 entrypoint: emit full candidate scorecard for weighted-sum analysis.
     candidate_rows = build_final_selection()
     print(
-        "Decision-support candidate ranking complete (TopFilled). "
+        "Decision-support candidate ranking complete. "
         f"Candidate rows: {len(candidate_rows)}."
     )

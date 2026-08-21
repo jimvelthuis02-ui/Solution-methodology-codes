@@ -14,25 +14,7 @@ import run_ordered_pipeline as common
 
 VARIANTS = [
     {
-        "label": "Baseline_None",
-        "construction_method": "baseline",
-        "use_beam_optimizer": False,
-        "use_local_search": False,
-        "improvement_method": "none",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Greedy_None",
-        "construction_method": "greedy",
-        "use_beam_optimizer": False,
-        "use_local_search": False,
-        "improvement_method": "none",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "ConstructiveBeam_None",
+        "label": "ConstructiveBeam_NoLocalSearch",
         "construction_method": "constructive_beam",
         "use_beam_optimizer": False,
         "use_local_search": False,
@@ -41,26 +23,26 @@ VARIANTS = [
         "local_search_optimizer": "NO",
     },
     {
-        "label": "Baseline_LocalSearch",
-        "construction_method": "baseline",
+        "label": "ConstructiveBeam_LocalSearch",
+        "construction_method": "constructive_beam",
         "use_beam_optimizer": False,
         "use_local_search": True,
         "improvement_method": "local_search",
-        "beam_preserving_optimizer": "NO",
+        "beam_preserving_optimizer": "CONSTRUCTIVE",
         "local_search_optimizer": "YES",
+    },
+    {
+        "label": "Greedy_NoLocalSearch",
+        "construction_method": "greedy",
+        "use_beam_optimizer": False,
+        "use_local_search": False,
+        "improvement_method": "none",
+        "beam_preserving_optimizer": "CONSTRUCTIVE",
+        "local_search_optimizer": "NO",
     },
     {
         "label": "Greedy_LocalSearch",
         "construction_method": "greedy",
-        "use_beam_optimizer": False,
-        "use_local_search": True,
-        "improvement_method": "local_search",
-        "beam_preserving_optimizer": "NO",
-        "local_search_optimizer": "YES",
-    },
-    {
-        "label": "ConstructiveBeam_LocalSearch",
-        "construction_method": "constructive_beam",
         "use_beam_optimizer": False,
         "use_local_search": True,
         "improvement_method": "local_search",
@@ -77,7 +59,11 @@ HEURISTIC_FIELDS = [
     "Local_Search_Optimizer",
 ]
 
-BEAM_ORDER_EXACT_SLOT_LIMIT = 14
+# Disable the exact-order pruning cap for the current search budget. This lets
+# the beam ordering logic explore the full legal slot family before reverting to
+# the bounded fallback, which avoids false negatives on otherwise feasible rack
+# layouts.
+BEAM_ORDER_EXACT_SLOT_LIMIT = 9999
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -398,7 +384,6 @@ def run_stage6_variant(variants_root: Path, variant: dict[str, object], all_impa
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stage6.LAYOUT_OUTPUT_DIR = output_dir
-    stage6.LAYOUT_TOPFILLED_DIR = output_dir
     stage6.LAYOUT_DIAGNOSTICS_DIR = output_dir
 
     original_allocate = None
@@ -440,7 +425,7 @@ def run_stage7_variant(variants_root: Path, variant: dict[str, object]) -> Path:
     output_file = stage7_dir(variants_root, variant) / "Candidate_Layout_Robustness_Summary.csv"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    stage7.LAYOUT_SUMMARY_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_Summary_TopFilled.csv"
+    stage7.LAYOUT_SUMMARY_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_Summary.csv"
     stage7.ROBUSTNESS_SUMMARY_FILE = output_file
     stage7.NON_FEASIBLE_OUTPUT_FILE = output_file.parent / "Non_Feasible_Layouts.csv"
     stage7.NON_ROBUST_OUTPUT_FILE = output_file.parent / "Non_Robust_Layouts.csv"
@@ -455,9 +440,9 @@ def run_stage8_variant(variants_root: Path, variant: dict[str, object]) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stage8.ROBUSTNESS_SUMMARY_FILE = stage7_dir(variants_root, variant) / "Candidate_Layout_Robustness_Summary.csv"
-    stage8.LAYOUT_SUMMARY_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_Summary_TopFilled.csv"
-    stage8.LAYOUT_BY_COLUMN_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_By_Rack_Column_TopFilled.csv"
-    stage8.LAYOUT_BY_LOCATION_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_By_Location_TopFilled.csv"
+    stage8.LAYOUT_SUMMARY_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_Summary.csv"
+    stage8.LAYOUT_BY_COLUMN_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_By_Rack_Column.csv"
+    stage8.LAYOUT_BY_LOCATION_FILE = stage6_dir(variants_root, variant) / "Candidate_Layout_By_Location.csv"
     stage8.OUTPUT_FILE = output_dir / "Candidate_Layout_Metric_Ranking.csv"
     stage8.FINAL_LAYOUT_BY_COLUMN_FILE = output_dir / "Final_Layout_By_Rack_Column.csv"
     stage8.FINAL_LAYOUT_BY_LOCATION_FILE = output_dir / "Final_Layout_By_Location.csv"

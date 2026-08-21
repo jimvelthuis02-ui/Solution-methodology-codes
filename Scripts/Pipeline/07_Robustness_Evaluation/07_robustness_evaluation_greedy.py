@@ -29,7 +29,7 @@ def build_robustness_evaluation_greedy_anchor() -> Path:
     stage7.LAYOUT_SUMMARY_FILE = (
         common.OUTPUT_ROOT
         / "06_Layout_Generation_Greedy"
-        / "Candidate_Layout_Summary_TopFilled_greedy.csv"
+        / "Candidate_Layout_Summary_greedy.csv"
     )
     stage7.ROBUSTNESS_SUMMARY_FILE = output_dir / "Candidate_Layout_Robustness_Summary_greedy.csv"
 

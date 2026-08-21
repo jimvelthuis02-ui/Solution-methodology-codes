@@ -86,7 +86,6 @@ DROP_FIELDS_BY_OUTPUT = {
         "Local_Search_Optimizer",
         "Remaining_Height_cm",
         "Fill_Ratio",
-        "TopFill_Adjusted_Row",
     },
     "Final_Layout_By_Location.csv": {
         "Beam_Preserving_Optimizer",
