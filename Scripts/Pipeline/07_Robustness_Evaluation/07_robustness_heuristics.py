@@ -84,7 +84,7 @@ def _stage7_variant_exclusion_file(variant: dict[str, object], filename: str) ->
 
 def _generate_stage7_variants() -> None:
     if VARIANTS_ROOT.exists():
-        shutil.rmtree(VARIANTS_ROOT)
+        common._safe_rmtree(VARIANTS_ROOT)
     VARIANTS_ROOT.mkdir(parents=True, exist_ok=True)
 
     original_best_slot_order = variants_common.apply_bounded_beam_order()
@@ -174,7 +174,7 @@ def build_merged_robustness_outputs() -> Path:
         )
 
     if VARIANTS_ROOT.exists():
-        shutil.rmtree(VARIANTS_ROOT)
+        common._safe_rmtree(VARIANTS_ROOT)
 
     # Keep only merged Stage 7 outputs after comparison build.
     for old_dir in [
@@ -183,7 +183,7 @@ def build_merged_robustness_outputs() -> Path:
         common.OUTPUT_ROOT / "07_Robustness_Evaluation_BeamOptimizer_Experimental",
     ]:
         if old_dir.exists():
-            shutil.rmtree(old_dir)
+            common._safe_rmtree(old_dir)
 
     return output_path
 

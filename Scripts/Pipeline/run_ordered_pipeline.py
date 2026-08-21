@@ -1,7 +1,10 @@
 import csv
 import math
+import os
 import re
 import runpy
+import shutil
+import stat
 import time
 from functools import lru_cache
 from collections import defaultdict
@@ -150,6 +153,55 @@ def _write_csv_clean(path: Path, fieldnames: list[str], rows: list[dict[str, str
         writer = csv.DictWriter(target, fieldnames=cleaned_fields)
         writer.writeheader()
         writer.writerows(cleaned_rows)
+
+
+def _safe_rmtree(path: Path | str, retries: int = 8, delay_seconds: float = 0.35) -> None:
+    """Retry directory removal on Windows when nested files or read-only flags delay cleanup."""
+    target = Path(path)
+    if not target.exists():
+        return
+
+    for attempt in range(1, retries + 1):
+        try:
+            for root, dirs, files in os.walk(target, topdown=False):
+                root_path = Path(root)
+                for name in files:
+                    file_path = root_path / name
+                    try:
+                        os.chmod(file_path, stat.S_IWRITE)
+                    except OSError:
+                        pass
+                    try:
+                        file_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                for name in dirs:
+                    dir_path = root_path / name
+                    try:
+                        os.chmod(dir_path, stat.S_IWRITE | stat.S_IREAD)
+                    except OSError:
+                        pass
+                    try:
+                        dir_path.rmdir()
+                    except OSError:
+                        pass
+                try:
+                    os.chmod(root_path, stat.S_IWRITE | stat.S_IREAD)
+                except OSError:
+                    pass
+                try:
+                    root_path.rmdir()
+                except OSError:
+                    pass
+
+            if not target.exists():
+                return
+            shutil.rmtree(target)
+            return
+        except (PermissionError, FileNotFoundError, OSError) as exc:
+            if attempt == retries:
+                raise
+            time.sleep(delay_seconds * attempt)
 
 
 def _slot_size_variable_name(slot_size: float) -> str:

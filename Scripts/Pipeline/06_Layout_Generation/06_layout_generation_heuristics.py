@@ -99,7 +99,7 @@ def _stage6_variant_dir(variant: dict[str, object]) -> Path:
 
 def _generate_stage6_variants() -> None:
     if VARIANTS_ROOT.exists():
-        shutil.rmtree(VARIANTS_ROOT)
+        common._safe_rmtree(VARIANTS_ROOT)
     VARIANTS_ROOT.mkdir(parents=True, exist_ok=True)
 
     original_best_slot_order = variants_common.apply_bounded_beam_order()
@@ -175,7 +175,7 @@ def build_merged_layout_generation_outputs() -> list[Path]:
     ]
 
     if VARIANTS_ROOT.exists():
-        shutil.rmtree(VARIANTS_ROOT)
+        common._safe_rmtree(VARIANTS_ROOT)
 
     # Keep only merged Stage 6 outputs after comparison build.
     for old_dir in [
@@ -183,7 +183,7 @@ def build_merged_layout_generation_outputs() -> list[Path]:
         common.OUTPUT_ROOT / "06_Layout_Generation_Greedy",
     ]:
         if old_dir.exists():
-            shutil.rmtree(old_dir)
+            common._safe_rmtree(old_dir)
 
     return outputs
 

@@ -124,7 +124,7 @@ def _stage8_variant_dir(variant: dict[str, object]) -> Path:
 
 def _generate_stage8_variants() -> list[dict[str, str]]:
     if VARIANTS_ROOT.exists():
-        shutil.rmtree(VARIANTS_ROOT)
+        common._safe_rmtree(VARIANTS_ROOT)
     VARIANTS_ROOT.mkdir(parents=True, exist_ok=True)
 
     original_best_slot_order = variants_common.apply_bounded_beam_order()
@@ -370,7 +370,7 @@ def build_merged_final_selection_outputs() -> list[Path]:
     figures_module.generate_figures(figures_file, OUTPUT_DIR / "Figures")
 
     if VARIANTS_ROOT.exists():
-        shutil.rmtree(VARIANTS_ROOT)
+        common._safe_rmtree(VARIANTS_ROOT)
 
     # Keep only merged Stage 8 outputs after comparison build.
     for old_dir in [
@@ -379,7 +379,7 @@ def build_merged_final_selection_outputs() -> list[Path]:
         common.OUTPUT_ROOT / "08_Final_Selection_BeamOptimizer_Experimental",
     ]:
         if old_dir.exists():
-            shutil.rmtree(old_dir)
+            common._safe_rmtree(old_dir)
 
     return outputs
 
