@@ -73,8 +73,6 @@ class SlotSizeCapTest(unittest.TestCase):
             {
                 "ConstructiveBeam_NoLocalSearch",
                 "ConstructiveBeam_LocalSearch",
-                "Greedy_NoLocalSearch",
-                "Greedy_LocalSearch",
             },
         )
 
@@ -111,6 +109,44 @@ class SlotSizeCapTest(unittest.TestCase):
         for slots in refined.values():
             self.assertTrue(all(int(round(value)) >= 69 for value in slots))
             self.assertTrue(all(int(round(value)) % 10 in (4, 9) for value in slots))
+
+    def test_legal_family_fillers_are_accepted_by_layout_feasibility(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "A01": [64.0, 119.0, 224.0, 234.0],
+            "A02": [64.0, 119.0, 224.0, 234.0],
+        }
+
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                assignments,
+                ["A01", "A02"],
+                64.0,
+                [64.0, 119.0, 234.0],
+            )
+        )
+
+    def test_stage6_column_export_keeps_assigned_used_height_when_slots_exist(self):
+        import csv
+
+        merged_output = Path(ROOT / "Output" / "06_Layout_Generation_Comparison" / "Candidate_Layout_By_Rack_Column.csv")
+        self.assertTrue(merged_output.exists(), "Merged stage 6 comparison CSV should exist")
+
+        with merged_output.open("r", newline="", encoding="utf-8-sig") as source:
+            rows = list(csv.DictReader(source))
+
+        self.assertIn("Assigned_Used_Height_cm", rows[0].keys())
+        non_blank = [row for row in rows if str(row.get("Assigned_Used_Height_cm", "")).strip() and str(row.get("Slot_Size_Distribution", "")).strip()]
+        self.assertGreater(len(non_blank), 0)
+        self.assertNotEqual(str(non_blank[0].get("Assigned_Used_Height_cm", "")).strip(), "")
+
+        sample = non_blank[0]
+        slot_parts = [part for part in str(sample.get("Slot_Size_Distribution", "")).split("|") if part.strip()]
+        if slot_parts:
+            slot_total = sum(int(part.split(":", 1)[0]) * int(part.split(":", 1)[1]) for part in slot_parts)
+            slot_count = sum(int(part.split(":", 1)[1]) for part in slot_parts)
+            expected = slot_total + max(slot_count - 1, 0) * 16.0
+            self.assertAlmostEqual(float(sample["Assigned_Used_Height_cm"]), expected, delta=1e-3)
 
 
 if __name__ == "__main__":

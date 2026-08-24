@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+STAGE4_PATH = ROOT / "Scripts" / "Pipeline" / "04_Candidate_Configuration" / "04_candidate_configuration.py"
 STAGE6_PATH = ROOT / "Scripts" / "Pipeline" / "06_Layout_Generation" / "06_layout_generation.py"
+
+spec4 = importlib.util.spec_from_file_location("stage4_candidate_configuration", STAGE4_PATH)
+module4 = importlib.util.module_from_spec(spec4)
+sys.modules["stage4_candidate_configuration"] = module4
+spec4.loader.exec_module(module4)
 
 spec = importlib.util.spec_from_file_location("stage6_layout", STAGE6_PATH)
 module = importlib.util.module_from_spec(spec)
@@ -13,6 +19,14 @@ spec.loader.exec_module(module)
 
 
 class RackRowCountConsistencyTest(unittest.TestCase):
+    def test_stage4_rejects_slot_families_that_cannot_fill_the_physical_limit(self):
+        self.assertTrue(module4._legal_slot_profile([69.0, 119.0, 234.0]))
+        self.assertFalse(module4._legal_slot_profile([44.0]))
+
+    def test_stage4_rejects_slot_families_that_cannot_fill_the_physical_limit(self):
+        self.assertTrue(module4._legal_slot_profile([69.0, 119.0, 234.0]))
+        self.assertFalse(module4._legal_slot_profile([44.0]))
+
     def test_no_minimum_beam_floor_is_applied(self):
         self.assertEqual(module.common.MIN_BEAMS_PER_COLUMN, 0)
         self.assertEqual(max(4 - 1, module.common.MIN_BEAMS_PER_COLUMN), 3)
@@ -52,6 +66,24 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             )
         )
 
+    def test_keeps_the_highest_feasible_row_count_when_equalizing_rack(self):
+        assignments = {
+            "K00": [69.0, 69.0, 69.0, 69.0, 69.0],
+            "K01": [69.0, 69.0, 69.0, 69.0, 69.0],
+            "K04": [69.0, 69.0, 69.0, 234.0],
+            "K05": [69.0, 69.0, 69.0, 234.0],
+        }
+
+        adjusted = module._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[69.0, 119.0, 234.0],
+        )
+
+        lengths = {key: len(value) for key, value in adjusted.items()}
+        self.assertEqual(len(set(lengths.values())), 1)
+        self.assertEqual(max(lengths.values()), 4)
+        self.assertTrue(all(length == 4 for length in lengths.values()))
+
     def test_rejects_inconsistent_rack_row_levels_even_with_fixed_prefix_columns(self):
         assignments = {
             "A00": [64.0, 64.0, 119.0, 234.0, 234.0],
@@ -72,6 +104,24 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             )
         )
 
+    def test_allows_same_row_count_with_different_slot_orders_in_same_rack(self):
+        assignments = {
+            "K00": [234.0, 234.0, 149.0, 89.0],
+            "K01": [234.0, 234.0, 119.0, 119.0],
+            "K02": [234.0, 234.0, 149.0, 89.0],
+        }
+
+        adjusted = module._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[89.0, 119.0, 149.0, 234.0],
+        )
+
+        lengths = {key: len(value) for key, value in adjusted.items()}
+        self.assertEqual(len(set(lengths.values())), 1)
+        self.assertEqual(max(lengths.values()), 4)
+        self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 <= 754.0 for values in adjusted.values()))
+        self.assertTrue(adjusted["K00"] != adjusted["K01"])
+
     def test_accepts_legal_underfilled_columns_within_physical_limit(self):
         valid = {
             "R01C01": [64.0, 64.0, 234.0, 234.0],
@@ -87,6 +137,22 @@ class RackRowCountConsistencyTest(unittest.TestCase):
                 [64.0, 119.0, 234.0],
             )
         )
+
+    def test_rebuilds_columns_with_larger_slots_lower_and_smaller_slots_above(self):
+        assignments = {
+            "K00": [89.0, 119.0, 234.0, 234.0],
+            "K01": [119.0, 119.0, 234.0, 234.0],
+            "K02": [89.0, 119.0, 234.0, 234.0],
+        }
+
+        adjusted = module._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[89.0, 119.0, 149.0, 234.0],
+        )
+
+        for values in adjusted.values():
+            self.assertEqual(values, sorted(values, reverse=True))
+            self.assertLessEqual(sum(values) + (len(values) - 1) * 16.0, 754.0)
 
     def test_rejects_layouts_that_cannot_become_feasible(self):
         impossible = {

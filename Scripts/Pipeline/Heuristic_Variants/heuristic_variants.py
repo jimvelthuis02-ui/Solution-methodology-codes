@@ -12,6 +12,10 @@ if str(PIPELINE_ROOT) not in sys.path:
 import run_ordered_pipeline as common
 
 
+# Keep the active heuristic set to the physically valid constructive beam variants.
+# The greedy variants remain available in the repo for future development, but the
+# working model prioritizes legal, feasible layouts over the exploratory greedy
+# search that does not keep the same physical guarantees.
 VARIANTS = [
     {
         "label": "ConstructiveBeam_NoLocalSearch",
@@ -25,24 +29,6 @@ VARIANTS = [
     {
         "label": "ConstructiveBeam_LocalSearch",
         "construction_method": "constructive_beam",
-        "use_beam_optimizer": False,
-        "use_local_search": True,
-        "improvement_method": "local_search",
-        "beam_preserving_optimizer": "CONSTRUCTIVE",
-        "local_search_optimizer": "YES",
-    },
-    {
-        "label": "Greedy_NoLocalSearch",
-        "construction_method": "greedy",
-        "use_beam_optimizer": False,
-        "use_local_search": False,
-        "improvement_method": "none",
-        "beam_preserving_optimizer": "CONSTRUCTIVE",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "Greedy_LocalSearch",
-        "construction_method": "greedy",
         "use_beam_optimizer": False,
         "use_local_search": True,
         "improvement_method": "local_search",

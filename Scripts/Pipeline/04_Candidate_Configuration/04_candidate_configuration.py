@@ -1,6 +1,7 @@
 import csv
 from collections import defaultdict
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -22,12 +23,47 @@ def _legal_slot_profile(slot_sizes: list[float]) -> bool:
     max_size = max(slot_sizes)
     if max_size > MAX_REPRESENTATIVE_SLOT_SIZE_CM:
         return False
+
+    legal_pool: list[int] = []
+    seen: set[int] = set()
     for slot_size in slot_sizes:
         if slot_size < min_size - 1e-9:
             return False
-        if int(round(slot_size)) % 10 not in (4, 9):
+        rounded = int(round(slot_size))
+        if rounded % 10 not in (4, 9):
             return False
-    return True
+        if rounded not in seen:
+            seen.add(rounded)
+            legal_pool.append(rounded)
+
+    if not legal_pool:
+        return False
+
+    # Keep only capacity profiles that can actually form a legal rack-column fill
+    # under the physical limit 754 cm. This prevents impossible families such as
+    # single-size 44 cm profiles or other combinations that never match the exact
+    # fill target at any valid row count.
+    for row_count in range(1, 20):
+        target_total = int(round(754.0 - (row_count - 1) * 16.0))
+        if target_total <= 0:
+            continue
+
+        @lru_cache(maxsize=None)
+        def can_make(remaining: int, slots_left: int) -> bool:
+            if slots_left == 0:
+                return remaining == 0
+            if remaining < 0:
+                return False
+            for size in sorted(legal_pool):
+                if size > remaining:
+                    continue
+                if can_make(remaining - size, slots_left - 1):
+                    return True
+            return False
+
+        if can_make(target_total, row_count):
+            return True
+    return False
 
 
 def _read_stage3_rows() -> list[dict[str, str]]:

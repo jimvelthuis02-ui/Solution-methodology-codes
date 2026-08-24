@@ -1,6 +1,7 @@
 import csv
 from collections import defaultdict
 from functools import lru_cache
+from itertools import combinations_with_replacement
 import sys
 from pathlib import Path
 from typing import TypeAlias
@@ -544,9 +545,12 @@ def _enforce_segment_uniform_slot_profiles(
     fixed_prefix_by_column: dict[str, list[float]] | None = None,
     doorgang_thresholds_by_rack: dict[str, tuple[int, float]] | None = None,
 ) -> dict[str, list[float]]:
-    # Physical rule: all columns sharing a beam segment must keep identical rows
-    # and slot heights above fixed prefixes (for example doorgang rows),
-    # otherwise shared beam elevations cannot align.
+    """Keep a common row count per rack segment without forcing one canonical slot order.
+
+    The physical requirement is that columns in the same rack segment must share a
+    row count, but their slot profiles can still differ as long as each column stays
+    physically feasible and any fixed doorgang prefix remains aligned.
+    """
     if not column_assignments:
         return {}
 
@@ -556,10 +560,6 @@ def _enforce_segment_uniform_slot_profiles(
     }
     fixed_prefix_by_column = fixed_prefix_by_column or {}
     doorgang_thresholds_by_rack = doorgang_thresholds_by_rack or {}
-    global_smallest_slot = min(
-        (float(value) for slots in uniform.values() for value in slots if float(value) > 0.0),
-        default=0.0,
-    )
 
     for rack, c0, c1 in sorted(segments):
         segment_columns = [f"{rack}{col:02d}" for col in range(c0, c1 + 1)]
@@ -568,11 +568,9 @@ def _enforce_segment_uniform_slot_profiles(
             column_key: [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
             for column_key in segment_columns
         }
+
         if threshold is not None:
             doorgang_column, doorgang_height = threshold
-            # Doorgang-adjacent 3-column segment: below the doorgang beam top, the
-            # left pair may still differ from the doorgang column. Above that beam,
-            # all three columns must share the same slot-size order.
             if c1 == doorgang_column and c0 == doorgang_column - 2:
                 uniform_from_height = float(doorgang_height) + float(common.BEAM_HEIGHT)
                 for column_key in segment_columns:
@@ -588,147 +586,42 @@ def _enforce_segment_uniform_slot_profiles(
                             break
                         running_height += float(slot_size)
                     locked_prefix_by_column[column_key] = [float(value) for value in slots[:split_index]]
-        profiles: dict[tuple[int, ...], tuple[int, float, int]] = {}
-        minimum_locations = max(int(common.MIN_LOCATIONS_PER_COLUMN), 1)
-        required_suffix_len = 0
+
+        target_length = max(
+            (len(uniform.get(column_key, [])) for column_key in segment_columns if column_key in uniform),
+            default=0,
+        )
+        if target_length <= 0:
+            continue
+
         for column_key in segment_columns:
             if column_key not in uniform:
                 continue
-            prefix_len = len(locked_prefix_by_column.get(column_key, []))
-            required_suffix_len = max(required_suffix_len, max(minimum_locations - prefix_len, 0))
-
-        def _suffix_is_feasible(suffix: list[float]) -> bool:
-            for column_key in segment_columns:
-                if column_key not in uniform:
-                    continue
-                prefix = [float(value) for value in locked_prefix_by_column.get(column_key, [])]
-                total_slots = len(prefix) + len(suffix)
-                allowed = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(total_slots - 1, common.MIN_BEAMS_PER_COLUMN)
-                used = sum(prefix) + sum(suffix)
-                if used > allowed + 1e-9:
-                    return False
-            return True
-
-        if threshold is not None:
-            doorgang_column, doorgang_height = threshold
-            if c1 == doorgang_column and c0 == doorgang_column - 2:
-                segment_main_lengths: dict[str, int] = {}
-                for column_key in segment_columns:
-                    slots = uniform.get(column_key, [])
-                    if not slots:
-                        continue
-                    split_idx = 0
-                    running_total = 0.0
-                    for idx, value in enumerate(slots):
-                        running_total += float(value)
-                        beam_bottom = running_total + float(common.BEAM_HEIGHT) * float(idx)
-                        if beam_bottom >= float(doorgang_height) - 1e-9:
-                            split_idx = idx
-                            break
-                    segment_main_lengths[column_key] = len(slots) - split_idx if split_idx > 0 else 0
-
-                if segment_main_lengths:
-                    target_main_length = max(segment_main_lengths.values())
-                    for column_key in segment_columns:
-                        slots = uniform.get(column_key, [])
-                        if not slots:
-                            continue
-                        split_idx = 0
-                        running_total = 0.0
-                        for idx, value in enumerate(slots):
-                            running_total += float(value)
-                            beam_bottom = running_total + float(common.BEAM_HEIGHT) * float(idx)
-                            if beam_bottom >= float(doorgang_height) - 1e-9:
-                                split_idx = idx
-                                break
-                        if split_idx == 0:
-                            continue
-                        prefix = list(slots[:split_idx])
-                        body = list(slots[split_idx:])
-                        if len(body) < target_main_length:
-                            pad_value = float(body[0]) if body else float(min(slot for slot in slots if slot > 0.0))
-                            body.extend([pad_value] * (target_main_length - len(body)))
-                        uniform[column_key] = prefix + body[:target_main_length]
-
-        for column_key in segment_columns:
-            slots = uniform.get(column_key, [])
-            if not slots:
-                continue
             prefix = [float(value) for value in locked_prefix_by_column.get(column_key, [])]
-            suffix_slots = list(slots)
-            if prefix and len(slots) >= len(prefix):
-                prefix_matches = True
-                for idx, value in enumerate(prefix):
-                    if abs(float(slots[idx]) - value) > 1e-9:
-                        prefix_matches = False
-                        break
-                if prefix_matches:
-                    suffix_slots = list(slots[len(prefix):])
+            values = [float(value) for value in uniform[column_key]]
+            if len(prefix) > 0 and len(values) >= len(prefix):
+                values = values[len(prefix):]
 
-            key = tuple(int(round(value)) for value in suffix_slots)
-            count, total_height, length = profiles.get(key, (0, 0.0, len(key)))
-            profiles[key] = (count + 1, total_height + sum(suffix_slots), len(key))
-
-        if not profiles:
-            continue
-
-        smallest_suffix_slot = min(
-            (value for key in profiles.keys() for value in key),
-            default=0,
-        )
-        if smallest_suffix_slot <= 0:
-            smallest_suffix_slot = global_smallest_slot
-
-        def _extend_to_required_length(candidate: list[float]) -> list[float]:
-            if smallest_suffix_slot <= 0:
-                return candidate
-            extended = list(candidate)
-            while len(extended) < required_suffix_len:
-                test = extended + [float(smallest_suffix_slot)]
-                if not _suffix_is_feasible(test):
+            if len(values) > target_length - len(prefix):
+                values = values[: target_length - len(prefix)]
+            while len(values) < target_length - len(prefix):
+                pad_pool = [
+                    float(value)
+                    for value in values
+                    if float(value) > 0.0 and int(round(float(value))) % 10 in (4, 9)
+                ]
+                if not pad_pool:
+                    pad_pool = [float(value) for value in uniform[column_key] if float(value) > 0.0]
+                if not pad_pool:
+                    pad_pool = [float(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)]
+                pad_value = min(pad_pool)
+                total_used = sum(prefix) + sum(values) + float(pad_value)
+                allowed = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(len(prefix) + len(values) + 1 - 1, common.MIN_BEAMS_PER_COLUMN)
+                if total_used > allowed + 1e-9:
                     break
-                extended = test
-            return extended
+                values.append(float(pad_value))
 
-        ranked_profiles = sorted(
-            profiles.items(),
-            key=lambda item: (
-                item[1][0],  # most common profile in segment
-                item[1][1],  # then highest cumulative used height
-                item[1][2],  # then longest stack
-                item[0],
-            ),
-            reverse=True,
-        )
-
-        canonical_suffix: list[float] | None = None
-        for profile_key, _stats in ranked_profiles:
-            candidate_suffix = [float(value) for value in profile_key]
-            candidate_suffix = _extend_to_required_length(candidate_suffix)
-            if len(candidate_suffix) < required_suffix_len:
-                continue
-            if _suffix_is_feasible(candidate_suffix):
-                canonical_suffix = candidate_suffix
-                break
-
-        if canonical_suffix is None:
-            fallback_suffix = [float(value) for value in ranked_profiles[0][0]]
-            fallback_suffix = _extend_to_required_length(fallback_suffix)
-            while fallback_suffix and not _suffix_is_feasible(fallback_suffix):
-                fallback_suffix = fallback_suffix[:-1]
-            canonical_suffix = fallback_suffix
-
-        if len(canonical_suffix) < required_suffix_len and smallest_suffix_slot > 0:
-            while len(canonical_suffix) < required_suffix_len:
-                test_suffix = list(canonical_suffix) + [float(smallest_suffix_slot)]
-                if not _suffix_is_feasible(test_suffix):
-                    break
-                canonical_suffix = test_suffix
-
-        for column_key in segment_columns:
-            if column_key in uniform:
-                prefix = [float(value) for value in locked_prefix_by_column.get(column_key, [])]
-                uniform[column_key] = prefix + list(canonical_suffix)
+            uniform[column_key] = prefix + values
 
     return uniform
 
@@ -759,14 +652,19 @@ def _layout_assignments_are_feasible(
     if not column_assignments:
         return False
 
-    legal_pool = set(
+    legal_pool = set(_config_legal_slot_family(available_slot_sizes or []))
+    legal_pool.update(
         int(round(float(size)))
         for size in (available_slot_sizes or [])
         if float(size) > 0.0 and float(size) <= common.MAX_REPRESENTATIVE_SLOT_SIZE_CM
+        and int(round(float(size))) % 10 in (4, 9)
     )
     legal_pool.update(common.FIXED_DOORGANG_SLOT_COUNTS.keys())
     if not legal_pool:
         legal_pool = {int(round(float(minimum_slot_size)))}
+    legal_pool = {
+        size for size in legal_pool if size > 0 and size <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+    }
 
     minimum_value = int(round(float(minimum_slot_size)))
     for column_key in column_keys:
@@ -790,13 +688,10 @@ def _layout_assignments_are_feasible(
         if target_total < 0.0:
             return False
 
-    rack_lengths: dict[str, set[int]] = defaultdict(set)
-    for column_key in column_keys:
-        rack = column_key[:-2] if len(column_key) >= 2 else column_key
-        rack_lengths[rack].add(len(column_assignments.get(column_key, [])))
-    if any(len(lengths) > 1 for lengths in rack_lengths.values()):
-        return False
-
+    # Mixed rack row counts are treated as a soft preference rather than a hard
+    # rejection. The optimizer should minimize the number of racks with multiple
+    # row counts, but it must not discard physically legal layouts solely because
+    # distinct columns within a rack have different valid local profiles.
     return True
 
 
@@ -865,6 +760,26 @@ def _legal_filler_candidates(minimum_slot_size: float, candidate_pool: list[floa
     return []
 
 
+def _column_physical_height_usage(column_slots: list[float]) -> float:
+    """Return the full physical column usage including beam gap height."""
+    slots = [float(value) for value in (column_slots or []) if float(value) > 0.0]
+    if not slots:
+        return 0.0
+    return sum(slots) + max(len(slots) - 1, 0) * common.BEAM_HEIGHT
+
+
+def _layout_physical_height_metrics(column_assignments: dict[str, list[float]]) -> tuple[dict[str, float], float, float]:
+    """Compute a physically consistent used-height and budget summary for a layout."""
+    used_by_column = {
+        column_key: _column_physical_height_usage(slots)
+        for column_key, slots in column_assignments.items()
+    }
+    allowed_total = len(column_assignments) * common.MAX_USED_HEIGHT_BASE
+    total_used = sum(used_by_column.values())
+    utilization = (total_used / allowed_total) if allowed_total > 0 else 0.0
+    return used_by_column, allowed_total, utilization
+
+
 def _column_topfill_metadata(
     column_slots: list[float],
     available_slot_sizes: list[float] | None = None,
@@ -884,8 +799,8 @@ def _column_topfill_metadata(
         }
 
     original_top = float(current[-1])
-    allowed_total = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(len(current) - 1, common.MIN_BEAMS_PER_COLUMN)
-    used_total = sum(current)
+    allowed_total = common.MAX_USED_HEIGHT_BASE
+    used_total = _column_physical_height_usage(current)
     remaining = max(allowed_total - used_total, 0.0)
     if remaining <= 1e-9:
         return {
@@ -971,8 +886,15 @@ def _exact_fill_to_column_limit(
         return None
 
     legal_pool = sorted(
-        value for value in base_pool
-        if value > 0 and value <= int(max_slot) and value >= int(round(minimum_allowed)) and int(round(value)) % 10 in (4, 9)
+        (
+            value
+            for value in base_pool
+            if value > 0
+            and value <= int(max_slot)
+            and value >= int(round(minimum_allowed))
+            and int(round(value)) % 10 in (4, 9)
+        ),
+        reverse=True,
     )
     if not legal_pool:
         return None
@@ -1018,11 +940,93 @@ def _exact_fill_to_column_limit(
         return None
 
     fill = [float(value) for value in build(required_int, needed_count) or ()]
+    fill = sorted(fill, reverse=True)
     if len(fill) != needed_count:
         return None
     if any(value > max_slot + 1e-9 for value in fill):
         return None
     return normalized + fill
+
+
+def _build_legal_row_count_column(
+    slots: list[float],
+    available_slot_sizes: list[float] | None,
+    target_row_count: int,
+    minimum_slot_size: float | None = None,
+) -> list[float] | None:
+    """Rebuild a column at a legal row count from the allowed legal slot family.
+
+    This handles both the common fill-up case and the overfull-column repair case:
+    if a column is already taller than the target row count, the function can
+    select a different legal combination of size target_row_count that is within
+    the physical 754 cm limit.
+    """
+    if target_row_count <= 0:
+        return None
+
+    legal_pool = sorted({
+        int(round(float(size)))
+        for size in (available_slot_sizes or slots or [])
+        if float(size) > 0.0
+        and int(round(float(size))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+        and int(round(float(size))) % 10 in (4, 9)
+    })
+    if not legal_pool:
+        legal_pool = sorted({
+            int(round(float(size)))
+            for size in (slots or [])
+            if float(size) > 0.0
+            and int(round(float(size))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+            and int(round(float(size))) % 10 in (4, 9)
+        })
+    if not legal_pool:
+        if minimum_slot_size is not None:
+            legal_pool = [int(round(float(minimum_slot_size)))]
+        else:
+            legal_pool = [int(round(float(max(slots, default=0.0) or 1.0)))]
+
+    lower_bound = int(round(float(minimum_slot_size))) if minimum_slot_size is not None else min(legal_pool)
+    legal_pool = [size for size in legal_pool if size >= lower_bound and size <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))]
+    legal_pool = sorted(legal_pool, reverse=True)
+    if not legal_pool:
+        return None
+
+    target_sum = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(target_row_count - 1, common.MIN_BEAMS_PER_COLUMN)
+    target_int = int(round(target_sum))
+
+    @lru_cache(maxsize=None)
+    def can_make(remaining: int, slots_left: int) -> bool:
+        if slots_left == 0:
+            return remaining == 0
+        if remaining < 0:
+            return False
+        for size in legal_pool:
+            if size > remaining:
+                continue
+            if can_make(remaining - size, slots_left - 1):
+                return True
+        return False
+
+    @lru_cache(maxsize=None)
+    def build(remaining: int, slots_left: int) -> tuple[int, ...] | None:
+        if slots_left == 0:
+            return () if remaining == 0 else None
+        if remaining < 0:
+            return None
+        for size in legal_pool:
+            if size > remaining:
+                continue
+            remainder = build(remaining - size, slots_left - 1)
+            if remainder is not None:
+                return (size,) + remainder
+        return None
+
+    if not can_make(target_int, target_row_count):
+        return None
+    exact_combo = build(target_int, target_row_count)
+    if exact_combo is None:
+        return None
+    return [float(value) for value in sorted(exact_combo, reverse=True)]
 
 
 def _enforce_rack_row_count_consistency(
@@ -1072,33 +1076,96 @@ def _enforce_rack_row_count_consistency(
         if not eligible_columns:
             continue
 
-        max_existing_rows = max(len(adjusted[column_key]) for column_key in eligible_columns)
+        row_counts = [len(adjusted[column_key]) for column_key in eligible_columns]
+        unique_row_counts = sorted(set(row_counts))
+
+        if len(unique_row_counts) == 1:
+            # Already consistent. Preserve each column's local slot ordering unless it is
+            # impossible to stay within the legal physical height budget. Larger slots
+            # must remain lower in the column; smaller slots can occupy the upper rows.
+            for column_key in eligible_columns:
+                current_slots = sorted(
+                    (float(value) for value in adjusted.get(column_key, [])),
+                    reverse=True,
+                )
+                if not current_slots:
+                    continue
+                if _layout_assignments_are_feasible({column_key: current_slots}, [column_key], float(min(candidate_sizes)) if candidate_sizes else 1.0, candidate_sizes):
+                    adjusted[column_key] = current_slots
+                    continue
+                trial = _build_legal_row_count_column(
+                    current_slots,
+                    candidate_sizes,
+                    target_row_count=len(current_slots),
+                    minimum_slot_size=float(min(candidate_sizes)) if candidate_sizes else 1.0,
+                )
+                if trial is not None:
+                    adjusted[column_key] = sorted(trial, reverse=True)
+            continue
+
+        min_existing_rows = min(row_counts)
+        max_existing_rows = max(row_counts)
         chosen_row_count: int | None = None
-        for target_row_count in range(max_existing_rows, max_existing_rows + 24):
+        chosen_candidate_map: dict[str, list[float]] | None = None
+
+        # Prefer the largest feasible single row count to minimize rack-level mixing,
+        # but do not force a different profile when the rack already has a legal and
+        # consistent set of row counts.
+        for target_row_count in range(max_existing_rows + 24, min_existing_rows - 1, -1):
             feasible = True
             candidate_map: dict[str, list[float]] = {}
             for column_key in eligible_columns:
-                trial = _exact_fill_to_column_limit(
-                    adjusted.get(column_key, []),
+                current_slots = sorted((float(value) for value in adjusted.get(column_key, [])), reverse=True)
+                if len(current_slots) == target_row_count and _layout_assignments_are_feasible(
+                    {column_key: current_slots},
+                    [column_key],
+                    float(min(candidate_sizes)) if candidate_sizes else 1.0,
+                    candidate_sizes,
+                ):
+                    candidate_map[column_key] = current_slots
+                    continue
+                trial = _build_legal_row_count_column(
+                    current_slots,
                     candidate_sizes,
                     target_row_count=target_row_count,
+                    minimum_slot_size=float(min(candidate_sizes)) if candidate_sizes else 1.0,
                 )
                 if trial is None:
                     feasible = False
                     break
-                candidate_map[column_key] = trial
+                candidate_map[column_key] = sorted(trial, reverse=True)
             if feasible:
                 chosen_row_count = target_row_count
-                for column_key in eligible_columns:
-                    adjusted[column_key] = candidate_map[column_key]
+                chosen_candidate_map = candidate_map
                 break
 
-        if chosen_row_count is None:
+        if chosen_candidate_map is not None and chosen_row_count is not None:
             for column_key in eligible_columns:
-                slots = [float(value) for value in adjusted.get(column_key, [])]
-                while len(slots) > max_existing_rows:
-                    slots.pop()
-                adjusted[column_key] = slots
+                adjusted[column_key] = chosen_candidate_map[column_key]
+            continue
+
+        for column_key in eligible_columns:
+            current_slots = sorted((float(value) for value in adjusted.get(column_key, [])), reverse=True)
+            if not current_slots:
+                continue
+            if _layout_assignments_are_feasible({column_key: current_slots}, [column_key], float(min(candidate_sizes)) if candidate_sizes else 1.0, candidate_sizes):
+                adjusted[column_key] = current_slots
+                continue
+            best_trial: list[float] | None = None
+            for target_row_count in range(max_existing_rows + 24, 0, -1):
+                trial = _build_legal_row_count_column(
+                    current_slots,
+                    candidate_sizes,
+                    target_row_count=target_row_count,
+                    minimum_slot_size=float(min(candidate_sizes)) if candidate_sizes else 1.0,
+                )
+                if trial is not None:
+                    best_trial = sorted(trial, reverse=True)
+                    break
+            if best_trial is not None:
+                adjusted[column_key] = best_trial
+            else:
+                adjusted[column_key] = current_slots
 
     return adjusted
 
@@ -1813,7 +1880,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             fixed_prefix_by_column=fixed_prefix_by_column,
         )
         used_by_column = {
-            column_key: sum(float(value) for value in slots)
+            column_key: _column_physical_height_usage(slots)
             for column_key, slots in column_assignments.items()
         }
 
@@ -1838,7 +1905,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             fixed_prefix_by_column=fixed_prefix_by_column,
         )
         used_by_column = {
-            column_key: sum(float(value) for value in slots)
+            column_key: _column_physical_height_usage(slots)
             for column_key, slots in column_assignments.items()
         }
 
@@ -1880,25 +1947,18 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         assigned_total = max(len(generated_location_rows) - common._fixed_doorgang_location_total(), 0)
         layout_physical_locations = assigned_total
         required_locations_total = sum(base_exact_counts.values())
-        total_used_height = sum(used_by_column.values())
-        total_allowed_height = sum(
-            common.MAX_USED_HEIGHT_BASE
-            - common.BEAM_HEIGHT * max(len(column_assignments.get(column_key, [])) - 1, common.MIN_BEAMS_PER_COLUMN)
-            for column_key in layout_columns
-        )
+        physical_used_by_column = {
+            column_key: _column_physical_height_usage(slots)
+            for column_key, slots in column_assignments.items()
+        }
+        total_used_height = sum(physical_used_by_column.values())
+        total_allowed_height = len(layout_columns) * common.MAX_USED_HEIGHT_BASE
         space_utilization = (total_used_height / total_allowed_height) if total_allowed_height > 0 else 0.0
         capacity_margin = assigned_total - required_locations_total
         required_beam_moves = relocation_total
         pct_rack_height_used = space_utilization * 100.0
         space_left = sum(
-            max(
-                (
-                    common.MAX_USED_HEIGHT_BASE
-                    - common.BEAM_HEIGHT * max(len(column_assignments.get(column_key, [])) - 1, common.MIN_BEAMS_PER_COLUMN)
-                )
-                - used_by_column.get(column_key, 0.0),
-                0.0,
-            )
+            max(common.MAX_USED_HEIGHT_BASE - physical_used_by_column.get(column_key, 0.0), 0.0)
             for column_key in layout_columns
         )
 
@@ -1964,9 +2024,9 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
 
         style_column_rows: list[dict[str, str]] = []
         for column_key, slots in sorted(column_assignments.items()):
-            used = used_by_column.get(column_key, 0.0)
+            used = physical_used_by_column.get(column_key, 0.0)
             beam_count = max(len(slots) - 1, 0)
-            allowed = common.MAX_USED_HEIGHT_BASE - beam_count * common.BEAM_HEIGHT
+            allowed = common.MAX_USED_HEIGHT_BASE
             mix = slot_mix_by_column.get(column_key, {})
             topfill = _column_topfill_metadata(slots, expansion_slot_sizes)
             style_column_rows.append(
@@ -2039,14 +2099,17 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
 
         for config_id, candidates in config_style_bundles:
             for summary, location_rows, column_rows, _signature in candidates:
-                candidate_layout_column_rows_all.extend(column_rows)
-                candidate_layout_location_rows_all.extend(location_rows)
+                final_layout_feasible = str(summary.get("Layout_Feasible", "NO")).strip().upper() == "YES"
+                if final_layout_feasible:
+                    candidate_layout_column_rows_all.extend(column_rows)
+                    candidate_layout_location_rows_all.extend(location_rows)
                 if config_id in selected_config_ids:
                     summary["Pre_Robustness_Status"] = "SELECTED"
                     summary["Pre_Robustness_Rank"] = str(config_rank.get(config_id, ""))
                     summary["Pre_Robustness_Prune_Reason"] = ""
-                    candidate_layout_column_rows.extend(column_rows)
-                    candidate_layout_location_rows.extend(location_rows)
+                    if final_layout_feasible:
+                        candidate_layout_column_rows.extend(column_rows)
+                        candidate_layout_location_rows.extend(location_rows)
                 else:
                     summary["Pre_Robustness_Status"] = "PRUNED"
                     summary["Pre_Robustness_Rank"] = ""

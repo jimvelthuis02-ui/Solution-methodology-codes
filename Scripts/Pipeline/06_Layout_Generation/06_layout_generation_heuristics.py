@@ -57,7 +57,6 @@ DROP_FIELDS_BY_OUTPUT = {
     "Candidate_Layout_By_Rack_Column.csv": {
         "Beam_Preserving_Optimizer",
         "Local_Search_Optimizer",
-        "Assigned_Used_Height_cm",
         "Remaining_Height_cm",
         "Fill_Ratio",
     },
