@@ -2,6 +2,7 @@ import csv
 from collections import defaultdict
 import sys
 from functools import lru_cache
+from itertools import combinations_with_replacement, permutations
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -16,17 +17,24 @@ MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
 def _legal_slot_profile(slot_sizes: list[float]) -> bool:
-    """Reject any slot-size profile that cannot be represented with legal operating sizes."""
+    """Reject any profile that cannot be completed to a legal column under the 754 cm limit.
+
+    A physical column is evaluated in a bottom-to-top order with the largest slots lower and
+    the smallest slots at the top, because the top row is the slot that can absorb the remain-
+    ing height gap. This lets the candidate generator accept profiles that are feasible only
+    after reordering the same slot sizes so the smallest slot sits on top.
+    """
     if not slot_sizes:
         return False
-    min_size = min(slot_sizes)
-    max_size = max(slot_sizes)
+    sorted_sizes = sorted(float(size) for size in slot_sizes)
+    min_size = sorted_sizes[0]
+    max_size = sorted_sizes[-1]
     if max_size > MAX_REPRESENTATIVE_SLOT_SIZE_CM:
         return False
 
     legal_pool: list[int] = []
     seen: set[int] = set()
-    for slot_size in slot_sizes:
+    for slot_size in sorted_sizes:
         if slot_size < min_size - 1e-9:
             return False
         rounded = int(round(slot_size))
@@ -39,30 +47,23 @@ def _legal_slot_profile(slot_sizes: list[float]) -> bool:
     if not legal_pool:
         return False
 
-    # Keep only capacity profiles that can actually form a legal rack-column fill
-    # under the physical limit 754 cm. This prevents impossible families such as
-    # single-size 44 cm profiles or other combinations that never match the exact
-    # fill target at any valid row count.
-    for row_count in range(1, 20):
+    for row_count in range(1, 13):
         target_total = int(round(754.0 - (row_count - 1) * 16.0))
         if target_total <= 0:
             continue
 
-        @lru_cache(maxsize=None)
-        def can_make(remaining: int, slots_left: int) -> bool:
-            if slots_left == 0:
-                return remaining == 0
-            if remaining < 0:
-                return False
-            for size in sorted(legal_pool):
-                if size > remaining:
+        for combo in combinations_with_replacement(sorted(legal_pool), row_count):
+            unique_orderings = {tuple(order) for order in set(permutations(combo))}
+            for ordered_combo in unique_orderings:
+                base_total = sum(ordered_combo)
+                if base_total > target_total:
                     continue
-                if can_make(remaining - size, slots_left - 1):
+                if base_total == target_total:
                     return True
-            return False
-
-        if can_make(target_total, row_count):
-            return True
+                gap = target_total - base_total
+                top_slot = ordered_combo[-1]
+                if gap <= MAX_REPRESENTATIVE_SLOT_SIZE_CM - top_slot:
+                    return True
     return False
 
 

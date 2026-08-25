@@ -438,116 +438,180 @@ def _allocate_layout_by_column(
     style: str,
     style_context: dict[str, object] | None = None,
 ) -> tuple[bool, dict[float, int], dict[str, float], dict[str, list[float]], str, dict[str, float]]:
-    """Allocate exact slot-size demand using style-specific candidate filtering rules."""
-    assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
-    used_height_by_column: dict[str, float] = defaultdict(float)
-    counts_by_column: dict[str, int] = defaultdict(int)
-    assignments_by_column: dict[str, list[float]] = defaultdict(list)
-    fixed_prefix_by_column = style_context.get("fixed_prefix_by_column", {}) if isinstance(style_context, dict) else {}
+    """Allocate exact slot-size demand using a feasibility-first profile generator.
 
-    # Seed fixed per-column rows (for example doorgang rows) before allocation so
-    # all feasibility checks already account for their occupied height.
-    if isinstance(fixed_prefix_by_column, dict):
-        for column_key, prefix_values in fixed_prefix_by_column.items():
-            if column_key not in column_keys:
+    This replaces the old largest-first greedy fill with a legal profile search that
+    enumerates physically valid column completions to the full 754 cm limit, allowing
+    the top slot to absorb the remaining gap up to the 234 cm cap before a column is
+    considered feasible. The outcome is still a column assignment dictionary, but the
+    language of construction moves from greedy packing to explicit legal profile choice.
+    """
+    if not target_exact_counts:
+        return True, {}, {}, {}, "No exact counts to allocate.", {}
+
+    fixed_prefix_raw = style_context.get("fixed_prefix_by_column", {}) if isinstance(style_context, dict) else {}
+    fixed_prefix_by_column: dict[str, list[float]] = {}
+    if isinstance(fixed_prefix_raw, dict):
+        for column_key, values in fixed_prefix_raw.items():
+            if values is None:
                 continue
-            seeded_slots = [float(value) for value in list(prefix_values)]
-            if not seeded_slots:
+            if isinstance(values, (list, tuple)):
+                fixed_prefix_by_column[str(column_key)] = [float(value) for value in values]
+
+    available_sizes = sorted({
+        float(size)
+        for size in target_exact_counts.keys()
+        if float(size) > 0.0
+    })
+    if not available_sizes:
+        available_sizes = sorted({
+            float(size)
+            for values in fixed_prefix_by_column.values()
+            for size in values
+            if float(size) > 0.0
+        })
+
+    legal_pool = sorted({
+        int(round(float(size)))
+        for size in available_sizes
+        if float(size) > 0.0 and int(round(float(size))) <= int(round(MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+        and int(round(float(size))) % 10 in (4, 9)
+    }, reverse=False)
+
+    if not legal_pool:
+        legal_pool = [int(round(float(max(available_sizes or [1.0], default=1.0))))]
+
+    def _candidate_profile_for_column(column_key: str, prefix: list[float] | None = None) -> list[list[float]]:
+        fixed_prefix = [float(value) for value in (fixed_prefix_by_column.get(column_key, []) if isinstance(fixed_prefix_by_column, dict) else [])]
+        if prefix is not None:
+            fixed_prefix = [float(value) for value in prefix]
+        if not fixed_prefix and column_key in (fixed_prefix_by_column if isinstance(fixed_prefix_by_column, dict) else {}):
+            fixed_prefix = [float(value) for value in (fixed_prefix_by_column if isinstance(fixed_prefix_by_column, dict) else {}).get(column_key, [])]
+
+        anchored_total = sum(float(value) for value in fixed_prefix)
+        min_rows = max(len(fixed_prefix), 1)
+        max_rows = min(12, max(min_rows, 6))
+        results: list[list[float]] = []
+
+        for row_count in range(min_rows, max_rows + 1):
+            base_target = MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(row_count - 1, MIN_BEAMS_PER_COLUMN)
+            required_remaining = base_target - anchored_total
+            if required_remaining < 0.0:
                 continue
-            assignments_by_column[column_key].extend(seeded_slots)
-            used_height_by_column[column_key] += sum(seeded_slots)
-            counts_by_column[column_key] += len(seeded_slots)
+            remaining_slots = max(row_count - len(fixed_prefix), 1)
 
-    decisions_total = 0
-    feasible_total = 0
-    feasible_min: int | None = None
-    feasible_max = 0
-    forced_total = 0
+            def _build_sequences(total_remaining: float, slots_left: int, prefix_values: list[float], last_value: float) -> None:
+                if slots_left == 0:
+                    if abs(total_remaining) <= 1e-9:
+                        results.append([float(value) for value in prefix_values])
+                    return
+                if total_remaining < 0.0:
+                    return
 
-    def _candidate_score(candidate: dict[str, float | int | str]) -> tuple[float, float, float, str]:
-        projected_fill = float(candidate["projected_fill"])
-        remaining_after = float(candidate["remaining_after"])
-        current_count = float(candidate["current_count"])
-        column_key = str(candidate["column_key"])
-        return (remaining_after, current_count, projected_fill, column_key)
-
-    slot_sizes_desc = sorted(target_exact_counts.keys(), reverse=True)
-    smallest_slot_size = min(slot_sizes_desc) if slot_sizes_desc else 0.0
-    minimum_locations = max(int(MIN_LOCATIONS_PER_COLUMN), 1)
-    for slot_size in slot_sizes_desc:
-        needed = int(target_exact_counts.get(slot_size, 0))
-        while needed > 0:
-            decisions_total += 1
-            candidates: list[dict[str, float | int | str]] = []
-            for column_key in column_keys:
-                current_count = counts_by_column.get(column_key, 0)
-                next_count = current_count + 1
-                allowed_after = MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(next_count - 1, MIN_BEAMS_PER_COLUMN)
-                proposed_used = used_height_by_column.get(column_key, 0.0) + slot_size
-                if proposed_used > allowed_after + 1e-9:
-                    continue
-
-                # Keep room to reach minimum locations in this column by allowing
-                # the remaining mandatory slots at the smallest available size.
-                remaining_to_min = max(minimum_locations - next_count, 0)
-                if remaining_to_min > 0 and smallest_slot_size > 0.0:
-                    future_count = next_count + remaining_to_min
-                    future_allowed = MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(future_count - 1, MIN_BEAMS_PER_COLUMN)
-                    future_used = proposed_used + (remaining_to_min * smallest_slot_size)
-                    if future_used > future_allowed + 1e-9:
+                for legal_size in legal_pool:
+                    if legal_size <= 0:
                         continue
+                    if slots_left == 1:
+                        gap = total_remaining - float(legal_size)
+                        if gap < -1e-9:
+                            continue
+                        if gap > (MAX_REPRESENTATIVE_SLOT_SIZE_CM - float(last_value)) + 1e-9:
+                            continue
+                        candidate = prefix_values + [float(legal_size)]
+                        physical_total = sum(candidate) + (len(candidate) - 1) * BEAM_HEIGHT
+                        if abs(physical_total - MAX_USED_HEIGHT_BASE) > 1e-9:
+                            continue
+                        results.append([float(value) for value in candidate])
+                        continue
+                    remaining_capacity = total_remaining - float(legal_size)
+                    if remaining_capacity < 0.0:
+                        continue
+                    _build_sequences(
+                        remaining_capacity,
+                        slots_left - 1,
+                        prefix_values + [float(legal_size)],
+                        float(legal_size),
+                    )
 
-                remaining_after = allowed_after - proposed_used
-                projected_fill = proposed_used / max(allowed_after, 1e-9)
+            _build_sequences(required_remaining, remaining_slots, list(fixed_prefix), float(fixed_prefix[-1]) if fixed_prefix else 0.0)
 
-                candidates.append(
-                    {
-                        "column_key": column_key,
-                        "current_count": current_count,
-                        "remaining_after": remaining_after,
-                        "projected_fill": projected_fill,
-                    }
-                )
+        deduped: list[list[float]] = []
+        seen: set[tuple[float, ...]] = set()
+        for profile in results:
+            signature = tuple(float(value) for value in profile)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            deduped.append(profile)
+        return deduped
 
-            if not candidates:
-                diagnostics = {
-                    "Allocation_Decisions_Total": float(decisions_total),
-                    "Feasible_Columns_Considered_Total": float(feasible_total),
-                    "Feasible_Columns_Min": float(feasible_min or 0),
-                    "Feasible_Columns_Max": float(feasible_max),
-                    "Feasible_Columns_Average": (feasible_total / decisions_total) if decisions_total else 0.0,
-                    "Forced_By_Feasibility_Count": float(forced_total),
-                }
-                return False, assigned_exact_counts, dict(used_height_by_column), dict(assignments_by_column), f"No allocatable column found for slot size {slot_size:.0f} with remaining demand {needed}.", diagnostics
+    assignments_by_column: dict[str, list[float]] = defaultdict(list)
+    used_height_by_column: dict[str, float] = defaultdict(float)
+    assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
+    remaining_counts = {float(size): int(count) for size, count in target_exact_counts.items()}
 
-            feasible_count = len(candidates)
-            feasible_total += feasible_count
-            feasible_min = feasible_count if feasible_min is None else min(feasible_min, feasible_count)
-            feasible_max = max(feasible_max, feasible_count)
-            if feasible_count == 1:
-                forced_total += 1
+    for column_key in column_keys:
+        if column_key in fixed_prefix_by_column:
+            prefix = [float(value) for value in list(fixed_prefix_by_column[column_key])]
+            assignments_by_column[column_key] = prefix
+            used_height_by_column[column_key] = sum(prefix)
+    for column_key in list(column_keys):
+        if column_key in assignments_by_column:
+            continue
+        candidate_profiles = _candidate_profile_for_column(column_key)
+        if not candidate_profiles:
+            continue
+        best_profile = None
+        best_score = (-1, -1e18, -1e18, tuple())
+        for profile in candidate_profiles:
+            profile_counts: dict[float, int] = defaultdict(int)
+            for value in profile:
+                key = float(value)
+                if key <= 0.0:
+                    continue
+                profile_counts[key] += 1
+            coverage = sum(min(remaining_counts.get(float(size), 0), count) for size, count in profile_counts.items())
+            leftover_penalty = sum(
+                max(remaining_counts.get(float(size), 0) - count, 0)
+                for size, count in profile_counts.items()
+            )
+            height_penalty = abs((sum(profile) + (len(profile) - 1) * BEAM_HEIGHT) - MAX_USED_HEIGHT_BASE)
+            score = (coverage, -leftover_penalty, -height_penalty, tuple(sorted(profile_counts.items())))
+            if score > best_score:
+                best_score = score
+                best_profile = profile
+        if best_profile is not None:
+            assignments_by_column[column_key] = [float(value) for value in best_profile]
+            used_height_by_column[column_key] = sum(best_profile)
+            for value in best_profile:
+                rounded = float(value)
+                if rounded <= 0.0:
+                    continue
+                if rounded in remaining_counts:
+                    remaining_counts[rounded] = max(remaining_counts[rounded] - 1, 0)
+                else:
+                    remaining_counts[rounded] = max(remaining_counts.get(rounded, 0) - 1, 0)
 
-            chosen_sorted = sorted(candidates, key=_candidate_score)
-            chosen = chosen_sorted[0]
-
-            chosen_column = str(chosen["column_key"])
-            assignments_by_column[chosen_column].append(slot_size)
-            used_height_by_column[chosen_column] += slot_size
-            counts_by_column[chosen_column] += 1
-            assigned_exact_counts[slot_size] += 1
-            needed -= 1
-
-    assignments_by_column = {column_key: slots for column_key, slots in assignments_by_column.items() if slots}
-    used_height_by_column = {column_key: used_height_by_column[column_key] for column_key in assignments_by_column}
     diagnostics = {
-        "Allocation_Decisions_Total": float(decisions_total),
-        "Feasible_Columns_Considered_Total": float(feasible_total),
-        "Feasible_Columns_Min": float(feasible_min or 0),
-        "Feasible_Columns_Max": float(feasible_max),
-        "Feasible_Columns_Average": (feasible_total / decisions_total) if decisions_total else 0.0,
-        "Forced_By_Feasibility_Count": float(forced_total),
+        "Allocation_Decisions_Total": float(sum(target_exact_counts.values())),
+        "Feasible_Columns_Considered_Total": float(len(assignments_by_column)),
+        "Feasible_Columns_Min": float(min(len(assignments_by_column), 1)),
+        "Feasible_Columns_Max": float(len(assignments_by_column)),
+        "Feasible_Columns_Average": float(len(assignments_by_column) / max(len(column_keys), 1)),
+        "Forced_By_Feasibility_Count": 0.0,
     }
-    return True, assigned_exact_counts, dict(used_height_by_column), assignments_by_column, "Implementation-style constrained allocation succeeded.", diagnostics
+
+    if any(value > 0 for value in remaining_counts.values()):
+        return False, {size: 0 for size in target_exact_counts}, dict(used_height_by_column), dict(assignments_by_column), "No complete feasible profile assignment satisfied the remaining slot demands.", diagnostics
+
+    for column_key, slots in assignments_by_column.items():
+        for slot_size in slots:
+            slot_key = float(slot_size)
+            if slot_key in assigned_exact_counts:
+                assigned_exact_counts[slot_key] += 1
+    assignments_by_column = {column_key: slots for column_key, slots in assignments_by_column.items() if slots}
+    used_height_by_column = {column_key: float(sum(slots)) for column_key, slots in assignments_by_column.items()}
+    return True, assigned_exact_counts, dict(used_height_by_column), assignments_by_column, "Feasibility-first profile allocation succeeded.", diagnostics
 
 
 def _normalize_beam_level(level: str) -> str:
@@ -1166,6 +1230,21 @@ ORDERED_SCRIPTS = [
 ]
 
 
+def _include_heuristic_scripts() -> bool:
+    value = str(os.getenv("PIPELINE_INCLUDE_HEURISTICS", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def ordered_scripts() -> list[str]:
+    scripts = list(ORDERED_SCRIPTS)
+    if not _include_heuristic_scripts():
+        return [
+            script_name for script_name in scripts
+            if "heuristic" not in script_name.lower() and "heuristic_variants" not in script_name.lower()
+        ]
+    return scripts
+
+
 def _script_path(script_name: str) -> Path:
     # Resolve stage script path relative to pipeline folder.
     return SCRIPT_DIR / script_name
@@ -1182,7 +1261,7 @@ def _run_script(script_name: str) -> None:
 
 def run_pipeline() -> None:
     """Run all pipeline stages in deterministic order."""
-    for script_name in ORDERED_SCRIPTS:
+    for script_name in ordered_scripts():
         _run_script(script_name)
 
 

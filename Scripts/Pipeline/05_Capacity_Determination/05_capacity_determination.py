@@ -114,17 +114,38 @@ def _scenario_aware_slot_size_counts(config: dict[str, str]) -> dict[str, dict[f
 
 
 def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, int]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Build per-scenario capacity summary and slot-size constraint rows for one config."""
+    """Build exact capacity rows using only the scenario already assigned to the config.
+
+    Sensitivity analysis should be handled separately in a later stage; Stage 5 is
+    intended to reflect the scenario used to generate the configuration itself.
+    """
     slot_sizes = _parse_slot_sizes(config.get("Slot_Sizes", ""))
     distributions = _parse_distribution(_distribution_value(config))
     if not slot_sizes or not distributions:
         return [], []
 
     scenario_aware_counts = _scenario_aware_slot_size_counts(config)
+    config_scenario = str(config.get("Scenario", "")).strip()
+    if config_scenario:
+        scenario_aware_counts = {
+            config_scenario: scenario_aware_counts.get(config_scenario, {})
+        }
+
     count_rows: list[dict[str, str]] = []
     summary_rows: list[dict[str, str]] = []
 
     ordered_sizes = sorted(set(slot_sizes))
+    if scenario_aware_counts:
+        selected_scenario_counts = {
+            scenario_name: exact_required_by_size
+            for scenario_name, exact_required_by_size in scenario_aware_counts.items()
+            if scenario_name and exact_required_by_size
+        }
+        if not selected_scenario_counts:
+            scenario_aware_counts = {}
+        else:
+            scenario_aware_counts = selected_scenario_counts
+
     if scenario_aware_counts:
         for scenario_name, exact_required_by_size in scenario_aware_counts.items():
             cumulative_required_by_size: dict[float, int] = {}
@@ -173,8 +194,10 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
 
         return summary_rows, count_rows
 
-    for scenario_name, sku_count in sku_scenarios.items():
-        # Allocate scenario SKU count across representative slot sizes.
+    active_scenarios = [config_scenario] if config_scenario else list(sku_scenarios.keys())
+    for scenario_name in active_scenarios:
+        sku_count = sku_scenarios.get(scenario_name, next(iter(sku_scenarios.values()), 0))
+        # Allocate the active scenario SKU count across representative slot sizes.
         allocated_counts = common._allocate_counts_from_percentages(sku_count, distributions)
         cumulative_required_by_size: dict[float, int] = {}
         running_required = 0

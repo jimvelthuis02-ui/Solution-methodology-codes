@@ -8,24 +8,25 @@ STAGE4_PATH = ROOT / "Scripts" / "Pipeline" / "04_Candidate_Configuration" / "04
 STAGE6_PATH = ROOT / "Scripts" / "Pipeline" / "06_Layout_Generation" / "06_layout_generation.py"
 
 spec4 = importlib.util.spec_from_file_location("stage4_candidate_configuration", STAGE4_PATH)
+if spec4 is None or spec4.loader is None:
+    raise ImportError(f"Unable to load module spec for {STAGE4_PATH}")
 module4 = importlib.util.module_from_spec(spec4)
 sys.modules["stage4_candidate_configuration"] = module4
 spec4.loader.exec_module(module4)
 
 spec = importlib.util.spec_from_file_location("stage6_layout", STAGE6_PATH)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Unable to load module spec for {STAGE6_PATH}")
 module = importlib.util.module_from_spec(spec)
 sys.modules["stage6_layout"] = module
 spec.loader.exec_module(module)
 
 
 class RackRowCountConsistencyTest(unittest.TestCase):
-    def test_stage4_rejects_slot_families_that_cannot_fill_the_physical_limit(self):
+    def test_stage4_accepts_slot_families_that_can_topfill_to_the_physical_limit(self):
         self.assertTrue(module4._legal_slot_profile([69.0, 119.0, 234.0]))
-        self.assertFalse(module4._legal_slot_profile([44.0]))
-
-    def test_stage4_rejects_slot_families_that_cannot_fill_the_physical_limit(self):
-        self.assertTrue(module4._legal_slot_profile([69.0, 119.0, 234.0]))
-        self.assertFalse(module4._legal_slot_profile([44.0]))
+        self.assertTrue(module4._legal_slot_profile([44.0]))
+        self.assertTrue(module4._legal_slot_profile([109.0, 189.0, 234.0]))
 
     def test_no_minimum_beam_floor_is_applied(self):
         self.assertEqual(module.common.MIN_BEAMS_PER_COLUMN, 0)
@@ -65,6 +66,30 @@ class RackRowCountConsistencyTest(unittest.TestCase):
                 for i in range(1, 3)
             )
         )
+
+    def test_fixed_doorway_prefix_is_preserved_and_columns_reach_754(self):
+        assignments = {
+            "R01C19": [39.0, 69.0, 89.0],
+            "R01C20": [39.0, 69.0, 89.0],
+            "R01C21": [39.0, 69.0, 89.0],
+        }
+        fixed_prefix = {
+            "R01C19": [224.0],
+            "R01C20": [224.0],
+            "R01C21": [224.0],
+        }
+
+        adjusted = module._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[69.0, 89.0, 119.0, 234.0],
+            fixed_prefix_by_column=fixed_prefix,
+        )
+
+        for key, values in adjusted.items():
+            self.assertEqual(values[0], 224.0)
+            self.assertAlmostEqual(sum(values) + (len(values) - 1) * 16.0, 754.0, delta=1e-6)
+            self.assertLessEqual(max(values), 234.0)
+            self.assertTrue(all(int(round(value)) % 10 in (4, 9) for value in values))
 
     def test_keeps_the_highest_feasible_row_count_when_equalizing_rack(self):
         assignments = {

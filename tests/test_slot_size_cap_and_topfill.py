@@ -10,6 +10,8 @@ HEURISTIC_VARIANTS_PATH = ROOT / "Scripts" / "Pipeline" / "Heuristic_Variants" /
 
 for module_path, module_name in [(COMMON_PATH, "run_ordered_pipeline"), (STAGE6_PATH, "stage6_layout")]:
     spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load module spec for {module_path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
@@ -61,18 +63,99 @@ class SlotSizeCapTest(unittest.TestCase):
             physical_total = sum(slots) + (len(slots) - 1) * 16.0
             self.assertAlmostEqual(physical_total, target_height, delta=1e-6)
 
+    def test_column_top_slot_is_based_on_physical_stack_order_not_arbitrary_list_order(self):
+        stage6 = sys.modules["stage6_layout"]
+        column = [69.0, 69.0, 179.0, 179.0, 119.0]
+
+        metadata = stage6._column_topfill_metadata(column, [69.0, 119.0, 179.0, 234.0])
+        self.assertEqual(metadata["Original_Top_Slot_cm"], 119.0)
+        self.assertTrue(stage6._column_can_topfill_to_limit(column, [69.0, 119.0, 179.0, 234.0]))
+
+    def test_column_can_expose_legal_topfill_after_reordering_lower_stack(self):
+        stage6 = sys.modules["stage6_layout"]
+        column = [119.0, 234.0, 119.0]
+        self.assertTrue(stage6._column_can_topfill_to_limit(column, [119.0, 234.0]))
+
+    def test_columns_are_topfilled_to_the_full_physical_limit_when_possible(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "D01": [69.0, 89.0, 119.0, 179.0],
+            "D02": [69.0, 89.0, 119.0, 179.0],
+        }
+
+        refined = stage6._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[69.0, 89.0, 119.0, 179.0, 234.0],
+            fixed_prefix_by_column={},
+        )
+
+        for slots in refined.values():
+            self.assertAlmostEqual(sum(slots) + (len(slots) - 1) * 16.0, 754.0, delta=1e-6)
+            self.assertLessEqual(max(slots), 234.0)
+
+    def test_same_row_count_layouts_rebuild_underfilled_but_feasible_columns(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "R01C01": [69.0, 89.0, 119.0, 179.0, 179.0],
+            "R01C02": [69.0, 89.0, 119.0, 179.0],
+            "R01C03": [69.0, 89.0, 119.0, 179.0, 179.0],
+        }
+
+        refined = stage6._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[69.0, 89.0, 119.0, 179.0, 234.0],
+            fixed_prefix_by_column={},
+        )
+
+        for slots in refined.values():
+            self.assertAlmostEqual(sum(slots) + (len(slots) - 1) * 16.0, 754.0, delta=1e-6)
+            self.assertLessEqual(max(slots), 234.0)
+
+    def test_doorway_prefix_prefers_exact_reference_profile_then_legal_fallback(self):
+        stage6 = sys.modules["stage6_layout"]
+        reference = {
+            "R00": [64.0, 64.0, 64.0],
+            "R01": [64.0, 64.0, 64.0],
+            "R20": [119.0, 234.0],
+            "R21": [119.0, 234.0],
+        }
+
+        exact_prefix = stage6._build_doorway_prefix_for_segment(
+            reference,
+            rack="R",
+            segment=("R", 0, 21),
+            doorgang_column=21,
+            doorgang_height=224.0,
+            available_sizes=[64.0, 119.0, 234.0],
+        )
+        self.assertIsNotNone(exact_prefix)
+        self.assertEqual(exact_prefix, [64.0, 64.0, 64.0])
+
+        fallback = stage6._build_doorway_prefix_for_segment(
+            {"R00": [119.0, 234.0], "R01": [119.0, 234.0], "R20": [119.0, 234.0], "R21": [119.0, 234.0]},
+            rack="R",
+            segment=("R", 0, 21),
+            doorgang_column=21,
+            doorgang_height=224.0,
+            available_sizes=[64.0, 119.0, 234.0],
+        )
+        self.assertIsNotNone(fallback)
+        self.assertAlmostEqual(sum(fallback) + (len(fallback) - 1) * 16.0, 224.0, delta=1e-9)
+
     def test_all_active_heuristic_variants_are_exported(self):
         spec = importlib.util.spec_from_file_location("heuristic_variants", HEURISTIC_VARIANTS_PATH)
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
+        if spec is None:
+            self.fail("Unable to build the heuristic variants module spec")
+        loader = spec.loader
+        if loader is None:
+            self.fail("Heuristic variants module spec has no loader")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        loader.exec_module(module)
         labels = {variant["label"] for variant in module.VARIANTS}
         self.assertEqual(
             labels,
             {
-                "ConstructiveBeam_NoLocalSearch",
-                "ConstructiveBeam_LocalSearch",
+                "Baseline_None",
             },
         )
 
@@ -125,6 +208,28 @@ class SlotSizeCapTest(unittest.TestCase):
                 [64.0, 119.0, 234.0],
             )
         )
+
+    def test_stage5_uses_only_the_configured_scenario_distribution(self):
+        stage5_path = ROOT / "Scripts" / "Pipeline" / "05_Capacity_Determination" / "05_capacity_determination.py"
+        spec = importlib.util.spec_from_file_location("stage5_capacity", stage5_path)
+        if spec is None or spec.loader is None:
+            self.fail("Unable to build the stage 5 module spec")
+        module5 = importlib.util.module_from_spec(spec)
+        sys.modules["stage5_capacity"] = module5
+        spec.loader.exec_module(module5)
+
+        config = {
+            "Config_ID": "CFG_099",
+            "Method": "hierarchical_clustering",
+            "Scenario": "Scenario 2",
+            "K": "4",
+            "Slot_Sizes": "69,119,179,234",
+            "Relative Slot Size Distribution": "0.4015,0.3759,0.1438,0.0788",
+        }
+
+        summary_rows, _ = module5._capacity_rows_for_config(config, {"Base_Count": 100})
+        scenario_labels = {row["SKU_Scenario"] for row in summary_rows}
+        self.assertEqual(scenario_labels, {"Scenario 2"})
 
     def test_stage6_column_export_keeps_assigned_used_height_when_slots_exist(self):
         import csv

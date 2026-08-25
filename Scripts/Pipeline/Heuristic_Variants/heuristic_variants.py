@@ -1,5 +1,6 @@
 import csv
 import importlib.util
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -12,30 +13,54 @@ if str(PIPELINE_ROOT) not in sys.path:
 import run_ordered_pipeline as common
 
 
+def _filter_variants_from_env() -> list[dict[str, object]]:
+    labels = os.getenv("PIPELINE_HEURISTIC_LABEL_FILTER", "").strip()
+    if not labels:
+        return [
+            {
+                "label": "Baseline_None",
+                "construction_method": "constructive_beam",
+                "use_beam_optimizer": False,
+                "use_local_search": False,
+                "improvement_method": "none",
+                "beam_preserving_optimizer": "CONSTRUCTIVE",
+                "local_search_optimizer": "NO",
+            },
+        ]
+
+    allowed = {label.strip().lower() for label in labels.split(",") if label.strip()}
+    if not allowed:
+        return [
+            {
+                "label": "Baseline_None",
+                "construction_method": "constructive_beam",
+                "use_beam_optimizer": False,
+                "use_local_search": False,
+                "improvement_method": "none",
+                "beam_preserving_optimizer": "CONSTRUCTIVE",
+                "local_search_optimizer": "NO",
+            },
+        ]
+
+    all_variants = [
+        {
+            "label": "Baseline_None",
+            "construction_method": "constructive_beam",
+            "use_beam_optimizer": False,
+            "use_local_search": False,
+            "improvement_method": "none",
+            "beam_preserving_optimizer": "CONSTRUCTIVE",
+            "local_search_optimizer": "NO",
+        },
+    ]
+    return [variant for variant in all_variants if str(variant["label"]).lower() in allowed]
+
+
 # Keep the active heuristic set to the physically valid constructive beam variants.
 # The greedy variants remain available in the repo for future development, but the
 # working model prioritizes legal, feasible layouts over the exploratory greedy
 # search that does not keep the same physical guarantees.
-VARIANTS = [
-    {
-        "label": "ConstructiveBeam_NoLocalSearch",
-        "construction_method": "constructive_beam",
-        "use_beam_optimizer": False,
-        "use_local_search": False,
-        "improvement_method": "none",
-        "beam_preserving_optimizer": "CONSTRUCTIVE",
-        "local_search_optimizer": "NO",
-    },
-    {
-        "label": "ConstructiveBeam_LocalSearch",
-        "construction_method": "constructive_beam",
-        "use_beam_optimizer": False,
-        "use_local_search": True,
-        "improvement_method": "local_search",
-        "beam_preserving_optimizer": "CONSTRUCTIVE",
-        "local_search_optimizer": "YES",
-    },
-]
+VARIANTS = _filter_variants_from_env()
 
 HEURISTIC_FIELDS = [
     "Heuristic_Label",

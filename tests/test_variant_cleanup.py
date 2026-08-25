@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMON_PATH = ROOT / "Scripts" / "Pipeline" / "run_ordered_pipeline.py"
 
 spec = importlib.util.spec_from_file_location("run_ordered_pipeline", COMMON_PATH)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Unable to load module spec for {COMMON_PATH}")
 module = importlib.util.module_from_spec(spec)
 sys.modules["run_ordered_pipeline"] = module
 spec.loader.exec_module(module)

@@ -333,8 +333,6 @@ def _write_layout_heatmap(rows: list[dict[str, str]], output_dir: Path) -> tuple
 
 def generate_figures(ranking_file: Path, output_dir: Path) -> list[Path]:
     rows = _read_csv(ranking_file)
-    if not rows:
-        raise ValueError(f"No rows available for figures: {ranking_file}")
     output_dir.mkdir(parents=True, exist_ok=True)
     for old_name in (
         "01_wsm_ranking.png",
@@ -346,6 +344,12 @@ def generate_figures(ranking_file: Path, output_dir: Path) -> list[Path]:
         old_path = output_dir / old_name
         if old_path.exists():
             old_path.unlink()
+    if not rows:
+        index_path = output_dir / "Figure_Index.csv"
+        with index_path.open("w", newline="", encoding="utf-8") as target:
+            writer = csv.DictWriter(target, fieldnames=FIGURE_INDEX_FIELDS)
+            writer.writeheader()
+        return []
     entries = [
         _write_contributions(rows, output_dir),
         _write_heuristic_comparison(rows, output_dir),

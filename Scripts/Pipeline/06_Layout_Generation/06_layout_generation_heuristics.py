@@ -140,6 +140,27 @@ def _merge_variant_file(output_name: str) -> Path:
         for row in rows:
             merged_rows.append(_decorate_row(row, variant))
 
+    if used_sources == 0 or not merged_rows:
+        fallback = common.STAGE6_OUTPUT_DIR / output_name
+        if fallback.exists():
+            rows, fieldnames = _read_csv_with_fieldnames(fallback)
+            if not base_fieldnames:
+                base_fieldnames = fieldnames
+            for row in rows:
+                merged_rows.append(
+                    _decorate_row(
+                        row,
+                        {
+                            "label": "Baseline_None",
+                            "construction_method": "constructive_beam",
+                            "improvement_method": "none",
+                            "beam_preserving_optimizer": "CONSTRUCTIVE",
+                            "local_search_optimizer": "NO",
+                        },
+                    )
+                )
+            used_sources = 1
+
     output_path = OUTPUT_DIR / output_name
     if used_sources == 0:
         if output_path.exists():
