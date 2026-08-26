@@ -17,53 +17,70 @@ MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
 def _legal_slot_profile(slot_sizes: list[float]) -> bool:
-    """Reject any profile that cannot be completed to a legal column under the 754 cm limit.
+    """Return True if some legal column can be built from the family.
 
-    A physical column is evaluated in a bottom-to-top order with the largest slots lower and
-    the smallest slots at the top, because the top row is the slot that can absorb the remain-
-    ing height gap. This lets the candidate generator accept profiles that are feasible only
-    after reordering the same slot sizes so the smallest slot sits on top.
+    The candidate family may be reused in any order, and the final top slot may be a
+    nearby legal value within +/-30 cm of an existing family value. The exact 754 cm
+    total must still be reached, and the beam directly beneath the top slot must land in
+    the required 504-520 cm support band.
     """
     if not slot_sizes:
         return False
-    sorted_sizes = sorted(float(size) for size in slot_sizes)
-    min_size = sorted_sizes[0]
-    max_size = sorted_sizes[-1]
-    if max_size > MAX_REPRESENTATIVE_SLOT_SIZE_CM:
-        return False
 
-    legal_pool: list[int] = []
+    family_values: list[int] = []
     seen: set[int] = set()
-    for slot_size in sorted_sizes:
-        if slot_size < min_size - 1e-9:
-            return False
+    for slot_size in sorted(float(size) for size in slot_sizes):
         rounded = int(round(slot_size))
+        if rounded <= 0:
+            return False
+        if rounded > int(round(MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+            return False
         if rounded % 10 not in (4, 9):
             return False
         if rounded not in seen:
             seen.add(rounded)
-            legal_pool.append(rounded)
+            family_values.append(rounded)
 
-    if not legal_pool:
+    if not family_values:
         return False
 
-    for row_count in range(1, 13):
-        target_total = int(round(754.0 - (row_count - 1) * 16.0))
-        if target_total <= 0:
-            continue
+    legal_family: set[int] = set()
+    for base_value in family_values:
+        for delta in range(-30, 31):
+            candidate = base_value + delta
+            if candidate < 4:
+                continue
+            if candidate > int(round(MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+                continue
+            if candidate % 10 in (4, 9):
+                legal_family.add(candidate)
 
-        for combo in combinations_with_replacement(sorted(legal_pool), row_count):
-            unique_orderings = {tuple(order) for order in set(permutations(combo))}
-            for ordered_combo in unique_orderings:
-                base_total = sum(ordered_combo)
-                if base_total > target_total:
-                    continue
-                if base_total == target_total:
-                    return True
-                gap = target_total - base_total
-                top_slot = ordered_combo[-1]
-                if gap <= MAX_REPRESENTATIVE_SLOT_SIZE_CM - top_slot:
-                    return True
+    if not legal_family:
+        return False
+
+    reachable: dict[int, set[int]] = {0: {0}}
+    max_count = 60
+    for lower_count in range(1, max_count + 1):
+        sums = set()
+        for partial_sum in reachable.get(lower_count - 1, set()):
+            for value in sorted(legal_family):
+                sums.add(partial_sum + value)
+        if not sums:
+            continue
+        reachable[lower_count] = sums
+        for lower_sum in sums:
+            support_below_top = lower_sum + 16 * max(lower_count - 1, 0)
+            if not (504.0 <= support_below_top <= 520.0 + 1e-9):
+                continue
+            top_slot = 754 - lower_sum - 16 * lower_count
+            if top_slot <= 0:
+                continue
+            if top_slot > int(round(MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+                continue
+            if top_slot % 10 not in (4, 9):
+                continue
+            return True
+
     return False
 
 

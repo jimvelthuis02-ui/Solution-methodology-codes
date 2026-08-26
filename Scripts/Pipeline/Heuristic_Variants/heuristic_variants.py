@@ -14,45 +14,34 @@ import run_ordered_pipeline as common
 
 
 def _filter_variants_from_env() -> list[dict[str, object]]:
+    baseline_none = {
+        "label": "Baseline_None",
+        "construction_method": "constructive_beam",
+        "use_beam_optimizer": False,
+        "use_local_search": False,
+        "improvement_method": "none",
+        "beam_preserving_optimizer": "CONSTRUCTIVE",
+        "local_search_optimizer": "NO",
+    }
+    baseline_local_search = {
+        "label": "Baseline_LocalSearch",
+        "construction_method": "constructive_beam",
+        "use_beam_optimizer": False,
+        "use_local_search": True,
+        "improvement_method": "local_search",
+        "beam_preserving_optimizer": "CONSTRUCTIVE",
+        "local_search_optimizer": "YES",
+    }
+
     labels = os.getenv("PIPELINE_HEURISTIC_LABEL_FILTER", "").strip()
     if not labels:
-        return [
-            {
-                "label": "Baseline_None",
-                "construction_method": "constructive_beam",
-                "use_beam_optimizer": False,
-                "use_local_search": False,
-                "improvement_method": "none",
-                "beam_preserving_optimizer": "CONSTRUCTIVE",
-                "local_search_optimizer": "NO",
-            },
-        ]
+        return [baseline_none]
 
     allowed = {label.strip().lower() for label in labels.split(",") if label.strip()}
     if not allowed:
-        return [
-            {
-                "label": "Baseline_None",
-                "construction_method": "constructive_beam",
-                "use_beam_optimizer": False,
-                "use_local_search": False,
-                "improvement_method": "none",
-                "beam_preserving_optimizer": "CONSTRUCTIVE",
-                "local_search_optimizer": "NO",
-            },
-        ]
+        return [baseline_none]
 
-    all_variants = [
-        {
-            "label": "Baseline_None",
-            "construction_method": "constructive_beam",
-            "use_beam_optimizer": False,
-            "use_local_search": False,
-            "improvement_method": "none",
-            "beam_preserving_optimizer": "CONSTRUCTIVE",
-            "local_search_optimizer": "NO",
-        },
-    ]
+    all_variants = [baseline_none, baseline_local_search]
     return [variant for variant in all_variants if str(variant["label"]).lower() in allowed]
 
 

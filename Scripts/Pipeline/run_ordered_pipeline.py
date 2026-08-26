@@ -217,6 +217,12 @@ FIXED_DOORGANG_SLOT_COUNTS = {
 MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
+def _ignore_doorgang_constraints() -> bool:
+    """Allow a relaxed baseline run that excludes fixed doorgang locations entirely."""
+    value = str(os.getenv("PIPELINE_IGNORE_DOORGANG", "0")).strip().lower()
+    return value not in {"", "0", "false", "no", "off"}
+
+
 def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> float:
     """Clamp generated slot sizes to the working maximum representative size."""
     capped_max = float(MAX_REPRESENTATIVE_SLOT_SIZE_CM if maximum is None else maximum)
@@ -227,6 +233,8 @@ def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> fl
 
 
 def _fixed_doorgang_location_total() -> int:
+    if _ignore_doorgang_constraints():
+        return 0
     return sum(FIXED_DOORGANG_SLOT_COUNTS.values())
 
 
@@ -282,10 +290,14 @@ def _enforce_occupied_location_target(
 
 
 def _exclude_fixed_doorgang_slot_counts(counts: dict[int, int]) -> dict[int, int]:
-    # Physical doorway slots such as 224, 229, and 234 are not active SKU-demand
-    # locations. They are removed from the effective storage count, while the
-    # base occupied-location target remains the business target to satisfy.
+    # When the relaxed baseline is active, the fixed doorgang slots are not part of
+    # the active layout demand and should not penalize the configuration.
     adjusted = {size: max(int(count), 0) for size, count in counts.items()}
+    if _ignore_doorgang_constraints():
+        for size in FIXED_DOORGANG_SLOT_COUNTS:
+            adjusted.pop(size, None)
+        return {size: count for size, count in sorted(adjusted.items()) if count > 0}
+
     for size, doorway_count in FIXED_DOORGANG_SLOT_COUNTS.items():
         adjusted[size] = max(adjusted.get(size, 0) - doorway_count, 0)
     return {size: count for size, count in sorted(adjusted.items()) if count > 0}
@@ -318,6 +330,9 @@ def _build_layout_columns(prepared_rows: list[dict[str, str]]) -> list[str]:
 
 def _doorgang_thresholds_by_rack(prepared_rows: list[dict[str, str]]) -> dict[str, tuple[int, float]]:
     # Capture the physical height of the doorgang location per rack.
+    if _ignore_doorgang_constraints():
+        return {}
+
     thresholds: dict[str, tuple[int, float]] = {}
     for row in prepared_rows:
         location_type = str(row.get("Location Type", "")).strip().lower()
@@ -335,6 +350,9 @@ def _doorgang_thresholds_by_rack(prepared_rows: list[dict[str, str]]) -> dict[st
 
 def _fixed_doorgang_slot_by_column(prepared_rows: list[dict[str, str]]) -> dict[str, float]:
     # Preserve physical doorgang location height as fixed row content per column.
+    if _ignore_doorgang_constraints():
+        return {}
+
     fixed_slots: dict[str, float] = {}
     for row in prepared_rows:
         location_type = str(row.get("Location Type", "")).strip().lower()

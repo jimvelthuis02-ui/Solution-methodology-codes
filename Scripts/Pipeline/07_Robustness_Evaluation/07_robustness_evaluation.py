@@ -17,8 +17,13 @@ NON_ROBUST_OUTPUT_FILE = common.STAGE7_OUTPUT_DIR / "Non_Robust_Layouts.csv"
 CAPACITY_CONSTRAINT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
 
 
-# Stage 7 now evaluates only the baseline (100%) occupied-location demand.
+# Stage 7 evaluates the fixed occupied-location demand used for the baseline run.
+# The historical item-height sample measured 939 locations, but the operational demand for
+# the baseline occupancy is 890 occupied slots. The Stage 4 slot-size distribution must be
+# mapped onto 890, not 939, before passing the capacity requirement into Stage 7.
 OCCUPIED_LOCATION_SCENARIOS = {
+    "Scenario 1": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
+    "Scenario_1": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
     "Base_Count": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
 }
 

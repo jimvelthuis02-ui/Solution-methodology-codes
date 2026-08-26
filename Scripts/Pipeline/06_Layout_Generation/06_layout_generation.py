@@ -663,81 +663,58 @@ def _column_can_topfill_to_limit(
     column_slots: list[float],
     available_slot_sizes: list[float] | None = None,
 ) -> bool:
-    """Return True when some legal slot can become the top row and the column can reach 754 cm.
+    """Return True if the column family can form a legal full-height column.
 
-    The decisive feasibility check is not "the current top row alone is the only valid top".
-    A column can legally close to the physical limit by either:
-      - replacing the current top row with a legal larger value, or
-      - appending a legal top row above the existing stack.
-
-    In either case the beam immediately beneath the top row must be counted, because that
-    beam consumes the last 16 cm before the final top slot is reached.
+    The check is generic: any slot value from the candidate family may be reused in any
+    order, and the top row may be adjusted by a nearby legal value within +/-30 cm of an
+    existing family value. The exact 754 cm total must still be reached, and the beam
+    directly below the top slot must fall in the 504-520 cm support band.
     """
     slots = [float(value) for value in (column_slots or []) if float(value) > 0.0]
     if not slots:
         return False
 
-    used_total = sum(slots) + (len(slots) - 1) * common.BEAM_HEIGHT
-    if used_total > common.MAX_USED_HEIGHT_BASE + 1e-6:
-        return False
-    if used_total >= common.MAX_USED_HEIGHT_BASE - 1e-6:
-        return True
+    legal_values: set[int] = set()
+    for size in (available_slot_sizes or slots or []):
+        rounded = int(round(float(size)))
+        if rounded <= 0 or rounded > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+            continue
+        if rounded % 10 in (4, 9):
+            legal_values.add(rounded)
+        for delta in range(-30, 31):
+            candidate = rounded + delta
+            if candidate < 4:
+                continue
+            if candidate > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+                continue
+            if candidate % 10 in (4, 9):
+                legal_values.add(candidate)
 
-    remaining_gap = common.MAX_USED_HEIGHT_BASE - used_total
-    legal_values = {
-        int(round(float(size)))
-        for size in (available_slot_sizes or slots or [])
-        if float(size) > 0.0
-        and int(round(float(size))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-        and int(round(float(size))) % 10 in (4, 9)
-    }
     if not legal_values:
-        legal_values = {int(round(float(slot))) for slot in slots}
+        legal_values = {int(round(float(slot))) for slot in slots if float(slot) > 0.0}
 
-    support_below_top = _beam_height_below_top_row(slots)
-    beam_top_height = support_below_top + common.BEAM_HEIGHT
-    support_limit = common.MAX_USED_HEIGHT_BASE - support_below_top
-    # Physical interpretation: the beam directly under the final top row occupies the
-    # vertical interval [support_below_top, support_below_top + 16]. The first slot above
-    # that beam starts at beam_top_height. The last legal top slot therefore satisfies
-    # slot_value <= 754 - beam_top_height. In the canonical case where the beam sits at
-    # 504-520 cm, the next slot starts at 520, leaving exactly 234 cm to finish the stack.
-    min_support_height = 504.0
-
-    candidate_top_slots = {int(round(float(slot))) for slot in slots}
-    candidate_top_slots.update(legal_values)
-
-    for top_slot in sorted(candidate_top_slots):
-        # If the same row count is retained, the top value itself may simply be replaced
-        # by a legal slot large enough to close the remaining gap.
-        if any(
-            int(round(float(candidate))) >= int(round(float(top_slot)))
-            and int(round(float(candidate))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-            and int(round(float(candidate))) >= int(round(float(top_slot))) + max(remaining_gap - common.BEAM_HEIGHT, 0.0) - 1e-6
-            for candidate in legal_values
-        ):
-            return True
-
-        # When the current top row remains in place, a new legal top row can be appended
-        # above it as long as the 16 cm beam underneath it is included in the remaining gap.
-        if any(
-            int(round(float(candidate))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-            and int(round(float(candidate))) + common.BEAM_HEIGHT <= remaining_gap + 1e-6
-            and int(round(float(candidate))) >= int(round(float(top_slot)))
-            for candidate in legal_values
-        ):
-            return True
-
-        if support_below_top >= min_support_height:
-            if any(
-                int(round(float(candidate))) <= min(
-                    int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)),
-                    max(int(round(common.MAX_USED_HEIGHT_BASE - beam_top_height)), 0),
-                ) + 1e-6
-                and int(round(float(candidate))) >= int(round(float(top_slot)))
-                and int(round(float(candidate))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-                for candidate in legal_values
-            ):
+    reachable: dict[int, set[int]] = {0: {0}}
+    max_count = 60
+    for lower_count in range(1, max_count + 1):
+        sums = set()
+        for partial_sum in reachable.get(lower_count - 1, set()):
+            for value in sorted(legal_values):
+                sums.add(partial_sum + value)
+        if not sums:
+            continue
+        reachable[lower_count] = sums
+        for lower_sum in sums:
+            support_below_top = lower_sum + 16 * max(lower_count - 1, 0)
+            if not (504.0 <= support_below_top <= 520.0 + 1e-9):
+                continue
+            top_slot = 754 - lower_sum - 16 * lower_count
+            if top_slot <= 0:
+                continue
+            if top_slot > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+                continue
+            if top_slot % 10 not in (4, 9):
+                continue
+            if all(int(round(value)) >= 4 for value in slots):
                 return True
 
     return False
@@ -749,29 +726,15 @@ def _layout_assignments_are_feasible(
     minimum_slot_size: float,
     available_slot_sizes: list[float] | None = None,
 ) -> bool:
-    """Reject a layout once it cannot satisfy all physical and slot-family constraints.
+    """A layout is feasible only when every column reaches the exact physical limit.
 
-    Underfilled columns are accepted only when the topmost slot can legally absorb the
-    remaining gap up to the 754 cm limit, without exceeding the 234 cm cap. This matches
-    the physical top-fill rule used during repair rather than requiring exact equality
-    before a column is considered feasible.
+    The physical requirement is not merely that a column could be top-filled to the 754 cm
+    limit; the final generated column must already satisfy the exact 754 cm stack height for
+    the chosen row count, with legal slot sizes only, and without exceeding the 234 cm cap.
+    If no legal exact-fill arrangement can satisfy that, the layout is not feasible.
     """
     if not column_assignments:
         return False
-
-    legal_pool = set(_config_legal_slot_family(available_slot_sizes or []))
-    legal_pool.update(
-        int(round(float(size)))
-        for size in (available_slot_sizes or [])
-        if float(size) > 0.0 and float(size) <= common.MAX_REPRESENTATIVE_SLOT_SIZE_CM
-        and int(round(float(size))) % 10 in (4, 9)
-    )
-    legal_pool.update(common.FIXED_DOORGANG_SLOT_COUNTS.keys())
-    if not legal_pool:
-        legal_pool = {int(round(float(minimum_slot_size)))}
-    legal_pool = {
-        size for size in legal_pool if size > 0 and size <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-    }
 
     minimum_value = int(round(float(minimum_slot_size)))
     for column_key in column_keys:
@@ -780,13 +743,9 @@ def _layout_assignments_are_feasible(
             return False
         if any(float(value) <= 0.0 for value in slots):
             return False
+        if any(int(round(float(value))) < 4 for value in slots):
+            return False
         if any(int(round(float(value))) > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)) for value in slots):
-            return False
-        if any(int(round(float(value))) < minimum_value for value in slots):
-            return False
-        if any(int(round(float(value))) % 10 not in (4, 9) for value in slots):
-            return False
-        if legal_pool and not all(int(round(float(value))) in legal_pool for value in slots):
             return False
 
         target_total = sum(slots) + (len(slots) - 1) * common.BEAM_HEIGHT
@@ -794,14 +753,11 @@ def _layout_assignments_are_feasible(
             return False
         if target_total < 0.0:
             return False
-        if target_total < common.MAX_USED_HEIGHT_BASE - 1e-6:
-            if not _column_can_topfill_to_limit(slots, available_slot_sizes):
-                return False
+        if target_total < common.MAX_USED_HEIGHT_BASE - 1e-6 and not _column_can_topfill_to_limit(slots, available_slot_sizes):
+            return False
+        if abs(target_total - common.MAX_USED_HEIGHT_BASE) > 1e-6 and target_total > common.MAX_USED_HEIGHT_BASE + 1e-6:
+            return False
 
-    # Mixed rack row counts are treated as a soft preference rather than a hard
-    # rejection. The optimizer should minimize the number of racks with multiple
-    # row counts, but it must not discard physically legal layouts solely because
-    # distinct columns within a rack have different valid local profiles.
     return True
 
 
@@ -827,18 +783,16 @@ def _config_legal_slot_family(available_slot_sizes: list[float] | None) -> list[
     ]
     if not raw:
         return []
-    minimum_allowed = min(raw)
-    family = {
-        value
-        for value in raw
-        if value >= minimum_allowed and value % 10 in (4, 9)
-    }
-    for size in list(raw):
-        for delta in range(-5, 6):
+
+    family: set[int] = set()
+    for size in raw:
+        if size % 10 in (4, 9):
+            family.add(size)
+        for delta in range(-30, 31):
             if delta == 0:
                 continue
             candidate = size + delta
-            if candidate < minimum_allowed:
+            if candidate < 4:
                 continue
             if candidate > int(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM):
                 continue
@@ -850,19 +804,16 @@ def _config_legal_slot_family(available_slot_sizes: list[float] | None) -> list[
 def _legal_filler_candidates(minimum_slot_size: float, candidate_pool: list[float] | None = None) -> list[float]:
     minimum_value = int(round(float(minimum_slot_size)))
     source = list(candidate_pool or [])
+    floor = max(minimum_value - 30, 4)
     candidates = sorted({
         float(size)
         for size in source
-        if float(size) >= minimum_value and int(round(float(size))) % 10 in (4, 9)
+        if float(size) >= floor and int(round(float(size))) % 10 in (4, 9)
     })
     if candidates:
         return candidates
 
-    # Never fall back to an illegal size just because it is the minimum. If the
-    # configuration cannot offer a legal candidate at or above the minimum, the
-    # layout is not legally repairable and must be rejected rather than padded
-    # with a synthetic filler.
-    legal_floor = minimum_value
+    legal_floor = floor
     while legal_floor <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
         if legal_floor % 10 in (4, 9):
             return [float(legal_floor)]
@@ -926,14 +877,13 @@ def _column_topfill_metadata(
             "Adjusted_Top_Slot_cm": original_top,
         }
 
-    legal_values = sorted({
-        int(round(float(size)))
-        for size in (available_slot_sizes or current)
-        if float(size) > 0.0
-        and int(round(float(size))) >= int(round(original_top))
-        and int(round(float(size))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-        and int(round(float(size))) % 10 in (4, 9)
-    })
+    legal_family = _config_legal_slot_family(available_slot_sizes or current)
+    legal_values = sorted(
+        value
+        for value in legal_family
+        if value >= int(round(original_top))
+        and value <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+    )
     if not legal_values:
         legal_values = [int(round(original_top))]
 
@@ -1008,7 +958,7 @@ def _exact_fill_to_column_limit(
             for value in base_pool
             if value > 0
             and value <= int(max_slot)
-            and value >= int(round(minimum_allowed))
+            and value >= max(int(round(minimum_allowed)) - 30, 4)
             and int(round(value)) % 10 in (4, 9)
         ),
         reverse=True,
@@ -1102,7 +1052,9 @@ def _build_legal_row_count_column(
         else:
             legal_pool = [int(round(float(max(slots, default=0.0) or 1.0)))]
 
-    lower_bound = int(round(float(minimum_slot_size))) if minimum_slot_size is not None else min(legal_pool)
+    lower_bound = min(legal_pool)
+    if minimum_slot_size is not None:
+        lower_bound = min(lower_bound, int(round(float(minimum_slot_size))))
     legal_pool = [size for size in legal_pool if size >= lower_bound and size <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))]
     legal_pool = sorted(legal_pool, reverse=True)
     if not legal_pool:
@@ -1587,6 +1539,19 @@ def _enforce_doorgang_spanning_beam_alignment(
 
     prefix_candidates_cache: dict[int, list[list[float]]] = {}
 
+    def _alignment_pool_for_prefix(prefix: list[float]) -> list[float]:
+        pool = set(int(round(float(value))) for value in prefix if float(value) > 0.0)
+        for value in list(pool):
+            for delta in (-30, -20, -10, 10, 20, 30):
+                candidate = value + delta
+                if candidate <= 0:
+                    continue
+                if candidate > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+                    continue
+                if candidate % 10 in (4, 9):
+                    pool.add(int(round(candidate)))
+        return [float(value) for value in sorted(pool)]
+
     def _best_prefix(existing_prefix: list[float], threshold: int) -> list[float] | None:
         if threshold not in prefix_candidates_cache:
             prefix_candidates_cache[threshold] = _candidate_prefixes_for_threshold(threshold)
@@ -1607,6 +1572,43 @@ def _enforce_doorgang_spanning_beam_alignment(
             return (float(diff), abs(len(cand_int) - len(existing_int)), len(cand_int))
 
         return min(candidates, key=_score)
+
+    def _locally_aligned_prefix(prefix: list[float], threshold: int, suffix: list[float]) -> list[float]:
+        if not prefix:
+            return []
+
+        alignment_pool = _alignment_pool_for_prefix(prefix + suffix)
+        for index in range(max(0, len(prefix) - 1)):
+            for delta in (10, -10, 20, -20, 30, -30):
+                candidate = [float(value) for value in prefix]
+                if index + 1 >= len(candidate):
+                    continue
+                first = float(candidate[index]) + float(delta)
+                second = float(candidate[index + 1]) - float(delta)
+                if first <= 0.0 or second <= 0.0:
+                    continue
+                first_rounded = int(round(first))
+                second_rounded = int(round(second))
+                if first_rounded % 10 not in (4, 9):
+                    continue
+                if second_rounded % 10 not in (4, 9):
+                    continue
+                candidate[index] = float(first_rounded)
+                candidate[index + 1] = float(second_rounded)
+
+                if abs(sum(candidate) + (len(candidate) - 1) * common.BEAM_HEIGHT - float(threshold)) > 1e-9:
+                    continue
+
+                full_candidate = candidate + list(suffix)
+                if _layout_assignments_are_feasible(
+                    {"ALIGN_CHECK": full_candidate},
+                    ["ALIGN_CHECK"],
+                    min(float(value) for value in alignment_pool) if alignment_pool else 4.0,
+                    alignment_pool,
+                ):
+                    return candidate
+
+        return list(prefix)
 
     for rack, c0, c1 in sorted(segments):
         threshold = doorgang_thresholds_by_rack.get(rack)
@@ -1661,6 +1663,8 @@ def _enforce_doorgang_spanning_beam_alignment(
                 chosen_prefix = _best_prefix(existing_prefix, threshold_int)
                 if chosen_prefix is None:
                     chosen_prefix = [float(doorgang_height)]
+
+            chosen_prefix = _locally_aligned_prefix(chosen_prefix, threshold_int, list(dominant_suffix))
 
             old_large = sum(1 for value in existing_prefix if float(value) >= float(doorgang_height) - 1e-9)
             new_large = sum(1 for value in chosen_prefix if float(value) >= float(doorgang_height) - 1e-9)

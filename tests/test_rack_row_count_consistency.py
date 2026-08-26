@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -129,6 +130,23 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             )
         )
 
+    def test_ignore_doorgang_relaxes_fixed_prefixes(self):
+        original = os.environ.get("PIPELINE_IGNORE_DOORGANG")
+        try:
+            os.environ["PIPELINE_IGNORE_DOORGANG"] = "1"
+            self.assertTrue(module.common._ignore_doorgang_constraints())
+            self.assertEqual(module.common._fixed_doorgang_slot_by_column([]), {})
+            self.assertEqual(module.common._doorgang_thresholds_by_rack([]), {})
+            self.assertEqual(
+                module.common._exclude_fixed_doorgang_slot_counts({69: 100, 224: 4, 229: 6, 234: 1}),
+                {69: 100},
+            )
+        finally:
+            if original is None:
+                os.environ.pop("PIPELINE_IGNORE_DOORGANG", None)
+            else:
+                os.environ["PIPELINE_IGNORE_DOORGANG"] = original
+
     def test_allows_same_row_count_with_different_slot_orders_in_same_rack(self):
         assignments = {
             "K00": [234.0, 234.0, 149.0, 89.0],
@@ -149,9 +167,9 @@ class RackRowCountConsistencyTest(unittest.TestCase):
 
     def test_accepts_legal_underfilled_columns_within_physical_limit(self):
         valid = {
-            "R01C01": [64.0, 64.0, 234.0, 234.0],
-            "R01C02": [64.0, 64.0, 234.0, 234.0],
-            "R01C03": [64.0, 64.0, 234.0, 234.0],
+            "R01C01": [119.0, 179.0, 179.0],
+            "R01C02": [119.0, 179.0, 179.0],
+            "R01C03": [119.0, 179.0, 179.0],
         }
 
         self.assertTrue(
@@ -159,7 +177,7 @@ class RackRowCountConsistencyTest(unittest.TestCase):
                 valid,
                 ["R01C01", "R01C02", "R01C03"],
                 64.0,
-                [64.0, 119.0, 234.0],
+                [64.0, 119.0, 179.0, 234.0],
             )
         )
 
@@ -181,9 +199,9 @@ class RackRowCountConsistencyTest(unittest.TestCase):
 
     def test_rejects_layouts_that_cannot_become_feasible(self):
         impossible = {
-            "R01C01": [59.0, 69.0],
-            "R01C02": [69.0],
-            "R01C03": [69.0, 89.0],
+            "R01C01": [2.0, 2.0],
+            "R01C02": [2.0],
+            "R01C03": [2.0, 2.0],
         }
 
         self.assertFalse(

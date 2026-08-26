@@ -43,15 +43,6 @@ DROP_FIELDS_BY_OUTPUT = {
     "Candidate_Layout_Summary.csv": {
         "Beam_Preserving_Optimizer",
         "Local_Search_Optimizer",
-        "Layout_Feasible",
-        "Allocation_Feasible_Initial",
-        "Required_Locations_Total",
-        "Total_Locations",
-        "Capacity_Margin",
-        "Assigned_Used_Height_Total",
-        "Total_Allowed_Height",
-        "Space_Left",
-        "Percentage_Rack_Height_Used",
         "Feasible_Columns_Average",
     },
     "Candidate_Layout_By_Rack_Column.csv": {

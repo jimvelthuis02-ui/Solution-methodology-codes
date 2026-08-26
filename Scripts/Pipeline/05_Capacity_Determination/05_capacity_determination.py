@@ -146,57 +146,16 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
         else:
             scenario_aware_counts = selected_scenario_counts
 
-    if scenario_aware_counts:
-        for scenario_name, exact_required_by_size in scenario_aware_counts.items():
-            cumulative_required_by_size: dict[float, int] = {}
-            running_required = 0
-            for slot_size in sorted(exact_required_by_size.keys(), reverse=True):
-                running_required += int(exact_required_by_size.get(slot_size, 0))
-                cumulative_required_by_size[slot_size] = running_required
-
-            for slot_size in ordered_sizes:
-                exact_required_by_size.setdefault(slot_size, 0)
-                cumulative_required_by_size.setdefault(slot_size, 0)
-
-            exact_total = sum(int(value) for value in exact_required_by_size.values())
-            summary_rows.append(
-                {
-                    "Config_ID": config.get("Config_ID", ""),
-                    "Method": config.get("Method", ""),
-                    "Scenario": config.get("Scenario", ""),
-                    "K": config.get("K", ""),
-                    "SKU_Scenario": scenario_name,
-                    "SKU_Count": str(exact_total),
-                    "Required_Locations_Total": str(exact_total),
-                    "Exact_Count_Distribution": "|".join(f"{int(size)}:{count}" for size, count in sorted(exact_required_by_size.items())),
-                    "Relative_Slot_Size_Distribution": _distribution_value(config),
-                }
-            )
-
-            for slot_size in ordered_sizes:
-                required_count = int(exact_required_by_size.get(slot_size, 0))
-                count_rows.append(
-                    {
-                        "Config_ID": config.get("Config_ID", ""),
-                        "Method": config.get("Method", ""),
-                        "Scenario": config.get("Scenario", ""),
-                        "K": config.get("K", ""),
-                        "SKU_Scenario": scenario_name,
-                        "SKU_Count": str(exact_total),
-                        "Representative_Slot_Size": f"{slot_size:.0f}",
-                        "Cluster_Count_Percentage": "",
-                        "Assigned_SKUs_At_Representative_Size": str(required_count),
-                        "Cumulative_Assigned_SKUs_At_Or_Above_Size": str(cumulative_required_by_size.get(slot_size, 0)),
-                        "Min_Required_Locations_At_Or_Above_Size": str(cumulative_required_by_size.get(slot_size, 0)),
-                        "Required_Locations_Total": str(exact_total),
-                    }
-                )
-
-        return summary_rows, count_rows
-
+    # The raw percentages are the canonical demand split for the active configuration and should
+    # be projected directly onto the fixed 890 occupied-slot baseline. The older scenario-histogram
+    # branch was based on the 939 observed item-height count and is intentionally bypassed.
     active_scenarios = [config_scenario] if config_scenario else list(sku_scenarios.keys())
     for scenario_name in active_scenarios:
-        sku_count = sku_scenarios.get(scenario_name, next(iter(sku_scenarios.values()), 0))
+        sku_count = int(common.BASE_OCCUPIED_LOCATIONS_COUNT)
+        if scenario_name in sku_scenarios:
+            sku_count = int(sku_scenarios.get(scenario_name, sku_count))
+        sku_count = max(int(sku_count), 0)
+
         # Allocate the active scenario SKU count across representative slot sizes.
         allocated_counts = common._allocate_counts_from_percentages(sku_count, distributions)
         cumulative_required_by_size: dict[float, int] = {}
@@ -253,6 +212,7 @@ def build_capacity_determination() -> tuple[list[dict[str, str]], list[dict[str,
     """Generate Stage 5 capacity outputs for all shortlisted configurations."""
     configs = _read_candidate_configurations()
     occupied_location_scenarios = {
+        "Scenario 1": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
         "Base_Count": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
     }
 

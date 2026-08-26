@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGE6_PATH = ROOT / "Scripts" / "Pipeline" / "06_Layout_Generation" / "06_layout_generation.py"
+HEURISTIC_STAGE6_PATH = ROOT / "Scripts" / "Pipeline" / "06_Layout_Generation" / "06_layout_generation_heuristics.py"
 COMMON_PATH = ROOT / "Scripts" / "Pipeline" / "run_ordered_pipeline.py"
 HEURISTIC_VARIANTS_PATH = ROOT / "Scripts" / "Pipeline" / "Heuristic_Variants" / "heuristic_variants.py"
 
@@ -18,6 +19,19 @@ for module_path, module_name in [(COMMON_PATH, "run_ordered_pipeline"), (STAGE6_
 
 
 class SlotSizeCapTest(unittest.TestCase):
+    def test_stage6_merged_summary_keeps_layout_feasibility_kpis(self):
+        spec = importlib.util.spec_from_file_location("stage6_layout_heuristics", HEURISTIC_STAGE6_PATH)
+        if spec is None or spec.loader is None:
+            self.fail("Unable to load the Stage 6 heuristics module")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["stage6_layout_heuristics"] = module
+        spec.loader.exec_module(module)
+
+        dropped = module.DROP_FIELDS_BY_OUTPUT["Candidate_Layout_Summary.csv"]
+        self.assertNotIn("Layout_Feasible", dropped)
+        self.assertNotIn("Capacity_Margin", dropped)
+        self.assertNotIn("Percentage_Rack_Height_Used", dropped)
+
     def test_topfill_is_reintroduced_as_legal_bounded_fill(self):
         stage6 = sys.modules["stage6_layout"]
         self.assertTrue(hasattr(stage6, "_column_topfill_metadata"))
@@ -193,11 +207,11 @@ class SlotSizeCapTest(unittest.TestCase):
             self.assertTrue(all(int(round(value)) >= 69 for value in slots))
             self.assertTrue(all(int(round(value)) % 10 in (4, 9) for value in slots))
 
-    def test_legal_family_fillers_are_accepted_by_layout_feasibility(self):
+    def test_underfilled_columns_are_accepted_when_they_can_be_completed_with_a_legal_topfill(self):
         stage6 = sys.modules["stage6_layout"]
         assignments = {
-            "A01": [64.0, 119.0, 224.0, 234.0],
-            "A02": [64.0, 119.0, 224.0, 234.0],
+            "A01": [119.0, 179.0, 179.0],
+            "A02": [119.0, 179.0, 179.0],
         }
 
         self.assertTrue(
@@ -205,7 +219,72 @@ class SlotSizeCapTest(unittest.TestCase):
                 assignments,
                 ["A01", "A02"],
                 64.0,
-                [64.0, 119.0, 234.0],
+                [64.0, 119.0, 179.0, 234.0],
+            )
+        )
+
+    def test_candidate_config_generation_accepts_profiles_with_a_legal_repeated_fill(self):
+        stage4_path = ROOT / "Scripts" / "Pipeline" / "04_Candidate_Configuration" / "04_candidate_configuration.py"
+        stage4_spec = importlib.util.spec_from_file_location("stage4_candidate", stage4_path)
+        if stage4_spec is None or stage4_spec.loader is None:
+            self.fail("Unable to build the stage 4 candidate module spec")
+        stage4_module = importlib.util.module_from_spec(stage4_spec)
+        sys.modules["stage4_candidate"] = stage4_module
+        stage4_spec.loader.exec_module(stage4_module)
+
+        self.assertTrue(stage4_module._legal_slot_profile([64.0, 119.0, 179.0]))
+        self.assertTrue(stage4_module._legal_slot_profile([69.0, 119.0, 179.0, 234.0]))
+        self.assertTrue(stage4_module._legal_slot_profile([69.0, 89.0, 119.0, 179.0, 234.0]))
+
+    def test_legal_family_fillers_are_accepted_by_layout_feasibility(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "A01": [69.0, 89.0, 119.0, 179.0, 234.0],
+            "A02": [69.0, 89.0, 119.0, 179.0, 234.0],
+        }
+
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                assignments,
+                ["A01", "A02"],
+                64.0,
+                [64.0, 69.0, 89.0, 119.0, 179.0, 234.0],
+            )
+        )
+
+    def test_doorgang_alignment_slots_and_topfill_values_are_feasible(self):
+        stage6 = sys.modules["stage6_layout"]
+        column_assignments = {
+            "D01": [69.0, 69.0, 59.0, 189.0, 119.0, 169.0],
+            "D02": [69.0, 69.0, 59.0, 189.0, 119.0, 169.0],
+        }
+
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                column_assignments,
+                ["D01", "D02"],
+                59.0,
+                [69.0, 119.0, 179.0, 234.0],
+            )
+        )
+
+        metadata = stage6._column_topfill_metadata([69.0, 89.0, 119.0, 179.0], [69.0, 119.0, 179.0, 234.0])
+        self.assertGreaterEqual(metadata["Adjusted_Top_Slot_cm"], 179.0)
+        self.assertLessEqual(metadata["Adjusted_Top_Slot_cm"], 234.0)
+
+    def test_alignment_reduction_to_214_is_allowed_for_doorgang_compensation(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "J01": [119.0, 89.0, 214.0, 179.0, 89.0],
+            "J02": [119.0, 89.0, 214.0, 179.0, 89.0],
+        }
+
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                assignments,
+                ["J01", "J02"],
+                69.0,
+                [69.0, 89.0, 119.0, 179.0, 214.0, 234.0],
             )
         )
 
@@ -218,18 +297,56 @@ class SlotSizeCapTest(unittest.TestCase):
         sys.modules["stage5_capacity"] = module5
         spec.loader.exec_module(module5)
 
+    def test_baseline_occupied_count_uses_890_and_current_scenario_label(self):
+        stage5_path = ROOT / "Scripts" / "Pipeline" / "05_Capacity_Determination" / "05_capacity_determination.py"
+        stage7_path = ROOT / "Scripts" / "Pipeline" / "07_Robustness_Evaluation" / "07_robustness_evaluation.py"
+
+        stage5_spec = importlib.util.spec_from_file_location("stage5_capacity_check", stage5_path)
+        if stage5_spec is None or stage5_spec.loader is None:
+            self.fail("Unable to build the stage 5 module spec")
+        stage5_module = importlib.util.module_from_spec(stage5_spec)
+        sys.modules["stage5_capacity_check"] = stage5_module
+        stage5_spec.loader.exec_module(stage5_module)
+
+        stage7_spec = importlib.util.spec_from_file_location("stage7_robustness_check", stage7_path)
+        if stage7_spec is None or stage7_spec.loader is None:
+            self.fail("Unable to build the stage 7 module spec")
+        stage7_module = importlib.util.module_from_spec(stage7_spec)
+        sys.modules["stage7_robustness_check"] = stage7_module
+        stage7_spec.loader.exec_module(stage7_module)
+
+        self.assertEqual(stage5_module.common.BASE_OCCUPIED_LOCATIONS_COUNT, 890)
+        self.assertEqual(stage7_module.common.BASE_OCCUPIED_LOCATIONS_COUNT, 890)
+        self.assertIn("Scenario 1", stage7_module.OCCUPIED_LOCATION_SCENARIOS)
+        self.assertEqual(stage7_module.OCCUPIED_LOCATION_SCENARIOS["Scenario 1"], 890)
+        self.assertEqual(stage7_module.OCCUPIED_LOCATION_SCENARIOS.get("Base_Count", 0), 890)
+
         config = {
             "Config_ID": "CFG_099",
+            "Method": "hierarchical_clustering",
+            "Scenario": "Scenario 1",
+            "K": "4",
+            "Slot_Sizes": "69,119,179,234",
+            "Relative Slot Size Distribution": "0.4015,0.3759,0.1438,0.0788",
+        }
+
+        summary_rows, _ = stage5_module._capacity_rows_for_config(config, {"Scenario 1": 890, "Base_Count": 890})
+        self.assertTrue(summary_rows)
+        self.assertTrue(all(int(row["SKU_Count"]) == 890 for row in summary_rows))
+        self.assertTrue(all(int(row["Required_Locations_Total"]) == 890 for row in summary_rows))
+
+        scenario_two_config = {
+            "Config_ID": "CFG_100",
             "Method": "hierarchical_clustering",
             "Scenario": "Scenario 2",
             "K": "4",
             "Slot_Sizes": "69,119,179,234",
             "Relative Slot Size Distribution": "0.4015,0.3759,0.1438,0.0788",
         }
-
-        summary_rows, _ = module5._capacity_rows_for_config(config, {"Base_Count": 100})
-        scenario_labels = {row["SKU_Scenario"] for row in summary_rows}
-        self.assertEqual(scenario_labels, {"Scenario 2"})
+        scenario_two_rows, _ = stage5_module._capacity_rows_for_config(scenario_two_config, {"Scenario 1": 890, "Scenario 2": 890})
+        self.assertTrue(scenario_two_rows)
+        self.assertTrue(all(int(row["SKU_Count"]) == 890 for row in scenario_two_rows))
+        self.assertTrue(all(int(row["Required_Locations_Total"]) == 890 for row in scenario_two_rows))
 
     def test_stage6_column_export_keeps_assigned_used_height_when_slots_exist(self):
         import csv
