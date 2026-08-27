@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -31,6 +32,18 @@ class SlotSizeCapTest(unittest.TestCase):
         self.assertNotIn("Layout_Feasible", dropped)
         self.assertNotIn("Capacity_Margin", dropped)
         self.assertNotIn("Percentage_Rack_Height_Used", dropped)
+
+    def test_layout_generation_defaults_to_no_layout_when_env_is_unset(self):
+        stage6 = sys.modules["stage6_layout"]
+        original = os.environ.get("PIPELINE_IGNORE_LAYOUT")
+        try:
+            os.environ.pop("PIPELINE_IGNORE_LAYOUT", None)
+            self.assertTrue(stage6.common._should_ignore_layout_for_layout_generation())
+        finally:
+            if original is None:
+                os.environ.pop("PIPELINE_IGNORE_LAYOUT", None)
+            else:
+                os.environ["PIPELINE_IGNORE_LAYOUT"] = original
 
     def test_topfill_is_reintroduced_as_legal_bounded_fill(self):
         stage6 = sys.modules["stage6_layout"]
@@ -66,7 +79,6 @@ class SlotSizeCapTest(unittest.TestCase):
         refined = stage6._enforce_rack_row_count_consistency(
             column_assignments,
             available_slot_sizes=[69.0, 89.0, 119.0, 179.0, 234.0],
-            fixed_prefix_by_column={},
         )
 
         for column_key, slots in refined.items():
@@ -76,6 +88,47 @@ class SlotSizeCapTest(unittest.TestCase):
             target_height = 754.0
             physical_total = sum(slots) + (len(slots) - 1) * 16.0
             self.assertAlmostEqual(physical_total, target_height, delta=1e-6)
+
+    def test_topfill_allows_legal_non_config_top_slots_but_rejects_values_below_the_minimum(self):
+        stage6 = sys.modules["stage6_layout"]
+        legal_family = stage6._config_legal_slot_family([64.0, 119.0, 234.0])
+        self.assertIn(114, legal_family)
+        self.assertIn(214, legal_family)
+
+        self.assertFalse(
+            stage6._layout_assignments_are_feasible(
+                {"D01": [39.0, 119.0, 234.0]},
+                ["D01"],
+                64.0,
+                [64.0, 119.0, 234.0],
+            )
+        )
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                {"D01": [64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 114.0]},
+                ["D01"],
+                64.0,
+                [64.0, 119.0, 234.0],
+            )
+        )
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                {"E01": [119.0, 119.0, 119.0, 119.0, 214.0]},
+                ["E01"],
+                64.0,
+                [64.0, 119.0, 234.0],
+            )
+        )
+
+        refined = stage6._enforce_rack_row_count_consistency(
+            {
+                "D01": [39.0, 119.0, 234.0],
+                "E01": [119.0, 119.0, 119.0, 119.0, 214.0],
+            },
+            available_slot_sizes=[64.0, 119.0, 234.0],
+        )
+        self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 == 754.0 for values in refined.values()))
+        self.assertTrue(all(int(round(value)) >= 64 for values in refined.values() for value in values))
 
     def test_column_top_slot_is_based_on_physical_stack_order_not_arbitrary_list_order(self):
         stage6 = sys.modules["stage6_layout"]
@@ -100,7 +153,6 @@ class SlotSizeCapTest(unittest.TestCase):
         refined = stage6._enforce_rack_row_count_consistency(
             assignments,
             available_slot_sizes=[69.0, 89.0, 119.0, 179.0, 234.0],
-            fixed_prefix_by_column={},
         )
 
         for slots in refined.values():
@@ -118,43 +170,16 @@ class SlotSizeCapTest(unittest.TestCase):
         refined = stage6._enforce_rack_row_count_consistency(
             assignments,
             available_slot_sizes=[69.0, 89.0, 119.0, 179.0, 234.0],
-            fixed_prefix_by_column={},
         )
 
         for slots in refined.values():
             self.assertAlmostEqual(sum(slots) + (len(slots) - 1) * 16.0, 754.0, delta=1e-6)
             self.assertLessEqual(max(slots), 234.0)
 
-    def test_doorway_prefix_prefers_exact_reference_profile_then_legal_fallback(self):
+    def test_no_layout_prefix_helper_is_present_in_the_no_layout_baseline(self):
         stage6 = sys.modules["stage6_layout"]
-        reference = {
-            "R00": [64.0, 64.0, 64.0],
-            "R01": [64.0, 64.0, 64.0],
-            "R20": [119.0, 234.0],
-            "R21": [119.0, 234.0],
-        }
-
-        exact_prefix = stage6._build_doorway_prefix_for_segment(
-            reference,
-            rack="R",
-            segment=("R", 0, 21),
-            doorgang_column=21,
-            doorgang_height=224.0,
-            available_sizes=[64.0, 119.0, 234.0],
-        )
-        self.assertIsNotNone(exact_prefix)
-        self.assertEqual(exact_prefix, [64.0, 64.0, 64.0])
-
-        fallback = stage6._build_doorway_prefix_for_segment(
-            {"R00": [119.0, 234.0], "R01": [119.0, 234.0], "R20": [119.0, 234.0], "R21": [119.0, 234.0]},
-            rack="R",
-            segment=("R", 0, 21),
-            doorgang_column=21,
-            doorgang_height=224.0,
-            available_sizes=[64.0, 119.0, 234.0],
-        )
-        self.assertIsNotNone(fallback)
-        self.assertAlmostEqual(sum(fallback) + (len(fallback) - 1) * 16.0, 224.0, delta=1e-9)
+        self.assertFalse(hasattr(stage6, "_build_layout_prefix_for_segment"))
+        self.assertFalse(hasattr(stage6, "_enforce_layout_spanning_beam_alignment"))
 
     def test_all_active_heuristic_variants_are_exported(self):
         spec = importlib.util.spec_from_file_location("heuristic_variants", HEURISTIC_VARIANTS_PATH)
@@ -252,17 +277,17 @@ class SlotSizeCapTest(unittest.TestCase):
             )
         )
 
-    def test_doorgang_alignment_slots_and_topfill_values_are_feasible(self):
+    def test_layout_alignment_slots_and_topfill_values_are_feasible(self):
         stage6 = sys.modules["stage6_layout"]
         column_assignments = {
-            "D01": [69.0, 69.0, 59.0, 189.0, 119.0, 169.0],
-            "D02": [69.0, 69.0, 59.0, 189.0, 119.0, 169.0],
+            "D01": [69.0, 69.0, 89.0, 189.0, 119.0, 169.0],
+            "D02": [69.0, 69.0, 89.0, 189.0, 119.0, 169.0],
         }
 
-        self.assertTrue(
+        self.assertFalse(
             stage6._layout_assignments_are_feasible(
-                column_assignments,
-                ["D01", "D02"],
+                {"D01": [69.0, 69.0, 59.0, 189.0, 119.0, 169.0]},
+                ["D01"],
                 59.0,
                 [69.0, 119.0, 179.0, 234.0],
             )
@@ -272,7 +297,7 @@ class SlotSizeCapTest(unittest.TestCase):
         self.assertGreaterEqual(metadata["Adjusted_Top_Slot_cm"], 179.0)
         self.assertLessEqual(metadata["Adjusted_Top_Slot_cm"], 234.0)
 
-    def test_alignment_reduction_to_214_is_allowed_for_doorgang_compensation(self):
+    def test_alignment_reduction_to_214_is_allowed_for_layout_compensation(self):
         stage6 = sys.modules["stage6_layout"]
         assignments = {
             "J01": [119.0, 89.0, 214.0, 179.0, 89.0],

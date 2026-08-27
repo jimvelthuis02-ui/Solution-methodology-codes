@@ -48,51 +48,28 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             available_slot_sizes=[69.0, 89.0, 119.0, 179.0, 234.0],
         )
 
-        r01_lengths = [len(adjusted[f"R01C{i:02d}"]) for i in range(1, 4)]
-        r02_lengths = [len(adjusted[f"R02C{i:02d}"]) for i in range(1, 3)]
+        for rack in ("R01", "R02"):
+            values = [tuple(adjusted[f"{rack}C{i:02d}"]) for i in range(1, 4 if rack == "R01" else 3)]
+            self.assertEqual(len(set(values)), 1)
+            self.assertTrue(all(sum(list(profile)) + (len(profile) - 1) * 16.0 == 754.0 for profile in values))
 
-        self.assertTrue(len(set(r01_lengths)) == 1)
-        self.assertTrue(len(set(r02_lengths)) == 1)
-        self.assertTrue(all(value <= 234.0 for values in adjusted.values() for value in values))
-        self.assertTrue(not any(abs(value - 1.0) < 1e-9 for values in adjusted.values() for value in values))
-        self.assertTrue(
-            all(
-                sum(adjusted[f"R01C{i:02d}"]) + (len(adjusted[f"R01C{i:02d}"]) - 1) * 16.0 == 754.0
-                for i in range(1, 4)
-            )
-        )
-        self.assertTrue(
-            all(
-                sum(adjusted[f"R02C{i:02d}"]) + (len(adjusted[f"R02C{i:02d}"]) - 1) * 16.0 == 754.0
-                for i in range(1, 3)
-            )
-        )
-
-    def test_fixed_doorway_prefix_is_preserved_and_columns_reach_754(self):
+    def test_uniform_columns_are_repaired_without_prefix_memory(self):
         assignments = {
             "R01C19": [39.0, 69.0, 89.0],
             "R01C20": [39.0, 69.0, 89.0],
             "R01C21": [39.0, 69.0, 89.0],
         }
-        fixed_prefix = {
-            "R01C19": [224.0],
-            "R01C20": [224.0],
-            "R01C21": [224.0],
-        }
 
         adjusted = module._enforce_rack_row_count_consistency(
             assignments,
             available_slot_sizes=[69.0, 89.0, 119.0, 234.0],
-            fixed_prefix_by_column=fixed_prefix,
         )
 
-        for key, values in adjusted.items():
-            self.assertEqual(values[0], 224.0)
-            self.assertAlmostEqual(sum(values) + (len(values) - 1) * 16.0, 754.0, delta=1e-6)
-            self.assertLessEqual(max(values), 234.0)
-            self.assertTrue(all(int(round(value)) % 10 in (4, 9) for value in values))
+        values = [tuple(adjusted[key]) for key in sorted(adjusted)]
+        self.assertEqual(len(set(values)), 1)
+        self.assertAlmostEqual(sum(adjusted["R01C19"]) + (len(adjusted["R01C19"]) - 1) * 16.0, 754.0, delta=1e-6)
 
-    def test_keeps_the_highest_feasible_row_count_when_equalizing_rack(self):
+    def test_keeps_the_same_uniform_profile_for_all_columns_in_a_rack(self):
         assignments = {
             "K00": [69.0, 69.0, 69.0, 69.0, 69.0],
             "K01": [69.0, 69.0, 69.0, 69.0, 69.0],
@@ -105,12 +82,11 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             available_slot_sizes=[69.0, 119.0, 234.0],
         )
 
-        lengths = {key: len(value) for key, value in adjusted.items()}
-        self.assertEqual(len(set(lengths.values())), 1)
-        self.assertEqual(max(lengths.values()), 4)
-        self.assertTrue(all(length == 4 for length in lengths.values()))
+        k_values = [tuple(adjusted[key]) for key in sorted(adjusted) if key.startswith("K")]
+        self.assertEqual(len(set(k_values)), 1)
+        self.assertTrue(all(sum(profile) + (len(profile) - 1) * 16.0 == 754.0 for profile in k_values))
 
-    def test_rejects_inconsistent_rack_row_levels_even_with_fixed_prefix_columns(self):
+    def test_rejects_inconsistent_rack_row_levels_even_without_prefix_memory(self):
         assignments = {
             "A00": [64.0, 64.0, 119.0, 234.0, 234.0],
             "A01": [64.0, 64.0, 119.0, 234.0, 234.0],
@@ -130,24 +106,24 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             )
         )
 
-    def test_ignore_doorgang_relaxes_fixed_prefixes(self):
-        original = os.environ.get("PIPELINE_IGNORE_DOORGANG")
+    def test_ignore_layout_keeps_non_prefix_layout_rules(self):
+        original = os.environ.get("PIPELINE_IGNORE_LAYOUT")
         try:
-            os.environ["PIPELINE_IGNORE_DOORGANG"] = "1"
-            self.assertTrue(module.common._ignore_doorgang_constraints())
-            self.assertEqual(module.common._fixed_doorgang_slot_by_column([]), {})
-            self.assertEqual(module.common._doorgang_thresholds_by_rack([]), {})
+            os.environ["PIPELINE_IGNORE_LAYOUT"] = "1"
+            self.assertTrue(module.common._ignore_layout_constraints())
+            self.assertEqual(module.common._fixed_layout_slot_by_column([]), {})
+            self.assertEqual(module.common._layout_thresholds_by_rack([]), {})
             self.assertEqual(
-                module.common._exclude_fixed_doorgang_slot_counts({69: 100, 224: 4, 229: 6, 234: 1}),
-                {69: 100},
+                module.common._exclude_fixed_layout_slot_counts({69: 100, 224: 4, 229: 6, 234: 1}),
+                {69: 100, 224: 4, 229: 6, 234: 1},
             )
         finally:
             if original is None:
-                os.environ.pop("PIPELINE_IGNORE_DOORGANG", None)
+                os.environ.pop("PIPELINE_IGNORE_LAYOUT", None)
             else:
-                os.environ["PIPELINE_IGNORE_DOORGANG"] = original
+                os.environ["PIPELINE_IGNORE_LAYOUT"] = original
 
-    def test_allows_same_row_count_with_different_slot_orders_in_same_rack(self):
+    def test_uniform_rack_profiles_are_identical_across_columns(self):
         assignments = {
             "K00": [234.0, 234.0, 149.0, 89.0],
             "K01": [234.0, 234.0, 119.0, 119.0],
@@ -163,7 +139,24 @@ class RackRowCountConsistencyTest(unittest.TestCase):
         self.assertEqual(len(set(lengths.values())), 1)
         self.assertEqual(max(lengths.values()), 4)
         self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 <= 754.0 for values in adjusted.values()))
-        self.assertTrue(adjusted["K00"] != adjusted["K01"])
+        self.assertEqual(adjusted["K00"], adjusted["K01"])
+        self.assertEqual(adjusted["K01"], adjusted["K02"])
+
+    def test_deficit_coverage_baseline_assigns_uniform_rack_profiles_without_repair(self):
+        feasible_profiles = module._generate_feasible_rack_profiles([69.0, 119.0, 179.0, 234.0])
+        self.assertTrue(feasible_profiles)
+        self.assertTrue(any(profile for profile in feasible_profiles if sum(profile) + (len(profile) - 1) * 16.0 == 754.0))
+
+        column_assignments = module._build_deficit_coverage_layout(
+            rack_columns=["R01C01", "R01C02", "R01C03", "R02C01", "R02C02", "R02C03"],
+            required_counts={69.0: 4, 119.0: 2, 179.0: 2, 234.0: 1},
+            config_slot_sizes=[69.0, 119.0, 179.0, 234.0],
+        )
+
+        self.assertEqual(set(column_assignments["R01C01"]), set(column_assignments["R01C02"]))
+        self.assertEqual(column_assignments["R01C01"], column_assignments["R01C02"])
+        self.assertEqual(column_assignments["R01C02"], column_assignments["R01C03"])
+        self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 == 754.0 for values in column_assignments.values()))
 
     def test_accepts_legal_underfilled_columns_within_physical_limit(self):
         valid = {
@@ -210,6 +203,22 @@ class RackRowCountConsistencyTest(unittest.TestCase):
                 ["R01C01", "R01C02", "R01C03"],
                 69.0,
                 [69.0, 89.0, 119.0, 179.0, 234.0],
+            )
+        )
+
+    def test_rejects_physical_layouts_missing_required_minimum_slot_counts(self):
+        layout = {
+            "A01": [64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 114.0],
+            "A02": [64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 114.0],
+        }
+
+        self.assertFalse(
+            module._layout_assignments_are_feasible(
+                layout,
+                ["A01", "A02"],
+                64.0,
+                [64.0, 119.0, 234.0],
+                minimum_required_counts={64.0: 16, 119.0: 2},
             )
         )
 

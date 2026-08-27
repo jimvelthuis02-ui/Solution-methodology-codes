@@ -222,42 +222,24 @@ def _make_greedy_allocate_wrapper(stage6: Any, greedy_helpers: Any):
         call_index += 1
 
         config_slot_sizes = {int(round(size)) for size, count in target_exact_counts.items() if int(count) > 0}
-        anchor_prefix = greedy_helpers._build_anchor_prefix_by_column(config_slot_sizes, column_keys, rows_by_column)
-
-        anchor_counts = Counter()
-        for values in anchor_prefix.values():
-            for value in values:
-                anchor_counts[int(round(value))] += 1
-
-        remaining_counts: dict[float, int] = {}
-        for size, required in target_exact_counts.items():
-            used = anchor_counts.get(int(round(size)), 0)
-            remaining_counts[size] = max(int(required) - used, 0)
-
-        context = dict(style_context or {})
-        existing_fixed = context.get("fixed_prefix_by_column", {})
-        context["fixed_prefix_by_column"] = greedy_helpers._merge_fixed_prefixes(existing_fixed, anchor_prefix)
-
         anchor_records.append(
             {
                 "Config_ID": config_id,
                 "Config_Slot_Sizes": common._encode_excel_text(",".join(str(size) for size in sorted(config_slot_sizes))),
-                "Anchor_Fixed_Slot_Distribution": "|".join(
-                    f"{size}:{count}" for size, count in sorted(anchor_counts.items())
-                ),
-                "Anchor_Fixed_Slot_Count": str(sum(anchor_counts.values())),
-                "Anchor_Fixed_Columns_Count": str(len(anchor_prefix)),
+                "Anchor_Slot_Distribution": "",
+                "Anchor_Slot_Count": "0",
+                "Anchor_Columns_Count": "0",
                 "Remaining_Required_Counts_After_Anchoring": "|".join(
-                    f"{int(size)}:{count}" for size, count in sorted(remaining_counts.items())
+                    f"{int(size)}:{count}" for size, count in sorted(target_exact_counts.items())
                 ),
             }
         )
 
         return original_allocate(
-            target_exact_counts=remaining_counts,
+            target_exact_counts=target_exact_counts,
             column_keys=column_keys,
             style=style,
-            style_context=context,
+            style_context=style_context,
         )
 
     return original_allocate, _allocate_with_greedy_anchor, anchor_records
@@ -271,9 +253,8 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
     def _wrapped_improvement(
         column_assignments: dict[str, list[float]],
         layout_columns: list[str],
-        fixed_prefix_by_column: dict[str, list[float]],
         beam_segments: set[tuple[str, int, int]],
-        doorgang_thresholds_by_rack: dict[str, tuple[int, float]],
+        layout_thresholds_by_rack: dict[str, tuple[int, float]],
         smallest_config_slot: float,
         layout_id: str,
         config_id: str,
@@ -290,25 +271,16 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
                 column_assignments=column_assignments,
                 segments=beam_segments,
                 baseline_beam_heights=current_beam_heights,
-                fixed_prefix_by_column=fixed_prefix_by_column,
                 configuration_slot_sizes=constructive_slot_sizes,
             )
             working_assignments = stage6._enforce_segment_uniform_slot_profiles(
                 working_assignments,
                 beam_segments,
-                fixed_prefix_by_column=fixed_prefix_by_column,
-                doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+                layout_thresholds_by_rack=layout_thresholds_by_rack,
             )
-            working_assignments = stage6._enforce_rack_row_count_consistency(
+            working_assignments = stage6._build_uniform_rack_columns(
                 working_assignments,
                 available_slot_sizes=constructive_slot_sizes,
-                fixed_prefix_by_column=fixed_prefix_by_column,
-            )
-            working_assignments, _doorgang_conversions = stage6._enforce_doorgang_spanning_beam_alignment(
-                working_assignments,
-                beam_segments,
-                doorgang_thresholds_by_rack,
-                fixed_prefix_by_column=fixed_prefix_by_column,
             )
             if smallest_config_slot > 0.0:
                 working_assignments = stage6._enforce_min_locations_per_column(
@@ -326,7 +298,7 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
             config_id,
             style,
             beam_segments,
-            doorgang_thresholds_by_rack,
+            layout_thresholds_by_rack,
             current_beam_units,
             current_beam_heights,
             current_beam_units_by_column,
@@ -337,9 +309,8 @@ def _make_improvement_wrapper(stage6: Any, variant: dict[str, object], impact_ro
             final_assignments, reloc_before_search, reloc_after_search, accepted_search_moves = original_local_search(
                 column_assignments=working_assignments,
                 layout_columns=layout_columns,
-                fixed_prefix_by_column=fixed_prefix_by_column,
                 beam_segments=beam_segments,
-                doorgang_thresholds_by_rack=doorgang_thresholds_by_rack,
+                layout_thresholds_by_rack=layout_thresholds_by_rack,
                 smallest_config_slot=smallest_config_slot,
                 layout_id=layout_id,
                 config_id=config_id,
@@ -405,13 +376,13 @@ def run_stage6_variant(variants_root: Path, variant: dict[str, object], all_impa
 
     if greedy_anchor_rows:
         _write_csv(
-            output_dir / "Greedy_Fixed_Slots_Summary.csv",
+            output_dir / "Greedy_Anchor_Slots_Summary.csv",
             [
                 "Config_ID",
                 "Config_Slot_Sizes",
-                "Anchor_Fixed_Slot_Distribution",
-                "Anchor_Fixed_Slot_Count",
-                "Anchor_Fixed_Columns_Count",
+                "Anchor_Slot_Distribution",
+                "Anchor_Slot_Count",
+                "Anchor_Columns_Count",
                 "Remaining_Required_Counts_After_Anchoring",
             ],
             greedy_anchor_rows,

@@ -47,7 +47,7 @@ def _eligible(row: dict[str, str]) -> bool:
     # Exclude non-storage lanes and zero-height items from scenario generation.
     item_height = _to_float(row.get(ITEM_HEIGHT_COLUMN))
     location_type = str(row.get(LOCATION_TYPE_COLUMN, "")).strip().lower()
-    return not (item_height == 0.0 or location_type == "doorgang")
+    return not (item_height == 0.0 or location_type == "layout")
 
 
 def generate_weighted_delta_scenarios() -> Path:

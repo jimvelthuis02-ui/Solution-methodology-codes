@@ -290,7 +290,7 @@ def build_beam_grid_map() -> Path:
 
                 # Emit one beam object per contiguous supported run so span labels
                 # reflect the real physical span (for example 2-column instead of
-                # full 3-column when blocked by doorgang/split constraints).
+                # full 3-column when blocked by layout/split constraints).
                 contiguous_runs: list[tuple[int, int]] = []
                 run_start = supported_cols[0]
                 run_end = supported_cols[0]

@@ -146,8 +146,8 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 or layout.get("Layout_Slot_Size_Distribution", "")
             )
         )
-        doorgang_alignment_allowance = common._to_int_default(
-            layout.get("Doorgang_Usable_Alignment_Conversions"),
+        layout_alignment_allowance = common._to_int_default(
+            layout.get("Layout_Usable_Alignment_Conversions"),
             0,
         )
 
@@ -166,7 +166,7 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 available = _available_at_or_above(layout_slot_counts, size)
                 deficit = required - available
                 if deficit > 0:
-                    if size == largest_required_size and deficit <= doorgang_alignment_allowance:
+                    if size == largest_required_size and deficit <= layout_alignment_allowance:
                         continue
                     slot_coverage_pass = False
                     break

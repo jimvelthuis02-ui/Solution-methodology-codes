@@ -70,7 +70,7 @@ def _legal_slot_profile(slot_sizes: list[float]) -> bool:
         reachable[lower_count] = sums
         for lower_sum in sums:
             support_below_top = lower_sum + 16 * max(lower_count - 1, 0)
-            if not (504.0 <= support_below_top <= 520.0 + 1e-9):
+            if support_below_top < 504.0:
                 continue
             top_slot = 754 - lower_sum - 16 * lower_count
             if top_slot <= 0:

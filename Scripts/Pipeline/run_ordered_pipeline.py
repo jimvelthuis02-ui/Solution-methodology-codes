@@ -209,18 +209,18 @@ def _slot_size_variable_name(slot_size: float) -> str:
     return f"x_{int(round(slot_size))}"
 
 
-FIXED_DOORGANG_SLOT_COUNTS = {
-    224: 4,
-    229: 6,
-    234: 1,
-}
+FIXED_LAYOUT_SLOT_COUNTS: dict[int, int] = {}
 MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
-def _ignore_doorgang_constraints() -> bool:
-    """Allow a relaxed baseline run that excludes fixed doorgang locations entirely."""
-    value = str(os.getenv("PIPELINE_IGNORE_DOORGANG", "0")).strip().lower()
-    return value not in {"", "0", "false", "no", "off"}
+def _ignore_layout_constraints() -> bool:
+    """The active baseline is the no-layout model."""
+    return True
+
+
+def _should_ignore_layout_for_layout_generation() -> bool:
+    """The default pipeline path does not include layout constraints."""
+    return True
 
 
 def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> float:
@@ -232,15 +232,13 @@ def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> fl
     return min(slot_value, capped_max)
 
 
-def _fixed_doorgang_location_total() -> int:
-    if _ignore_doorgang_constraints():
-        return 0
-    return sum(FIXED_DOORGANG_SLOT_COUNTS.values())
+def _fixed_layout_location_total() -> int:
+    return 0
 
 
 def _explicit_occupied_target_total() -> int:
     # The 890 target is the working occupied-location demand. Physical fixed
-    # doorway slots (including the 234 cm slot) remain in the layout but are
+    # layout slots (including the 234 cm slot) remain in the layout but are
     # excluded from the storage-demand total used for matching this target.
     return max(int(BASE_OCCUPIED_LOCATIONS_COUNT), 0)
 
@@ -289,18 +287,13 @@ def _enforce_occupied_location_target(
     return dict(sorted(normalized.items()))
 
 
-def _exclude_fixed_doorgang_slot_counts(counts: dict[int, int]) -> dict[int, int]:
-    # When the relaxed baseline is active, the fixed doorgang slots are not part of
-    # the active layout demand and should not penalize the configuration.
-    adjusted = {size: max(int(count), 0) for size, count in counts.items()}
-    if _ignore_doorgang_constraints():
-        for size in FIXED_DOORGANG_SLOT_COUNTS:
-            adjusted.pop(size, None)
-        return {size: count for size, count in sorted(adjusted.items()) if count > 0}
-
-    for size, doorway_count in FIXED_DOORGANG_SLOT_COUNTS.items():
-        adjusted[size] = max(adjusted.get(size, 0) - doorway_count, 0)
-    return {size: count for size, count in sorted(adjusted.items()) if count > 0}
+def _exclude_fixed_layout_slot_counts(counts: dict[int, int]) -> dict[int, int]:
+    # The active baseline does not carry layout slots in the demand model.
+    return {
+        size: max(int(count), 0)
+        for size, count in sorted(counts.items())
+        if max(int(count), 0) > 0
+    }
 
 
 def _is_split_location(location: str) -> bool:
@@ -316,7 +309,7 @@ def _build_layout_columns(prepared_rows: list[dict[str, str]]) -> list[str]:
     columns: set[str] = set()
     for row in prepared_rows:
         location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type == "doorgang":
+        if location_type == "layout":
             continue
         location = str(row.get("Location", "")).strip()
         if location and _is_split_location(location):
@@ -328,15 +321,15 @@ def _build_layout_columns(prepared_rows: list[dict[str, str]]) -> list[str]:
     return sorted(columns)
 
 
-def _doorgang_thresholds_by_rack(prepared_rows: list[dict[str, str]]) -> dict[str, tuple[int, float]]:
-    # Capture the physical height of the doorgang location per rack.
-    if _ignore_doorgang_constraints():
+def _layout_thresholds_by_rack(prepared_rows: list[dict[str, str]]) -> dict[str, tuple[int, float]]:
+    # Capture the physical height of the layout location per rack.
+    if _ignore_layout_constraints():
         return {}
 
     thresholds: dict[str, tuple[int, float]] = {}
     for row in prepared_rows:
         location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type != "doorgang":
+        if location_type != "layout":
             continue
 
         rack = str(row.get("Rack", "")).strip()
@@ -348,15 +341,15 @@ def _doorgang_thresholds_by_rack(prepared_rows: list[dict[str, str]]) -> dict[st
     return thresholds
 
 
-def _fixed_doorgang_slot_by_column(prepared_rows: list[dict[str, str]]) -> dict[str, float]:
-    # Preserve physical doorgang location height as fixed row content per column.
-    if _ignore_doorgang_constraints():
+def _fixed_layout_slot_by_column(prepared_rows: list[dict[str, str]]) -> dict[str, float]:
+    # Preserve physical layout location height as fixed row content per column.
+    if _ignore_layout_constraints():
         return {}
 
     fixed_slots: dict[str, float] = {}
     for row in prepared_rows:
         location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type != "doorgang":
+        if location_type != "layout":
             continue
 
         rack = str(row.get("Rack", "")).strip()
@@ -374,12 +367,12 @@ def _build_generated_layout_location_rows(
     style: str,
     column_assignments: dict[str, list[float]],
     segments: set[tuple[str, int, int]] | None = None,
-    doorgang_thresholds_by_rack: dict[str, tuple[int, float]] | None = None,
+    layout_thresholds_by_rack: dict[str, tuple[int, float]] | None = None,
 ) -> list[dict[str, str]]:
     # Expand column-level slot assignments into synthetic location rows.
     location_rows: list[dict[str, str]] = []
     segment_by_column: dict[str, tuple[str, int, int]] = {}
-    doorgang_thresholds_by_rack = doorgang_thresholds_by_rack or {}
+    layout_thresholds_by_rack = layout_thresholds_by_rack or {}
 
     if segments:
         for rack, c0, c1 in segments:
@@ -390,7 +383,6 @@ def _build_generated_layout_location_rows(
         rack = column_key[0]
         column = column_key[1:]
         segment = segment_by_column.get(column_key)
-        threshold = doorgang_thresholds_by_rack.get(rack)
         ordered_slots = list(column_assignments[column_key])
         cumulative_height = 0.0
         for row_index, slot_size in enumerate(ordered_slots, start=1):
@@ -409,25 +401,7 @@ def _build_generated_layout_location_rows(
                 beam_bottom = cumulative_height + (beam_count_below * BEAM_HEIGHT)
                 beam_top = beam_bottom + BEAM_HEIGHT
                 beam_height_range = f"{beam_bottom:.0f}-{beam_top:.0f}"
-                if threshold is not None:
-                    doorgang_column, doorgang_height = threshold
-                    column_num = _to_int_default(column, 0)
-                    beam_elevation = beam_bottom
-                    # Below the doorgang height, the left-adjacent pair must be bridged with
-                    # a 2-column beam, while the doorgang column itself has no beam.
-                    # Once the row height exceeds the doorgang threshold, the full
-                    # 3-column span can resume.
-                    if seg_c1 == doorgang_column and beam_elevation < doorgang_height:
-                        if column_num in {doorgang_column - 2, doorgang_column - 1}:
-                            beam_coordinate = f"{seg_rack}[{doorgang_column - 2:02d}-{doorgang_column - 1:02d}]:{row_index:02d}"
-                        elif column_num == doorgang_column:
-                            beam_coordinate = ""
-                        else:
-                            beam_coordinate = f"{seg_rack}[{seg_c0:02d}-{seg_c1:02d}]:{row_index:02d}"
-                    else:
-                        beam_coordinate = f"{seg_rack}[{seg_c0:02d}-{seg_c1:02d}]:{row_index:02d}"
-                else:
-                    beam_coordinate = f"{seg_rack}[{seg_c0:02d}-{seg_c1:02d}]:{row_index:02d}"
+                beam_coordinate = f"{seg_rack}[{seg_c0:02d}-{seg_c1:02d}]:{row_index:02d}"
 
             location_rows.append(
                 {
@@ -456,38 +430,15 @@ def _allocate_layout_by_column(
     style: str,
     style_context: dict[str, object] | None = None,
 ) -> tuple[bool, dict[float, int], dict[str, float], dict[str, list[float]], str, dict[str, float]]:
-    """Allocate exact slot-size demand using a feasibility-first profile generator.
-
-    This replaces the old largest-first greedy fill with a legal profile search that
-    enumerates physically valid column completions to the full 754 cm limit, allowing
-    the top slot to absorb the remaining gap up to the 234 cm cap before a column is
-    considered feasible. The outcome is still a column assignment dictionary, but the
-    language of construction moves from greedy packing to explicit legal profile choice.
-    """
+    """Allocate exact slot-size demand using a feasibility-first profile generator."""
     if not target_exact_counts:
         return True, {}, {}, {}, "No exact counts to allocate.", {}
-
-    fixed_prefix_raw = style_context.get("fixed_prefix_by_column", {}) if isinstance(style_context, dict) else {}
-    fixed_prefix_by_column: dict[str, list[float]] = {}
-    if isinstance(fixed_prefix_raw, dict):
-        for column_key, values in fixed_prefix_raw.items():
-            if values is None:
-                continue
-            if isinstance(values, (list, tuple)):
-                fixed_prefix_by_column[str(column_key)] = [float(value) for value in values]
 
     available_sizes = sorted({
         float(size)
         for size in target_exact_counts.keys()
         if float(size) > 0.0
     })
-    if not available_sizes:
-        available_sizes = sorted({
-            float(size)
-            for values in fixed_prefix_by_column.values()
-            for size in values
-            if float(size) > 0.0
-        })
 
     legal_pool = sorted({
         int(round(float(size)))
@@ -499,24 +450,16 @@ def _allocate_layout_by_column(
     if not legal_pool:
         legal_pool = [int(round(float(max(available_sizes or [1.0], default=1.0))))]
 
-    def _candidate_profile_for_column(column_key: str, prefix: list[float] | None = None) -> list[list[float]]:
-        fixed_prefix = [float(value) for value in (fixed_prefix_by_column.get(column_key, []) if isinstance(fixed_prefix_by_column, dict) else [])]
-        if prefix is not None:
-            fixed_prefix = [float(value) for value in prefix]
-        if not fixed_prefix and column_key in (fixed_prefix_by_column if isinstance(fixed_prefix_by_column, dict) else {}):
-            fixed_prefix = [float(value) for value in (fixed_prefix_by_column if isinstance(fixed_prefix_by_column, dict) else {}).get(column_key, [])]
-
-        anchored_total = sum(float(value) for value in fixed_prefix)
-        min_rows = max(len(fixed_prefix), 1)
+    def _candidate_profile_for_column() -> list[list[float]]:
+        min_rows = 1
         max_rows = min(12, max(min_rows, 6))
         results: list[list[float]] = []
 
         for row_count in range(min_rows, max_rows + 1):
             base_target = MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(row_count - 1, MIN_BEAMS_PER_COLUMN)
-            required_remaining = base_target - anchored_total
-            if required_remaining < 0.0:
+            if base_target <= 0.0:
                 continue
-            remaining_slots = max(row_count - len(fixed_prefix), 1)
+            remaining_slots = row_count
 
             def _build_sequences(total_remaining: float, slots_left: int, prefix_values: list[float], last_value: float) -> None:
                 if slots_left == 0:
@@ -551,7 +494,7 @@ def _allocate_layout_by_column(
                         float(legal_size),
                     )
 
-            _build_sequences(required_remaining, remaining_slots, list(fixed_prefix), float(fixed_prefix[-1]) if fixed_prefix else 0.0)
+            _build_sequences(base_target, remaining_slots, [], 0.0)
 
         deduped: list[list[float]] = []
         seen: set[tuple[float, ...]] = set()
@@ -568,15 +511,8 @@ def _allocate_layout_by_column(
     assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
     remaining_counts = {float(size): int(count) for size, count in target_exact_counts.items()}
 
-    for column_key in column_keys:
-        if column_key in fixed_prefix_by_column:
-            prefix = [float(value) for value in list(fixed_prefix_by_column[column_key])]
-            assignments_by_column[column_key] = prefix
-            used_height_by_column[column_key] = sum(prefix)
     for column_key in list(column_keys):
-        if column_key in assignments_by_column:
-            continue
-        candidate_profiles = _candidate_profile_for_column(column_key)
+        candidate_profiles = _candidate_profile_for_column()
         if not candidate_profiles:
             continue
         best_profile = None
@@ -683,7 +619,7 @@ def _beam_unit_columns(beam_unit: str) -> set[str]:
 
 def _beam_units_by_column(rows: list[dict[str, str]]) -> dict[str, set[str]]:
     # Build explicit beam-unit membership per column from row-level coordinates.
-    # This preserves partial spans (for example around doorgang) for per-column
+    # This preserves partial spans (for example around layout) for per-column
     # relocation/add/remove accounting.
     units_by_column: dict[str, set[str]] = defaultdict(set)
     for row in rows:
@@ -783,7 +719,7 @@ def _build_current_beam_units_and_segments(
         segments.add((rack, c0, c1))
 
     # Prefer structural segments from prepared rows so row-level partial beam spans
-    # (for example near doorgang) do not overwrite the rack's physical segmentation.
+    # (for example near layout) do not overwrite the rack's physical segmentation.
     if prepared_rows is not None:
         rack_columns: dict[str, set[int]] = defaultdict(set)
         for row in prepared_rows:
@@ -843,7 +779,7 @@ def _build_proposed_beam_units_from_layout_rows(
     segments: set[tuple[str, int, int]],
 ) -> tuple[set[str], dict[str, float]]:
     # Infer proposed beam units directly from explicit generated beam coordinates.
-    # This preserves partial spans around doorgang/split areas instead of collapsing
+    # This preserves partial spans around layout/split areas instead of collapsing
     # each segment to the minimum common row depth.
     proposed_units: set[str] = set()
     proposed_heights_samples: dict[str, list[float]] = defaultdict(list)
@@ -1002,7 +938,6 @@ def _constructive_beam_preservation_pass(
     column_assignments: dict[str, list[float]],
     segments: set[tuple[str, int, int]],
     baseline_beam_heights: dict[str, float],
-    fixed_prefix_by_column: dict[str, list[float]] | None = None,
     configuration_slot_sizes: list[float] | None = None,
 ) -> dict[str, list[float]]:
     """Build segment-wide slot templates from exact original beam-height matches."""
@@ -1021,7 +956,6 @@ def _constructive_beam_preservation_pass(
         rack, c0, c1, _level = parsed
         segment_targets[(rack, c0, c1)].append(int(round(float(height))))
 
-    fixed_prefix_by_column = fixed_prefix_by_column or {}
     optimized = {key: [float(value) for value in values] for key, values in column_assignments.items()}
 
     for segment in sorted(segments):
@@ -1037,13 +971,10 @@ def _constructive_beam_preservation_pass(
             max(len(optimized[key]) for key in available_columns),
             len(targets) + 1,
         )
-        fixed_prefix = [float(value) for value in fixed_prefix_by_column.get(available_columns[0], [])]
-        fixed_height = int(round(sum(fixed_prefix)))
-        adjusted_targets = [target - fixed_height - 16 * len(fixed_prefix) for target in targets if target > fixed_height]
 
         candidate_by_target = {
             target: _exact_beam_height_sequences(slot_sizes, target, max_slots)
-            for target in adjusted_targets
+            for target in targets
         }
         candidate_sequences = sorted({sequence for sequences in candidate_by_target.values() for sequence in sequences})
         if not candidate_sequences:
@@ -1055,7 +986,7 @@ def _constructive_beam_preservation_pass(
             for index, slot_size in enumerate(sequence):
                 prefix_height += slot_size
                 candidate_height = prefix_height + 16 * index
-                if candidate_height in adjusted_targets:
+                if candidate_height in targets:
                     matched_targets += 1
             return matched_targets, -len(sequence), sequence
 
@@ -1064,13 +995,7 @@ def _constructive_beam_preservation_pass(
             continue
 
         for column_key in available_columns:
-            existing = optimized[column_key]
-            prefix = [float(value) for value in fixed_prefix_by_column.get(column_key, [])]
-            movable_count = max(len(existing) - len(prefix), 0)
-            template: list[float] = [float(value) for value in best_sequence[:movable_count]]
-            if len(template) < movable_count:
-                template.extend(existing[len(prefix) + len(template) : len(prefix) + movable_count])
-            optimized[column_key] = prefix + [float(value) for value in template]
+            optimized[column_key] = [float(value) for value in best_sequence[: len(optimized[column_key])]]
 
     return optimized
 
@@ -1079,14 +1004,11 @@ def _optimize_column_slot_order_for_beam_preservation(
     column_assignments: dict[str, list[float]],
     segments: set[tuple[str, int, int]],
     baseline_beam_heights: dict[str, float],
-    fixed_prefix_by_column: dict[str, list[float]] | None = None,
 ) -> dict[str, list[float]]:
-    # Backward-compatible wrapper around the constructive beam-preservation pass.
     return _constructive_beam_preservation_pass(
         column_assignments=column_assignments,
         segments=segments,
         baseline_beam_heights=baseline_beam_heights,
-        fixed_prefix_by_column=fixed_prefix_by_column,
     )
 
 
@@ -1192,7 +1114,7 @@ def _initial_beam_grid_counts(
     baseline_grids = 0
     for row in prepared_rows or []:
         location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type == "doorgang":
+        if location_type == "layout":
             continue
         location = str(row.get("Location", "")).strip()
         row_label = str(row.get("Row", "")).strip().lower()
@@ -1249,7 +1171,10 @@ ORDERED_SCRIPTS = [
 
 
 def _include_heuristic_scripts() -> bool:
-    value = str(os.getenv("PIPELINE_INCLUDE_HEURISTICS", "1")).strip().lower()
+    # The active execution path is the strict legal layout flow. Greedy and
+    # heuristic variant scripts remain available for manual/diagnostic runs, but
+    # they must not override the normal pipeline behavior by default.
+    value = str(os.getenv("PIPELINE_INCLUDE_HEURISTICS", "0")).strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 
