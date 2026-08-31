@@ -17,12 +17,11 @@ MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
 def _legal_slot_profile(slot_sizes: list[float]) -> bool:
-    """Return True if some legal column can be built from the family.
+    """Return True only when the configured family itself can support a legal physical stack.
 
-    The candidate family may be reused in any order, and the final top slot may be a
-    nearby legal value within +/-30 cm of an existing family value. The exact 754 cm
-    total must still be reached, and the beam directly beneath the top slot must land in
-    the required 504-520 cm support band.
+    Legacy heuristic codepaths that expanded each configured slot size by a +/-30 cm envelope are
+    intentionally not used here. Lower rows must remain on the actual configured family; only the
+    final top slot may legally complete the remaining physical height.
     """
     if not slot_sizes:
         return False
@@ -44,31 +43,20 @@ def _legal_slot_profile(slot_sizes: list[float]) -> bool:
     if not family_values:
         return False
 
-    legal_family: set[int] = set()
-    for base_value in family_values:
-        for delta in range(-30, 31):
-            candidate = base_value + delta
-            if candidate < 4:
-                continue
-            if candidate > int(round(MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
-                continue
-            if candidate % 10 in (4, 9):
-                legal_family.add(candidate)
-
-    if not legal_family:
+    lower_bounds = set(family_values)
+    if not lower_bounds:
         return False
 
-    reachable: dict[int, set[int]] = {0: {0}}
-    max_count = 60
-    for lower_count in range(1, max_count + 1):
-        sums = set()
-        for partial_sum in reachable.get(lower_count - 1, set()):
-            for value in sorted(legal_family):
-                sums.add(partial_sum + value)
-        if not sums:
-            continue
-        reachable[lower_count] = sums
-        for lower_sum in sums:
+    for lower_count in range(1, 13):
+        reachable: set[int] = {0}
+        for _ in range(lower_count):
+            next_reachable: set[int] = set()
+            for partial_sum in reachable:
+                for value in family_values:
+                    next_reachable.add(partial_sum + value)
+            reachable = next_reachable
+
+        for lower_sum in reachable:
             support_below_top = lower_sum + 16 * max(lower_count - 1, 0)
             if support_below_top < 504.0:
                 continue
@@ -79,7 +67,8 @@ def _legal_slot_profile(slot_sizes: list[float]) -> bool:
                 continue
             if top_slot % 10 not in (4, 9):
                 continue
-            return True
+            if top_slot >= min(family_values):
+                return True
 
     return False
 

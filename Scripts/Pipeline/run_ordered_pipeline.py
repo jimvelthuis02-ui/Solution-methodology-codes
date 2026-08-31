@@ -214,13 +214,13 @@ MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
 def _ignore_layout_constraints() -> bool:
-    """The active baseline is the no-layout model."""
-    return True
+    """The active baseline should respect actual layout constraints."""
+    return False
 
 
 def _should_ignore_layout_for_layout_generation() -> bool:
-    """The default pipeline path does not include layout constraints."""
-    return True
+    """The default pipeline path includes the real layout-generation constraints."""
+    return False
 
 
 def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> float:

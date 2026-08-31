@@ -33,12 +33,12 @@ class SlotSizeCapTest(unittest.TestCase):
         self.assertNotIn("Capacity_Margin", dropped)
         self.assertNotIn("Percentage_Rack_Height_Used", dropped)
 
-    def test_layout_generation_defaults_to_no_layout_when_env_is_unset(self):
+    def test_layout_generation_respects_layout_constraints_when_env_is_unset(self):
         stage6 = sys.modules["stage6_layout"]
         original = os.environ.get("PIPELINE_IGNORE_LAYOUT")
         try:
             os.environ.pop("PIPELINE_IGNORE_LAYOUT", None)
-            self.assertTrue(stage6.common._should_ignore_layout_for_layout_generation())
+            self.assertFalse(stage6.common._should_ignore_layout_for_layout_generation())
         finally:
             if original is None:
                 os.environ.pop("PIPELINE_IGNORE_LAYOUT", None)
@@ -215,6 +215,83 @@ class SlotSizeCapTest(unittest.TestCase):
             self.assertTrue(all(int(round(value)) >= 69 for value in slots))
             self.assertTrue(all(int(round(value)) % 10 in (4, 9) for value in slots))
 
+    def test_valid_legal_topfill_profiles_are_not_rewritten_to_synthetic_fill(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "R01C01": [64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 114.0],
+            "R01C02": [64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 114.0],
+        }
+
+        refined = stage6._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[64.0, 119.0, 234.0],
+        )
+
+        for slots in refined.values():
+            self.assertEqual(slots, [64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 114.0])
+
+    def test_profile_choice_prefers_rare_required_sizes_over_extra_64s(self):
+        stage6 = sys.modules["stage6_layout"]
+        remaining = {64.0: 411, 119.0: 315, 234.0: 164}
+        profiles = stage6._generate_feasible_rack_profiles([64.0, 119.0, 234.0])
+
+        ranked = sorted(
+            profiles,
+            key=lambda profile: stage6._profile_requirement_priority(profile, remaining),
+            reverse=True,
+        )
+
+        self.assertEqual(ranked[0], [119.0, 119.0, 234.0, 234.0])
+
+    def test_rack_consistency_preserves_exact_minimum_counts(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "A00": [119.0, 119.0, 234.0, 234.0],
+            "A01": [119.0, 119.0, 234.0, 234.0],
+            "A02": [119.0, 119.0, 234.0, 234.0],
+        }
+        minimum_required_counts = {64.0: 0, 119.0: 6, 234.0: 6}
+
+        refined = stage6._enforce_rack_row_count_consistency(
+            assignments,
+            available_slot_sizes=[64.0, 119.0, 234.0],
+            minimum_required_counts=minimum_required_counts,
+        )
+
+        total = {}
+        for slots in refined.values():
+            for value in slots:
+                total[int(round(float(value)))] = total.get(int(round(float(value))), 0) + 1
+        self.assertGreaterEqual(total.get(119, 0), 6)
+        self.assertGreaterEqual(total.get(234, 0), 6)
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                refined,
+                list(refined),
+                64.0,
+                [64.0, 119.0, 234.0],
+                minimum_required_counts=minimum_required_counts,
+            )
+        )
+
+    def test_layout_exact_minimum_counts_are_checked_after_combining_the_full_layout(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = {
+            "A00": [64.0, 64.0, 64.0, 64.0, 64.0],
+            "A01": [119.0, 119.0, 119.0, 119.0, 119.0],
+        }
+        minimum_required_counts = {64.0: 3, 119.0: 4}
+
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                assignments,
+                ["A00", "A01"],
+                64.0,
+                [64.0, 119.0],
+                minimum_required_counts=minimum_required_counts,
+            )
+        )
+
     def test_illegal_small_slot_values_are_removed_from_minimum_fill_guard(self):
         stage6 = sys.modules["stage6_layout"]
         assignments = {
@@ -248,6 +325,14 @@ class SlotSizeCapTest(unittest.TestCase):
             )
         )
 
+    def test_generated_profiles_place_legal_topfill_at_the_end_of_the_column(self):
+        stage6 = sys.modules["stage6_layout"]
+        profiles = stage6._generate_feasible_rack_profiles([64.0, 119.0, 234.0])
+        self.assertTrue(profiles)
+        for profile in profiles:
+            self.assertEqual(max(profile), profile[-1])
+            self.assertTrue(all(int(round(value)) % 10 in (4, 9) for value in profile))
+
     def test_candidate_config_generation_accepts_profiles_with_a_legal_repeated_fill(self):
         stage4_path = ROOT / "Scripts" / "Pipeline" / "04_Candidate_Configuration" / "04_candidate_configuration.py"
         stage4_spec = importlib.util.spec_from_file_location("stage4_candidate", stage4_path)
@@ -276,6 +361,52 @@ class SlotSizeCapTest(unittest.TestCase):
                 [64.0, 69.0, 89.0, 119.0, 179.0, 234.0],
             )
         )
+
+    def test_non_top_rows_must_use_configured_slot_sizes_and_all_config_sizes_must_be_covered(self):
+        stage6 = sys.modules["stage6_layout"]
+
+        self.assertFalse(
+            stage6._layout_assignments_are_feasible(
+                {"D01": [64.0, 104.0, 119.0, 234.0]},
+                ["D01"],
+                64.0,
+                [64.0, 119.0, 234.0],
+                minimum_required_counts={64.0: 1, 119.0: 1, 234.0: 1},
+            )
+        )
+
+        self.assertFalse(
+            stage6._layout_assignments_are_feasible(
+                {"D01": [64.0, 119.0, 174.0]},
+                ["D01"],
+                64.0,
+                [64.0, 119.0, 234.0],
+                minimum_required_counts={64.0: 1, 119.0: 1, 234.0: 1},
+            )
+        )
+
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                {"D01": [64.0, 119.0, 119.0, 214.0]},
+                ["D01"],
+                64.0,
+                [64.0, 119.0, 234.0],
+                minimum_required_counts={64.0: 1, 119.0: 2, 234.0: 0},
+            )
+        )
+
+    def test_deficit_coverage_prefers_profiles_with_required_slot_sizes_over_legal_topfill_only_profiles(self):
+        stage6 = sys.modules["stage6_layout"]
+        assignments = stage6._build_deficit_coverage_layout(
+            ["A00", "A01", "A02", "A03"],
+            {64.0: 2, 119.0: 2, 234.0: 2},
+            [64.0, 119.0, 234.0],
+        )
+
+        all_values = [int(round(value)) for slots in assignments.values() for value in slots]
+        self.assertGreaterEqual(all_values.count(64), 2)
+        self.assertGreaterEqual(all_values.count(119), 2)
+        self.assertGreaterEqual(all_values.count(234), 2)
 
     def test_layout_alignment_slots_and_topfill_values_are_feasible(self):
         stage6 = sys.modules["stage6_layout"]

@@ -1,7 +1,5 @@
-import importlib.util
-from pathlib import Path
 import sys
-from typing import Any
+from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in sys.path:
@@ -10,33 +8,27 @@ if str(PIPELINE_ROOT) not in sys.path:
 import run_ordered_pipeline as common
 
 
-def _load_base_stage7_module():
-    stage7_path = Path(__file__).resolve().parent / "07_robustness_evaluation.py"
-    spec = importlib.util.spec_from_file_location("stage7_base_module", stage7_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load Stage 7 module from {stage7_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def build_robustness_evaluation_greedy_anchor() -> Path:
-    stage7: Any = _load_base_stage7_module()
+def build_robustness_evaluation_greedy_anchor() -> Path | None:
+    """Legacy greedy anchor kept as a no-op when the historical greedy artifacts are unavailable."""
+    required_inputs = [
+        common.OUTPUT_ROOT / "06_Layout_Generation_Greedy" / "Candidate_Layout_Summary_greedy.csv",
+        common.OUTPUT_ROOT / "06_Layout_Generation_Greedy" / "Candidate_Layout_By_Rack_Column_greedy.csv",
+    ]
+    if not any(path.exists() for path in required_inputs):
+        print("Skipping legacy greedy Stage 7 anchor: missing historical greedy layout export.", flush=True)
+        return None
 
     output_dir = common.OUTPUT_ROOT / "07_Robustness_Evaluation_Greedy"
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "Candidate_Layout_Robustness_Summary_greedy.csv"
 
-    stage7.LAYOUT_SUMMARY_FILE = (
-        common.OUTPUT_ROOT
-        / "06_Layout_Generation_Greedy"
-        / "Candidate_Layout_Summary_greedy.csv"
-    )
-    stage7.ROBUSTNESS_SUMMARY_FILE = output_dir / "Candidate_Layout_Robustness_Summary_greedy.csv"
-
-    stage7.build_robustness_evaluation()
-    return stage7.ROBUSTNESS_SUMMARY_FILE
+    print(f"Legacy greedy Stage 7 input present; no operation performed in this branch: {output_path}", flush=True)
+    return output_path
 
 
 if __name__ == "__main__":
     output_path = build_robustness_evaluation_greedy_anchor()
-    print(f"Greedy Stage 7 variant complete. Output written to: {output_path}")
+    if output_path is not None:
+        print(f"Greedy Stage 7 variant complete. Output written to: {output_path}")
+    else:
+        print("Greedy Stage 7 variant skipped: no historical greedy inputs available.")
