@@ -407,7 +407,12 @@ def _expand_layout_capacity(
 
 
 def _profile_is_feasible_exact_fill(profile: list[float] | tuple[float, ...]) -> bool:
-    """Return True when a candidate slot order exactly reaches the physical 754 cm limit."""
+    """Return True when a candidate column is already exact or can be legally completed on the final row.
+
+    The lower rows remain fixed structural values; the final row may be increased to a legal topfill
+    completion value only when that completion exactly reaches 754 cm without violating the support-band
+    rule. An already-complete profile with a smaller top row than the rows beneath it remains illegal.
+    """
     slots = [float(value) for value in (profile or []) if float(value) > 0.0]
     if not slots:
         return False
@@ -419,25 +424,45 @@ def _profile_is_feasible_exact_fill(profile: list[float] | tuple[float, ...]) ->
         return False
 
     physical_total = sum(slots) + (len(slots) - 1) * common.BEAM_HEIGHT
-    return abs(physical_total - common.MAX_USED_HEIGHT_BASE) <= 1e-9
+    if abs(physical_total - common.MAX_USED_HEIGHT_BASE) <= 1e-9:
+        if slots and len(slots) > 1 and slots[-1] < max(slots[:-1]) - 1e-9:
+            return False
+        return True
+    if physical_total > common.MAX_USED_HEIGHT_BASE + 1e-9:
+        return False
+
+    lower_slots = slots[:-1]
+    if not lower_slots:
+        return False
+
+    support_below_top = sum(lower_slots) + max(len(lower_slots) - 1, 0) * common.BEAM_HEIGHT
+    if support_below_top < 504.0 - 1e-9:
+        return False
+
+    final_slot = float(slots[-1])
+    for candidate in range(4, int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)) + 1):
+        if candidate % 10 not in (4, 9):
+            continue
+        if candidate <= final_slot + 1e-9:
+            continue
+        completed_total = sum(lower_slots) + float(candidate) + max(len(lower_slots), 0) * common.BEAM_HEIGHT
+        if abs(completed_total - common.MAX_USED_HEIGHT_BASE) <= 1e-9:
+            return True
+
+    return False
 
 
 def _generate_feasible_rack_profiles(candidate_slot_sizes: list[float] | None) -> list[list[float]]:
-    """Generate exact physical rack profiles from the configured legal slot sizes.
+    """Generate exact physical rack profiles from the legal slot family.
 
-    Lower rows may use only the configured family; the final slot may use a legal topfill value.
+    Lower-row values must be actual configured slot sizes. Only the final row may be a legal topfill
+    completion value that closes the exact 754 cm stack without violating the support-band rule.
     """
-    legal_sizes = sorted({
-        int(round(float(size)))
-        for size in (candidate_slot_sizes or [])
-        if float(size) > 0.0
-        and int(round(float(size))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-        and int(round(float(size))) % 10 in (4, 9)
-    })
-    if not legal_sizes:
+    configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])))
+    topfill_values = sorted(set(_legal_topfill_values(candidate_slot_sizes or [])))
+    if not configured_sizes:
         return []
 
-    topfill_values = set(_legal_topfill_values(candidate_slot_sizes))
     profiles: set[tuple[float, ...]] = set()
     max_rows = 12
     for row_count in range(1, max_rows + 1):
@@ -445,37 +470,28 @@ def _generate_feasible_rack_profiles(candidate_slot_sizes: list[float] | None) -
         if target_total <= 0:
             continue
 
-        def _search(remaining: int, slots_left: int, partial: list[int]) -> None:
+        def _search_lower(remaining: int, slots_left: int, partial: list[int]) -> None:
             if slots_left == 0:
-                if remaining == 0:
-                    profile = tuple(float(value) for value in sorted(partial))
+                if remaining in configured_sizes or remaining in topfill_values:
+                    ordered_lower = sorted(partial)
+                    if remaining < max(ordered_lower, default=0) - 1e-9:
+                        return
+                    candidate = ordered_lower + [remaining]
+                    profile = tuple(float(value) for value in candidate)
                     if _profile_is_feasible_exact_fill(list(profile)):
                         profiles.add(profile)
                 return
             if remaining < 0:
                 return
-            if slots_left == 1:
-                final_options = [remaining]
-                if remaining not in legal_sizes:
-                    final_options = [value for value in sorted(topfill_values) if value == remaining]
-                for candidate_value in final_options:
-                    if candidate_value < max(partial, default=0):
-                        continue
-                    if 4 <= candidate_value <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)) and candidate_value % 10 in (4, 9):
-                        candidate = partial + [candidate_value]
-                        profile = tuple(float(value) for value in sorted(candidate))
-                        if _profile_is_feasible_exact_fill(list(profile)):
-                            profiles.add(profile)
-                return
 
-            for size in legal_sizes:
+            for size in configured_sizes:
                 if size > remaining:
                     continue
-                _search(remaining - size, slots_left - 1, partial + [size])
+                _search_lower(remaining - size, slots_left - 1, partial + [size])
 
-        _search(target_total, row_count, [])
+        _search_lower(target_total, max(row_count - 1, 0), [])
 
-    return [list(profile) for profile in sorted(profiles, key=lambda values: (len(values), tuple(-float(value) for value in values)))]
+    return [list(profile) for profile in sorted(profiles, key=lambda values: (len(values), tuple(float(value) for value in values)))]
 
 
 def _profile_requirement_priority(
@@ -523,11 +539,16 @@ def _build_deficit_coverage_layout(
     required_counts: dict[float, int],
     config_slot_sizes: list[float] | None,
 ) -> dict[str, list[float]]:
-    """Greedily assign each column the profile that best reduces the remaining required size deficits.
+    """Greedily assign each rack the feasible profile with the highest remaining-deficit coverage ratio.
 
-    The ranking must prioritize coverage of the scarce required slot sizes (for example 234 before
-    generic 64-only fill) so the generator cannot select a physically full but compositionally wrong
-    profile such as 64/114/194 as the winning default.
+    Score_j = Useful_Capacity_j / Total_Capacity_j, where:
+    - Deficit_i = Required_i - Allocated_i
+    - Contribution_ij = slots of size i contributed by profile j
+    - Useful_Capacity_j = sum_i min(Contribution_ij, Deficit_i)
+    - Total_Capacity_j = sum_i Contribution_ij
+
+    The selected profile is the final assignment decision; later repair passes are not allowed to
+    rewrite that choice away from the best deficit-coverage objective.
     """
     if not rack_columns:
         return {}
@@ -546,43 +567,28 @@ def _build_deficit_coverage_layout(
 
     for rack in sorted(rack_to_columns):
         columns = sorted(rack_to_columns[rack])
+        best_profile: list[float] | None = None
+        best_key: tuple[tuple[int, ...], int, int, tuple[int, ...], int, int] | None = None
+
+        for profile in profiles:
+            candidate_key = _profile_requirement_priority(profile, remaining)
+            if best_key is None or candidate_key > best_key:
+                best_key = candidate_key
+                best_profile = list(profile)
+
+        if best_profile is None:
+            best_profile = list(profiles[0])
+
         for column_key in columns:
-            best_profile: list[float] | None = None
-            best_rank: tuple[tuple[int, ...], int, int, tuple[int, ...], int, int] | None = None
-
-            for profile in profiles:
-                rank = _profile_requirement_priority(profile, remaining)
-                if best_rank is None or rank > best_rank:
-                    best_rank = rank
-                    best_profile = list(profile)
-
-            if best_profile is None:
-                best_profile = list(profiles[0])
-
             assignments[column_key] = list(best_profile)
-            for value in best_profile:
-                size = int(round(float(value)))
-                for key in list(remaining):
-                    if int(round(float(key))) == size:
-                        remaining[key] = max(remaining[key] - 1, 0)
-                        break
-            remaining = {size: count for size, count in remaining.items() if count > 0}
 
-            if remaining:
-                for profile in profiles:
-                    counts = Counter(int(round(float(value))) for value in profile)
-                    if all(counts.get(int(round(float(size))), 0) >= int(amount) for size, amount in remaining.items()):
-                        best_profile = list(profile)
-                        break
-                if best_profile is not None:
-                    assignments[column_key] = list(best_profile)
-                    for value in best_profile:
-                        size = int(round(float(value)))
-                        for key in list(remaining):
-                            if int(round(float(key))) == size:
-                                remaining[key] = max(remaining[key] - 1, 0)
-                                break
-                    remaining = {size: count for size, count in remaining.items() if count > 0}
+        for value in best_profile:
+            size_int = int(round(float(value)))
+            for key in list(remaining):
+                if int(round(float(key))) == size_int:
+                    remaining[key] = max(remaining[key] - 1, 0)
+                    break
+        remaining = {size: count for size, count in remaining.items() if count > 0}
 
     for column_key in rack_columns:
         assignments.setdefault(column_key, [])
@@ -922,12 +928,13 @@ def _layout_assignments_are_feasible(
     minimum_slot_size: float,
     available_slot_sizes: list[float] | None = None,
     minimum_required_counts: dict[float, int] | None = None,
+    enforce_minimum_total_locations: bool = False,
 ) -> bool:
     """Check per-column physical legality and defer exact minimum-family checks to the full layout.
 
-    A single rack cannot be expected to satisfy every configured slot-size minimum on its own.
-    The minimum family coverage must be validated only after the complete layout has been assembled,
-    while every individual column must still satisfy the physical and legal topfill constraints.
+    The total occupied-location minimum is a full-layout gate, not a per-column legality rule.
+    Small unit tests and partial assignments can still be valid physically even before the
+    complete layout reaches the 890-location target.
     """
     if not column_assignments:
         return False
@@ -940,10 +947,12 @@ def _layout_assignments_are_feasible(
         legal_topfill_values = _legal_topfill_values(available_slot_sizes)
 
     layout_counts: dict[int, int] = defaultdict(int)
+    assigned_locations_total = 0
     for column_key in column_keys:
         slots = sorted(float(value) for value in column_assignments.get(column_key, []) if float(value) > 0.0)
         if not slots:
             return False
+        assigned_locations_total += len(slots)
         if any(float(value) <= 0.0 for value in slots):
             return False
         if any(int(round(float(value))) < minimum_value for value in slots):
@@ -981,6 +990,9 @@ def _layout_assignments_are_feasible(
         for slot_size in slots:
             rounded = int(round(float(slot_size)))
             layout_counts[rounded] += 1
+
+    if enforce_minimum_total_locations and assigned_locations_total < common._explicit_occupied_target_total():
+        return False
 
     if isinstance(minimum_required_counts, dict):
         requirement_set = {
@@ -1143,10 +1155,29 @@ def _exact_fill_to_column_limit(
     if abs(required_fill) <= 1e-9:
         if len(normalized) != target_rows:
             return None
-        return normalized
+        return sorted(normalized)
 
     if required_fill < 0.0:
         return None
+
+    legal_family = sorted({
+        int(round(float(value)))
+        for value in (available_slot_sizes or normalized)
+        if float(value) > 0.0
+        and int(round(float(value))) <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+        and int(round(float(value))) % 10 in (4, 9)
+    })
+    if len(normalized) == target_rows and normalized:
+        top_value = max(int(round(float(normalized[-1]))), 4)
+        for candidate_value in legal_family:
+            if candidate_value < top_value:
+                continue
+            trial = [float(value) for value in normalized[:-1]] + [float(candidate_value)]
+            if len(trial) != target_rows:
+                continue
+            trial_total = sum(trial) + (len(trial) - 1) * common.BEAM_HEIGHT
+            if abs(trial_total - common.MAX_USED_HEIGHT_BASE) <= 1e-9 and _column_support_band_is_valid(trial):
+                return sorted(trial)
 
     max_slot = float(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)
     minimum_allowed = min(
@@ -1224,7 +1255,12 @@ def _exact_fill_to_column_limit(
         return None
     if any(value > max_slot + 1e-9 for value in fill):
         return None
-    return normalized + fill
+    if fill and max(normalized, default=0.0) > max(fill) + 1e-9:
+        return None
+    candidate = sorted(normalized) + fill
+    if candidate and max(candidate[:-1], default=0.0) > candidate[-1] + 1e-9:
+        return None
+    return candidate
 
 
 def _build_legal_row_count_column(
@@ -1315,11 +1351,10 @@ def _build_uniform_rack_columns(
     available_slot_sizes: list[float] | None = None,
     minimum_required_counts: dict[float, int] | None = None,
 ) -> dict[str, list[float]]:
-    """Force every column in a rack to the same legal profile while preserving exact minimum counts.
+    """Repair each column to a legal physical profile without forcing every column in a rack to match.
 
-    A rack-level repair is only accepted if the repaired full layout still satisfies the configuration's
-    exact minimum slot-size counts. This prevents a rack-wide rewrite from dropping scarce sizes such
-    as 119 or 234 in favor of generic topfill sequences like 64/114/194.
+    Column-level repair is allowed to add legal topfill and preserve exact 754 cm fills, but a rack
+    may still contain different valid slot orders across columns.
     """
     if not column_assignments:
         return {}
@@ -1328,12 +1363,6 @@ def _build_uniform_rack_columns(
         column_key: [float(value) for value in slots if float(value) > 0.0]
         for column_key, slots in column_assignments.items()
     }
-    rack_columns: dict[str, list[str]] = defaultdict(list)
-    for column_key in adjusted:
-        if len(column_key) < 2:
-            continue
-        rack = column_key[:-2]
-        rack_columns[rack].append(column_key)
 
     if available_slot_sizes:
         minimum_slot = min(float(value) for value in available_slot_sizes if float(value) > 0.0)
@@ -1348,85 +1377,54 @@ def _build_uniform_rack_columns(
             default=1.0,
         )
 
-    column_keys = sorted(adjusted)
-    for rack, keys in rack_columns.items():
-        if not keys:
+    for column_key, slots in list(adjusted.items()):
+        cleaned = sorted(float(value) for value in slots if float(value) > 0.0)
+        if not cleaned:
+            adjusted[column_key] = []
             continue
 
-        current_profile = [
+        legal_base = [
             float(value)
-            for value in sorted(
-                {
-                    float(slot)
-                    for column_key in keys
-                    for slot in adjusted.get(column_key, [])
-                    if float(slot) > 0.0
-                }
-            )
+            for value in cleaned
+            if float(value) >= float(minimum_slot)
+            and int(round(float(value))) % 10 in (4, 9)
         ]
-        if current_profile:
-            current_profile_is_feasible = _layout_assignments_are_feasible(
-                {column_key: list(adjusted.get(column_key, [])) for column_key in keys},
-                list(keys),
-                minimum_slot,
-                available_slot_sizes,
-                minimum_required_counts=minimum_required_counts,
-            )
-            current_profile_is_full_height = all(
-                abs(sum(adjusted.get(column_key, [])) + (len(adjusted.get(column_key, [])) - 1) * common.BEAM_HEIGHT - common.MAX_USED_HEIGHT_BASE) <= 1e-6
-                for column_key in keys
-            )
-            if current_profile_is_feasible and current_profile_is_full_height:
-                continue
+        repair_source = legal_base if legal_base else [float(minimum_slot)]
 
-        candidate_profiles = _generate_feasible_rack_profiles(available_slot_sizes)
-        if not candidate_profiles:
+        if _layout_assignments_are_feasible(
+            {column_key: list(cleaned)},
+            [column_key],
+            minimum_slot,
+            available_slot_sizes,
+            minimum_required_counts=minimum_required_counts,
+        ) and abs(sum(cleaned) + (len(cleaned) - 1) * common.BEAM_HEIGHT - common.MAX_USED_HEIGHT_BASE) <= 1e-6:
+            adjusted[column_key] = sorted(cleaned)
             continue
 
-        ordered_candidates = sorted(
-            candidate_profiles,
-            key=lambda profile: _profile_requirement_priority(
-                profile,
-                {float(size): int(count) for size, count in (minimum_required_counts or {}).items()},
-            ),
-            reverse=True,
-        )
-        ordered_candidates.sort(
-            key=lambda profile: (
-                1 if _profile_is_feasible_exact_fill(profile) else 0,
-                _profile_requirement_priority(
-                    profile,
-                    {float(size): int(count) for size, count in (minimum_required_counts or {}).items()},
-                ),
-            ),
-            reverse=True,
-        )
-
-        chosen: list[float] | None = None
-        for candidate in ordered_candidates:
-            if not _layout_assignments_are_feasible(
-                {"__rack_profile__": list(candidate)},
-                ["__rack_profile__"],
-                minimum_slot,
-                available_slot_sizes,
-            ):
+        candidate: list[float] | None = None
+        for target_rows in range(max(len(repair_source), 1), 13):
+            trial = _exact_fill_to_column_limit(
+                repair_source,
+                available_slot_sizes=available_slot_sizes,
+                target_row_count=target_rows,
+            )
+            if trial is None:
                 continue
-            trial = {column_key: list(values) for column_key, values in adjusted.items()}
-            for column_key in keys:
-                trial[column_key] = [float(value) for value in candidate]
             if _layout_assignments_are_feasible(
-                trial,
-                column_keys,
+                {column_key: list(trial)},
+                [column_key],
                 minimum_slot,
                 available_slot_sizes,
                 minimum_required_counts=minimum_required_counts,
             ):
-                chosen = [float(value) for value in candidate]
+                candidate = [float(value) for value in trial]
                 break
 
-        if chosen is not None:
-            for column_key in keys:
-                adjusted[column_key] = [float(value) for value in chosen]
+        if candidate is not None:
+            adjusted[column_key] = sorted(candidate)
+            continue
+
+        adjusted[column_key] = sorted(cleaned)
 
     return adjusted
 
@@ -1828,9 +1826,9 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         layout_id = f"LAY_{layout_counter:03d}"
         layout_counter += 1
 
-        # Greedy deficit coverage is the primary objective for Stage 6. The broader
-        # residual-fill and beam-relocation passes are intentionally not allowed to
-        # override the minimum required slot-size coverage heuristic.
+        # The greedy deficit-coverage rule is the actual assignment decision in Stage 6.
+        # All later repair and local-search passes are disabled here so they cannot rewrite
+        # the selected rack profile away from the best remaining-deficit choice.
         column_assignments = _build_deficit_coverage_layout(
             rack_columns=layout_columns,
             required_counts={float(size): int(count) for size, count in base_exact_counts.items()},
@@ -1842,39 +1840,12 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         }
 
         expansion_slot_sizes = sorted(float(slot_size) for slot_size in base_exact_counts)
-        column_assignments = _enforce_segment_uniform_slot_profiles(
-            column_assignments,
-            beam_segments,
-            layout_thresholds_by_rack={},
-        )
-        column_assignments = _enforce_rack_row_count_consistency(
-            column_assignments,
-            available_slot_sizes=expansion_slot_sizes,
-            minimum_required_counts=base_exact_counts,
-        )
         layout_alignment_conversions = 0
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
-        if smallest_config_slot > 0.0:
-            column_assignments = _enforce_min_locations_per_column(
-                column_assignments,
-                layout_columns,
-                float(smallest_config_slot),
-            )
-        used_by_column = {
-            column_key: _column_physical_height_usage(slots)
-            for column_key, slots in column_assignments.items()
-        }
 
-        # Secondary beam-relocation optimization is intentionally disabled while the
-        # deficit coverage heuristic is the active objective for the generated layout.
         reloc_before_search = 0
         reloc_after_search = 0
         accepted_search_moves = 0
-        column_assignments = _enforce_rack_row_count_consistency(
-            column_assignments,
-            available_slot_sizes=expansion_slot_sizes,
-            minimum_required_counts=base_exact_counts,
-        )
         used_by_column = {
             column_key: _column_physical_height_usage(slots)
             for column_key, slots in column_assignments.items()
@@ -1935,7 +1906,8 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         # final assignment state rather than rejecting everything that was not
         # initially marked feasible.
         final_layout_feasible = (
-            capacity_margin >= 0
+            assigned_total >= common._explicit_occupied_target_total()
+            and capacity_margin >= 0
             and space_utilization <= 1.0
             and _layout_assignments_are_feasible(
                 column_assignments,
@@ -1943,6 +1915,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 float(smallest_config_slot),
                 expansion_slot_sizes,
                 minimum_required_counts=base_exact_counts,
+                enforce_minimum_total_locations=True,
             )
         )
         feasible_layout = final_layout_feasible

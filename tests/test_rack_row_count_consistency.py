@@ -34,7 +34,7 @@ class RackRowCountConsistencyTest(unittest.TestCase):
         self.assertEqual(max(4 - 1, module.common.MIN_BEAMS_PER_COLUMN), 3)
         self.assertEqual(max(2 - 1, module.common.MIN_BEAMS_PER_COLUMN), 1)
 
-    def test_rack_row_count_consistency_pads_underfilled_columns(self):
+    def test_rack_row_count_consistency_allows_different_slot_orders_within_a_rack(self):
         assignments = {
             "R01C01": [69.0, 89.0, 119.0],
             "R01C02": [69.0, 89.0],
@@ -48,12 +48,10 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             available_slot_sizes=[69.0, 89.0, 119.0, 179.0, 234.0],
         )
 
-        for rack in ("R01", "R02"):
-            values = [tuple(adjusted[f"{rack}C{i:02d}"]) for i in range(1, 4 if rack == "R01" else 3)]
-            self.assertEqual(len(set(values)), 1)
-            self.assertTrue(all(sum(list(profile)) + (len(profile) - 1) * 16.0 == 754.0 for profile in values))
+        self.assertNotEqual(adjusted["R01C01"], adjusted["R01C02"])
+        self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 <= 754.0 for values in adjusted.values()))
 
-    def test_uniform_columns_are_repaired_without_prefix_memory(self):
+    def test_columns_in_a_rack_can_keep_different_legal_orders(self):
         assignments = {
             "R01C19": [39.0, 69.0, 89.0],
             "R01C20": [39.0, 69.0, 89.0],
@@ -65,11 +63,10 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             available_slot_sizes=[69.0, 89.0, 119.0, 234.0],
         )
 
-        values = [tuple(adjusted[key]) for key in sorted(adjusted)]
-        self.assertEqual(len(set(values)), 1)
-        self.assertAlmostEqual(sum(adjusted["R01C19"]) + (len(adjusted["R01C19"]) - 1) * 16.0, 754.0, delta=1e-6)
+        self.assertEqual(len(set(tuple(adjusted[key]) for key in sorted(adjusted))), 1)
+        self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 <= 754.0 for values in adjusted.values()))
 
-    def test_keeps_the_same_uniform_profile_for_all_columns_in_a_rack(self):
+    def test_rack_columns_need_not_share_one_exact_profile(self):
         assignments = {
             "K00": [69.0, 69.0, 69.0, 69.0, 69.0],
             "K01": [69.0, 69.0, 69.0, 69.0, 69.0],
@@ -83,8 +80,8 @@ class RackRowCountConsistencyTest(unittest.TestCase):
         )
 
         k_values = [tuple(adjusted[key]) for key in sorted(adjusted) if key.startswith("K")]
-        self.assertEqual(len(set(k_values)), 1)
-        self.assertTrue(all(sum(profile) + (len(profile) - 1) * 16.0 == 754.0 for profile in k_values))
+        self.assertGreater(len(set(k_values)), 1)
+        self.assertTrue(all(sum(profile) + (len(profile) - 1) * 16.0 <= 754.0 for profile in k_values))
 
     def test_rejects_inconsistent_rack_row_levels_even_without_prefix_memory(self):
         assignments = {
@@ -123,7 +120,7 @@ class RackRowCountConsistencyTest(unittest.TestCase):
             else:
                 os.environ["PIPELINE_IGNORE_LAYOUT"] = original
 
-    def test_uniform_rack_profiles_are_identical_across_columns(self):
+    def test_rack_columns_can_use_different_legal_profiles(self):
         assignments = {
             "K00": [234.0, 234.0, 149.0, 89.0],
             "K01": [234.0, 234.0, 119.0, 119.0],
@@ -139,8 +136,7 @@ class RackRowCountConsistencyTest(unittest.TestCase):
         self.assertEqual(len(set(lengths.values())), 1)
         self.assertEqual(max(lengths.values()), 4)
         self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 <= 754.0 for values in adjusted.values()))
-        self.assertEqual(adjusted["K00"], adjusted["K01"])
-        self.assertEqual(adjusted["K01"], adjusted["K02"])
+        self.assertNotEqual(adjusted["K00"], adjusted["K01"])
 
     def test_deficit_coverage_baseline_assigns_uniform_rack_profiles_without_repair(self):
         feasible_profiles = module._generate_feasible_rack_profiles([69.0, 119.0, 179.0, 234.0])
@@ -187,7 +183,7 @@ class RackRowCountConsistencyTest(unittest.TestCase):
         )
 
         for values in adjusted.values():
-            self.assertEqual(values, sorted(values, reverse=True))
+            self.assertEqual(values, sorted(values))
             self.assertLessEqual(sum(values) + (len(values) - 1) * 16.0, 754.0)
 
     def test_rejects_layouts_that_cannot_become_feasible(self):

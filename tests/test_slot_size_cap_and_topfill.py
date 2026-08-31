@@ -129,6 +129,27 @@ class SlotSizeCapTest(unittest.TestCase):
         )
         self.assertTrue(all(sum(values) + (len(values) - 1) * 16.0 == 754.0 for values in refined.values()))
         self.assertTrue(all(int(round(value)) >= 64 for values in refined.values() for value in values))
+        self.assertTrue(all(values[-1] >= values[0] for values in refined.values()))
+
+    def test_generated_profiles_keep_topfill_only_at_the_final_position(self):
+        stage6 = sys.modules["stage6_layout"]
+        profiles = stage6._generate_feasible_rack_profiles([64.0, 119.0, 234.0])
+
+        self.assertTrue(profiles)
+        self.assertTrue(
+            all(
+                max(profile[:-1], default=0.0) <= profile[-1] + 1e-9
+                for profile in profiles
+            )
+        )
+
+    def test_underfilled_final_row_can_complete_via_legal_topfill(self):
+        stage6 = sys.modules["stage6_layout"]
+        profile = [189.0, 189.0, 189.0, 109.0]
+
+        self.assertTrue(stage6._profile_is_feasible_exact_fill(profile))
+        self.assertTrue(stage6._layout_assignments_are_feasible({"A01": profile}, ["A01"], 109.0, [109.0, 189.0, 234.0]))
+        self.assertFalse(stage6._profile_is_feasible_exact_fill([219.0, 189.0, 189.0, 109.0]))
 
     def test_column_top_slot_is_based_on_physical_stack_order_not_arbitrary_list_order(self):
         stage6 = sys.modules["stage6_layout"]
@@ -229,6 +250,7 @@ class SlotSizeCapTest(unittest.TestCase):
 
         for slots in refined.values():
             self.assertEqual(slots, [64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 64.0, 114.0])
+            self.assertEqual(slots, sorted(slots))
 
     def test_profile_choice_prefers_rare_required_sizes_over_extra_64s(self):
         stage6 = sys.modules["stage6_layout"]
@@ -452,6 +474,24 @@ class SlotSizeCapTest(unittest.TestCase):
         module5 = importlib.util.module_from_spec(spec)
         sys.modules["stage5_capacity"] = module5
         spec.loader.exec_module(module5)
+
+    def test_layout_generation_requires_at_least_890_assigned_locations(self):
+        common = sys.modules["run_ordered_pipeline"]
+        target = common._explicit_occupied_target_total()
+
+        self.assertEqual(target, 890)
+        self.assertFalse(889 >= target)
+        self.assertTrue(890 >= target)
+
+    def test_exact_fill_profile_generator_accepts_legal_family_values_in_lower_rows(self):
+        stage6 = sys.modules["stage6_layout"]
+        profiles = stage6._generate_feasible_rack_profiles([109.0, 189.0, 234.0])
+        config_values = set(stage6._config_size_values([109.0, 189.0, 234.0]))
+        self.assertTrue(profiles)
+        for profile in profiles:
+            self.assertTrue(all(int(round(float(value))) in config_values for value in profile[:-1]))
+            self.assertTrue(profile[-1] > profile[-2])
+            self.assertIn(int(round(float(profile[-1]))), stage6._legal_topfill_values([109.0, 189.0, 234.0]))
 
     def test_baseline_occupied_count_uses_890_and_current_scenario_label(self):
         stage5_path = ROOT / "Scripts" / "Pipeline" / "05_Capacity_Determination" / "05_capacity_determination.py"

@@ -214,13 +214,14 @@ MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
 def _ignore_layout_constraints() -> bool:
-    """The active baseline should respect actual layout constraints."""
-    return False
+    """Respect the explicit override for legacy no-layout benchmarking."""
+    raw = os.environ.get("PIPELINE_IGNORE_LAYOUT", "").strip().upper()
+    return raw in {"1", "TRUE", "YES", "ON"}
 
 
 def _should_ignore_layout_for_layout_generation() -> bool:
     """The default pipeline path includes the real layout-generation constraints."""
-    return False
+    return _ignore_layout_constraints()
 
 
 def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> float:
