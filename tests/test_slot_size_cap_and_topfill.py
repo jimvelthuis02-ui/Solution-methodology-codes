@@ -136,20 +136,75 @@ class SlotSizeCapTest(unittest.TestCase):
         profiles = stage6._generate_feasible_rack_profiles([64.0, 119.0, 234.0])
 
         self.assertTrue(profiles)
+        config_values = set(stage6._config_size_values([64.0, 119.0, 234.0]))
+        legal_topfill_values = stage6._legal_topfill_values([64.0, 119.0, 234.0])
         self.assertTrue(
             all(
-                max(profile[:-1], default=0.0) <= profile[-1] + 1e-9
+                all(int(round(float(value))) in config_values for value in profile[:-1])
+                and int(round(float(profile[-1]))) in config_values | legal_topfill_values
                 for profile in profiles
             )
         )
+
+    def test_stage6_exhaustive_search_uses_a_small_relevant_config_subset(self):
+        stage6 = sys.modules["stage6_layout"]
+        configs = [
+            {"Config_ID": "CFG_001", "Slot_Sizes": '="64,119,234"'},
+            {"Config_ID": "CFG_002", "Slot_Sizes": '="64,119,184,234"'},
+            {"Config_ID": "CFG_003", "Slot_Sizes": '="29,64,119,184,234"'},
+            {"Config_ID": "CFG_004", "Slot_Sizes": '="29,64,94,119,184,234"'},
+            {"Config_ID": "CFG_005", "Slot_Sizes": '="29,64,94,119,149,184,234"'},
+        ]
+        filtered = stage6._candidate_configs_for_exhaustive_search(configs)
+        self.assertTrue(filtered)
+        self.assertLessEqual(len(filtered), 4)
+        self.assertIn("CFG_001", {row["Config_ID"] for row in filtered})
+        self.assertIn("CFG_002", {row["Config_ID"] for row in filtered})
+
+    def test_non_descending_profile_order_is_rejected(self):
+        stage6 = sys.modules["stage6_layout"]
+        invalid_profile = [109.0, 234.0, 189.0, 174.0]
+        self.assertFalse(stage6._profile_is_feasible_exact_fill(invalid_profile, [109.0, 189.0, 234.0]))
+        self.assertFalse(stage6._layout_assignments_are_feasible({"A01": invalid_profile}, ["A01"], 109.0, [109.0, 189.0, 234.0]))
 
     def test_underfilled_final_row_can_complete_via_legal_topfill(self):
         stage6 = sys.modules["stage6_layout"]
         profile = [189.0, 189.0, 189.0, 109.0]
 
-        self.assertTrue(stage6._profile_is_feasible_exact_fill(profile))
+        self.assertTrue(stage6._profile_is_feasible_exact_fill(profile, [109.0, 189.0, 234.0]))
         self.assertTrue(stage6._layout_assignments_are_feasible({"A01": profile}, ["A01"], 109.0, [109.0, 189.0, 234.0]))
-        self.assertFalse(stage6._profile_is_feasible_exact_fill([219.0, 189.0, 189.0, 109.0]))
+        self.assertFalse(stage6._profile_is_feasible_exact_fill([219.0, 189.0, 189.0, 109.0], [109.0, 189.0, 234.0]))
+
+    def test_only_descending_columns_are_accepted_under_the_simplified_model(self):
+        stage6 = sys.modules["stage6_layout"]
+
+        self.assertTrue(stage6._profile_is_feasible_exact_fill([189.0, 189.0, 189.0, 139.0], [109.0, 189.0, 234.0]))
+        self.assertFalse(stage6._profile_is_feasible_exact_fill([109.0, 189.0, 189.0, 219.0], [109.0, 189.0, 234.0]))
+        self.assertNotIn(219, stage6._legal_topfill_values([109.0, 189.0, 234.0]))
+        self.assertNotIn(219, stage6._exact_config_slot_family([109.0, 189.0, 234.0]))
+
+    def test_descending_order_columns_with_legal_topfill_are_accepted(self):
+        stage6 = sys.modules["stage6_layout"]
+
+        legal_columns = [
+            [189.0, 189.0, 189.0, 139.0],
+            [184.0, 184.0, 184.0, 154.0],
+        ]
+
+        for column in legal_columns:
+            with self.subTest(column=column):
+                available = [109.0, 189.0, 234.0] if column[0] == 189.0 else [109.0, 184.0, 234.0]
+                self.assertTrue(stage6._profile_is_feasible_exact_fill(column, available))
+                self.assertTrue(
+                    stage6._layout_assignments_are_feasible(
+                        {"A01": column},
+                        ["A01"],
+                        min(int(round(float(value))) for value in column if float(value) > 0.0),
+                        available,
+                    )
+                )
+
+        self.assertFalse(stage6._profile_is_feasible_exact_fill([189.0, 189.0, 189.0, 139.0], [109.0, 184.0, 234.0]))
 
     def test_column_top_slot_is_based_on_physical_stack_order_not_arbitrary_list_order(self):
         stage6 = sys.modules["stage6_layout"]
@@ -351,8 +406,11 @@ class SlotSizeCapTest(unittest.TestCase):
         stage6 = sys.modules["stage6_layout"]
         profiles = stage6._generate_feasible_rack_profiles([64.0, 119.0, 234.0])
         self.assertTrue(profiles)
+        config_values = set(stage6._config_size_values([64.0, 119.0, 234.0]))
+        legal_topfill_values = stage6._legal_topfill_values([64.0, 119.0, 234.0])
         for profile in profiles:
-            self.assertEqual(max(profile), profile[-1])
+            self.assertTrue(all(int(round(value)) in config_values for value in profile[:-1]))
+            self.assertTrue(int(round(profile[-1])) in config_values | legal_topfill_values)
             self.assertTrue(all(int(round(value)) % 10 in (4, 9) for value in profile))
 
     def test_candidate_config_generation_accepts_profiles_with_a_legal_repeated_fill(self):
@@ -490,8 +548,7 @@ class SlotSizeCapTest(unittest.TestCase):
         self.assertTrue(profiles)
         for profile in profiles:
             self.assertTrue(all(int(round(float(value))) in config_values for value in profile[:-1]))
-            self.assertTrue(profile[-1] > profile[-2])
-            self.assertIn(int(round(float(profile[-1]))), stage6._legal_topfill_values([109.0, 189.0, 234.0]))
+            self.assertIn(int(round(float(profile[-1]))), config_values | stage6._legal_topfill_values([109.0, 189.0, 234.0]))
 
     def test_baseline_occupied_count_uses_890_and_current_scenario_label(self):
         stage5_path = ROOT / "Scripts" / "Pipeline" / "05_Capacity_Determination" / "05_capacity_determination.py"
