@@ -164,6 +164,13 @@ class SlotSizeCapTest(unittest.TestCase):
             )
         )
 
+    def test_profile_generation_is_capped_and_ranked_by_coverage(self):
+        stage6 = sys.modules["stage6_layout"]
+        profiles = stage6._generate_feasible_rack_profiles([64.0, 119.0, 234.0])
+        self.assertLessEqual(len(profiles), stage6.EXHAUSTIVE_PROFILE_LIMIT)
+        self.assertTrue(profiles)
+        self.assertTrue(all(len(profile) >= 2 for profile in profiles))
+
     def test_stage6_exhaustive_search_uses_a_small_relevant_config_subset(self):
         stage6 = sys.modules["stage6_layout"]
         configs = [
@@ -172,12 +179,12 @@ class SlotSizeCapTest(unittest.TestCase):
             {"Config_ID": "CFG_003", "Slot_Sizes": '="29,64,119,184,234"'},
             {"Config_ID": "CFG_004", "Slot_Sizes": '="29,64,94,119,184,234"'},
             {"Config_ID": "CFG_005", "Slot_Sizes": '="29,64,94,119,149,184,234"'},
+            {"Config_ID": "CFG_006", "Slot_Sizes": '="29,64,94,119,149,184,234,269"'},
         ]
         filtered = stage6._candidate_configs_for_exhaustive_search(configs)
         self.assertTrue(filtered)
-        self.assertLessEqual(len(filtered), 4)
-        self.assertIn("CFG_001", {row["Config_ID"] for row in filtered})
-        self.assertIn("CFG_002", {row["Config_ID"] for row in filtered})
+        self.assertLessEqual(len(filtered), stage6.EXHAUSTIVE_SEARCH_CONFIG_LIMIT)
+        self.assertEqual(len(filtered), 3)
 
     def test_non_descending_profile_order_is_rejected(self):
         stage6 = sys.modules["stage6_layout"]
