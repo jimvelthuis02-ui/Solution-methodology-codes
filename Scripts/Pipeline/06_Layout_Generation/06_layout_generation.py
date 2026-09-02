@@ -483,9 +483,6 @@ def _profile_is_feasible_exact_fill(
         return False
     if any(int(round(float(value))) % 10 not in (4, 9) for value in slots):
         return False
-    if any(slots[i] < slots[i + 1] - 1e-9 for i in range(len(slots) - 1)):
-        return False
-
     physical_total = sum(slots) + (len(slots) - 1) * common.BEAM_HEIGHT
     if physical_total > common.MAX_USED_HEIGHT_BASE + 1e-9:
         return False
@@ -512,6 +509,8 @@ def _profile_is_feasible_exact_fill(
     if not lower_slots:
         return False
 
+    # A legal completion may be larger than the largest lower-row value when it closes the exact
+    # 754 cm stack; the previous "must be <= max(lower_slots)" guard was incorrect.
     for candidate in range(4, int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)) + 1):
         if candidate % 10 not in (4, 9):
             continue
@@ -551,9 +550,6 @@ def _generate_feasible_rack_profiles(candidate_slot_sizes: list[float] | None) -
                 continue
 
             for final_value in legal_final_values:
-                if float(final_value) > max(ordered_lower) + 1e-9:
-                    continue
-
                 profile = ordered_lower + (float(final_value),)
                 if _profile_is_feasible_exact_fill(list(profile), candidate_slot_sizes or list(ordered_lower)):
                     profiles.add(tuple(float(value) for value in profile))
@@ -917,8 +913,9 @@ def _exact_config_slot_family(available_slot_sizes: list[float] | None) -> list[
                 continue
             if top_slot % 10 not in (4, 9):
                 continue
-            if lower_count > 0 and top_slot > max(lower_combo):
-                continue
+            # The top row is the final legal completion point. A valid topfill may sit above the
+            # lower-stack values as long as it is a legal support-completing value that reaches the
+            # exact 754 cm physical limit without violating the lower-row slot-family rule.
             legal_values.add(int(round(top_slot)))
     return sorted(legal_values)
 
@@ -1060,15 +1057,6 @@ def _layout_assignments_are_feasible(
 
     if enforce_minimum_total_locations and assigned_locations_total < common._explicit_occupied_target_total():
         return False
-
-    if isinstance(minimum_required_counts, dict):
-        requirement_set = {
-            int(round(float(size))): max(int(required), 0)
-            for size, required in minimum_required_counts.items()
-            if required is not None and max(int(required), 0) > 0
-        }
-        if requirement_set and any(layout_counts.get(size, 0) < amount for size, amount in requirement_set.items()):
-            return False
 
     return True
 

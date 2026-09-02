@@ -146,6 +146,24 @@ class SlotSizeCapTest(unittest.TestCase):
             )
         )
 
+    def test_per_column_feasibility_checks_do_not_apply_full_layout_minimums(self):
+        stage6 = sys.modules["stage6_layout"]
+
+        partial_layout = {
+            "A01": [64.0, 64.0, 64.0, 114.0],
+            "A02": [64.0, 64.0, 64.0, 114.0],
+        }
+
+        self.assertTrue(
+            stage6._layout_assignments_are_feasible(
+                partial_layout,
+                ["A01", "A02"],
+                64.0,
+                [64.0, 119.0, 234.0],
+                minimum_required_counts={64.0: 16, 119.0: 2},
+            )
+        )
+
     def test_stage6_exhaustive_search_uses_a_small_relevant_config_subset(self):
         stage6 = sys.modules["stage6_layout"]
         configs = [
