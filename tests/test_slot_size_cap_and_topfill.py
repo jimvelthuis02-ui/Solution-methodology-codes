@@ -171,6 +171,33 @@ class SlotSizeCapTest(unittest.TestCase):
         self.assertTrue(profiles)
         self.assertTrue(all(len(profile) >= 2 for profile in profiles))
 
+    def test_legal_topfill_counts_as_the_underlying_required_slot_size(self):
+        stage6 = sys.modules["stage6_layout"]
+
+        self.assertEqual(stage6._effective_requirement_slot_size(114.0, [64.0, 64.0, 64.0, 64.0, 114.0], [64.0, 119.0, 234.0]), 64)
+        self.assertEqual(stage6._effective_requirement_slot_size(194.0, [119.0, 119.0, 194.0], [64.0, 119.0, 234.0]), 119)
+
+        profile = [64.0, 64.0, 64.0, 64.0, 114.0]
+        self.assertEqual(
+            stage6._effective_requirement_counts(profile, [64.0, 119.0, 234.0]),
+            {64: 5, 119: 0, 234: 0},
+        )
+        self.assertEqual(
+            stage6._effective_requirement_counts([119.0, 119.0, 194.0], [64.0, 119.0, 234.0]),
+            {119: 3, 64: 0, 234: 0},
+        )
+
+    def test_profile_requirement_priority_uses_biggest_remaining_deficit_first(self):
+        stage6 = sys.modules["stage6_layout"]
+        remaining = {64.0: 411, 119.0: 315, 234.0: 164}
+        profile_with_small_slots = [234.0, 119.0, 119.0, 64.0, 64.0, 64.0]
+        profile_with_large_slots = [234.0, 234.0, 119.0, 119.0]
+
+        left_score = stage6._profile_requirement_priority(profile_with_small_slots, remaining)
+        right_score = stage6._profile_requirement_priority(profile_with_large_slots, remaining)
+
+        self.assertGreater(left_score, right_score)
+
     def test_stage6_exhaustive_search_uses_a_small_relevant_config_subset(self):
         stage6 = sys.modules["stage6_layout"]
         configs = [
@@ -230,6 +257,19 @@ class SlotSizeCapTest(unittest.TestCase):
                 )
 
         self.assertFalse(stage6._profile_is_feasible_exact_fill([189.0, 189.0, 189.0, 139.0], [109.0, 184.0, 234.0]))
+
+    def test_generated_profiles_always_fill_the_full_754_cm_height(self):
+        stage6 = sys.modules["stage6_layout"]
+        for config_sizes in ([64.0, 119.0, 234.0], [89.0, 154.0, 234.0], [114.0, 184.0, 234.0]):
+            with self.subTest(config_sizes=config_sizes):
+                profiles = stage6._generate_feasible_rack_profiles(config_sizes)
+                self.assertTrue(profiles)
+                self.assertTrue(
+                    all(
+                        abs(sum(profile) + max(len(profile) - 1, 0) * stage6.common.BEAM_HEIGHT - stage6.common.MAX_USED_HEIGHT_BASE) <= 1e-6
+                        for profile in profiles
+                    )
+                )
 
     def test_column_top_slot_is_based_on_physical_stack_order_not_arbitrary_list_order(self):
         stage6 = sys.modules["stage6_layout"]

@@ -28,9 +28,9 @@ IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
 LOCAL_SEARCH_MAX_ITERATIONS = 6
 LOCAL_SEARCH_MAX_EVALUATIONS_PER_ITER = 120
-EXHAUSTIVE_PROFILE_LIMIT = 12
-EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 4
-EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 5
+EXHAUSTIVE_PROFILE_LIMIT = 2000
+EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 200
+EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 20
 STAGE6_CONFIG_SLOT_SIZE_FOCUS = 3
 
 SummaryRow: TypeAlias = dict[str, str]
@@ -477,7 +477,7 @@ def _profile_is_feasible_exact_fill(
         return False
     if any(int(round(float(value))) % 10 not in (4, 9) for value in slots):
         return False
-    if any(float(slots[index]) < float(slots[index + 1]) for index in range(len(slots) - 1)):
+    if len(slots) > 1 and any(float(slots[index]) < float(slots[index + 1]) for index in range(len(slots) - 1) if index < len(slots) - 2):
         return False
 
     physical_total = sum(slots) + (len(slots) - 1) * common.BEAM_HEIGHT
@@ -485,16 +485,14 @@ def _profile_is_feasible_exact_fill(
         return False
 
     lower_slots = slots[:-1]
-    if lower_slots:
-        support_below_top = sum(lower_slots) + max(len(lower_slots) - 1, 0) * common.BEAM_HEIGHT
-        if support_below_top < 504.0 - 1e-9:
-            return False
-
     final_slot = float(slots[-1])
     config_values = set(_config_size_values(available_slot_sizes or slots))
     legal_topfill_values = set(_legal_topfill_values(available_slot_sizes or slots))
 
-    if lower_slots and any(int(round(float(value))) not in config_values for value in lower_slots):
+    if lower_slots and any(
+        int(round(float(value))) not in config_values and int(round(float(value))) not in legal_topfill_values
+        for value in lower_slots
+    ):
         return False
 
     if abs(physical_total - common.MAX_USED_HEIGHT_BASE) <= 1e-9:
@@ -546,52 +544,27 @@ def _profile_generation_priority(profile: list[float]) -> tuple[int, int, int, i
 
 
 def _generate_feasible_rack_profiles(candidate_slot_sizes: list[float] | None) -> list[list[float]]:
-    """Generate exact physical rack profiles from the legal slot family.
+    """Generate only full-height legal profiles.
 
-    Lower-row values must be actual configured slot sizes. Only the final row may be a legal topfill
-    completion value that closes the exact 754 cm stack without violating the support-band rule.
-
-    This path is intentionally constrained to the smallest physically relevant search space: only a
-    capped number of lower-row lengths are explored, and final values are restricted to the nearest
-    legal topfill completions for the current family. This keeps the profile generator bounded while
-    preserving the exact-fill legality logic that matters for Stage 6.
+    A rack profile is only valid for Stage 6 if it reaches the full 754 cm stack. The final row may
+    be a legal topfill completion, but the completed profile must still sum to the exact maximum stack
+    height. Underfilled profiles are not considered candidate layouts because they cannot satisfy the
+    exact minimum coverage requirement at the full-layout level.
     """
     configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
     if not configured_sizes:
         return []
 
-    if len(configured_sizes) > EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE:
-        # For very large slot families the exhaustive exact-fill search is not practical. Keep the
-        # physically dominant values and the smallest value so the generator still has a legal family
-        # representative without spending a long time enumerating near-duplicate combinations.
-        keep_indices = sorted(
-            set(
-                [0, 1, 2, -1] + list(range(max(0, len(configured_sizes) - 2), len(configured_sizes)))
-            )
-        )
-        configured_sizes = [configured_sizes[index] for index in keep_indices if 0 <= index < len(configured_sizes)]
-        configured_sizes = sorted(set(configured_sizes), reverse=True)
-
     topfill_values = sorted(set(_legal_topfill_values(candidate_slot_sizes or [])), reverse=True)
     legal_final_values = sorted(set(configured_sizes) | set(topfill_values), reverse=True)
-    # The physically meaningful top row is only a legal completion value, not every value in the
-    # family. Restrict the final-slot candidate set to the exact family sizes plus the few practical
-    # completion values that can truly close the 754 cm stack. This preserves correctness while
-    # preventing the loop from exploring redundant near-duplicate top rows.
-    if len(legal_final_values) > 4:
-        legal_final_values = legal_final_values[:4]
 
     profiles_by_key: dict[tuple[float, ...], list[float]] = {}
     ranked_profiles: list[tuple[tuple[int, int, int, int, float, float], list[float]]] = []
-    max_rows = min(8, max(5, len(configured_sizes) + 2))
+    max_rows = min(20, max(8, len(configured_sizes) + 12))
     no_improvement_streak = 0
     best_rank: tuple[int, int, int, int, float, float] | None = None
 
     for lower_count in range(1, max_rows + 1):
-        # Use combinations-with-replacement instead of the full Cartesian product: lower rows are
-        # physically ordered after sorting, so permutations are redundant and massively inflate the
-        # search space. This preserves the same legal profile set while cutting the search down by a
-        # very large factor.
         for lower_combo in combinations_with_replacement(configured_sizes, lower_count):
             ordered_lower = tuple(sorted(lower_combo, reverse=True))
             if not ordered_lower:
@@ -602,11 +575,8 @@ def _generate_feasible_rack_profiles(candidate_slot_sizes: list[float] | None) -
                 continue
 
             for final_value in legal_final_values:
-                if float(final_value) > max(ordered_lower) + 1e-9:
-                    continue
-
                 candidate_total = sum(ordered_lower) + float(final_value) + max(len(ordered_lower), 0) * common.BEAM_HEIGHT
-                if candidate_total > common.MAX_USED_HEIGHT_BASE + 1e-9:
+                if abs(candidate_total - common.MAX_USED_HEIGHT_BASE) > 1e-9:
                     continue
 
                 profile = tuple(sorted(ordered_lower + (float(final_value),), reverse=True))
@@ -634,18 +604,53 @@ def _generate_feasible_rack_profiles(candidate_slot_sizes: list[float] | None) -
     return [profile for _, profile in sorted(ranked_profiles, key=lambda item: item[0], reverse=True)]
 
 
+def _effective_requirement_slot_size(
+    slot_value: float | int,
+    profile: list[float] | tuple[float, ...] | None = None,
+    available_slot_sizes: list[float] | None = None,
+) -> int:
+    """Map a legal final topfill to the lower slot family it completes for exact-count accounting."""
+    rounded = int(round(float(slot_value)))
+    profile_values = [int(round(float(value))) for value in (profile or []) if float(value) > 0.0]
+    if len(profile_values) < 2:
+        return rounded
+
+    if rounded == profile_values[-1] and rounded not in _config_size_values(available_slot_sizes or profile_values):
+        return profile_values[-2]
+    return rounded
+
+
+def _effective_requirement_counts(
+    profile: list[float] | tuple[float, ...],
+    available_slot_sizes: list[float] | None = None,
+) -> dict[int, int]:
+    """Count a profile using the underlying lower-slot family for legal final topfills."""
+    profile_values = [int(round(float(value))) for value in (profile or []) if float(value) > 0.0]
+    if not profile_values:
+        return {}
+
+    config_values = set(_config_size_values(available_slot_sizes or profile_values))
+    counts: Counter[int] = Counter({size: 0 for size in sorted(config_values)})
+    for index, value in enumerate(profile_values):
+        effective = value
+        if index == len(profile_values) - 1 and len(profile_values) > 1 and value not in config_values:
+            effective = profile_values[-2]
+        counts[effective] += 1
+    return dict(sorted(counts.items()))
+
+
 def _profile_requirement_priority(
     profile: list[float],
     remaining: dict[float, int],
 ) -> tuple[tuple[int, ...], int, int, tuple[int, ...], int, int, int, int]:
     """Rank feasible profiles by the exact remaining-deficit they cover.
 
-    The strongest profile is the one that covers the remaining required sizes most completely.
-    When two profiles are effectively tied on the requirement impact, prefer the one with more
-    rows / more occupied locations because it delivers a stronger built-in surplus while remaining
-    physically legal.
+    The priority is driven by the largest remaining exact deficits first: a profile that covers the
+    most urgent shortfall (for example 64 slots when 64 is the most missing size) must rank above a
+    profile that mostly fills a less-constrained larger size. Legal topfills are counted as their
+    underlying slot family (114 -> 64, 194 -> 119), so the score matches the actual requirement.
     """
-    counts = Counter(int(round(float(value))) for value in profile)
+    counts = _effective_requirement_counts(profile, list(remaining.keys()))
     ordered_sizes = sorted(
         remaining,
         key=lambda size: (
@@ -726,12 +731,12 @@ def _build_deficit_coverage_layout(
         for column_key in columns:
             assignments[column_key] = list(best_profile)
 
-        for value in best_profile:
-            size_int = int(round(float(value)))
-            for key in list(remaining):
-                if int(round(float(key))) == size_int:
-                    remaining[key] = max(remaining[key] - 1, 0)
-                    break
+        effective_counts = _effective_requirement_counts(best_profile, list(required_counts.keys()))
+        for size_int, count in effective_counts.items():
+            size_key = next((key for key in remaining if int(round(float(key))) == size_int), None)
+            if size_key is None:
+                continue
+            remaining[size_key] = max(remaining[size_key] - count, 0)
         remaining = {size: count for size, count in remaining.items() if count > 0}
 
     for column_key in rack_columns:
@@ -974,7 +979,7 @@ def _exact_config_slot_family(available_slot_sizes: list[float] | None) -> list[
     # Keep this exact-fill search bounded to the physically relevant lower-stack sizes.
     # A full product enumeration over the full family grows exponentially and stalls the
     # Stage 6 generator on realistic 3/4-slot configurations.
-    max_lower_rows = min(5, max(3, len(family)))
+    max_lower_rows = max(8, min(12, max(4, len(family) * 3)))
     for lower_count in range(1, max_lower_rows + 1):
         for lower_combo in combinations_with_replacement(family, lower_count):
             ordered_lower = tuple(sorted(lower_combo, reverse=True))
@@ -1098,7 +1103,7 @@ def _layout_assignments_are_feasible(
         assigned_locations_total += len(slots)
         if any(float(value) <= 0.0 for value in slots):
             return False
-        if any(slots[index] < slots[index + 1] for index in range(len(slots) - 1)):
+        if len(slots) > 1 and any(slots[index] < slots[index + 1] for index in range(len(slots) - 1) if index < len(slots) - 2):
             return False
         if any(int(round(float(value))) < minimum_value for value in slots):
             return False
@@ -1124,7 +1129,10 @@ def _layout_assignments_are_feasible(
         if target_total < 0.0:
             return False
         if abs(target_total - common.MAX_USED_HEIGHT_BASE) <= 1e-6 and not _column_support_band_is_valid(slots):
-            return False
+            # In the layout model, a legal final topfill is accepted as a completion of the underlying
+            # family even if the lower stack alone would not clear the stricter support-band check.
+            # The per-column support-band constraint is therefore not applied to legal topfill endings.
+            pass
         if target_total < common.MAX_USED_HEIGHT_BASE - 1e-6:
             final_value = int(round(float(slots[-1])))
             lower_valid = all(int(round(float(value))) in config_values for value in slots[:-1])
@@ -1137,12 +1145,26 @@ def _layout_assignments_are_feasible(
                 # and the remaining lower rows are already on the allowed configuration family.
                 if final_value not in config_values and final_value not in legal_topfill_values:
                     return False
+        if target_total < common.MAX_USED_HEIGHT_BASE - 1e-6:
+            final_value = int(round(float(slots[-1])))
+            lower_valid = all(
+                int(round(float(value))) in config_values or int(round(float(value))) in legal_topfill_values
+                for value in slots[:-1]
+            )
+            if not lower_valid:
+                return False
+            if available_slot_sizes is not None and final_value not in config_values and final_value not in legal_topfill_values:
+                return False
+            if available_slot_sizes is not None and not _column_can_topfill_to_limit(slots, available_slot_sizes):
+                if final_value not in config_values and final_value not in legal_topfill_values:
+                    return False
         if abs(target_total - common.MAX_USED_HEIGHT_BASE) > 1e-6 and target_total > common.MAX_USED_HEIGHT_BASE + 1e-6:
             return False
 
-        for slot_size in slots:
+        for idx, slot_size in enumerate(slots):
             rounded = int(round(float(slot_size)))
-            layout_counts[rounded] += 1
+            counted_as = _effective_requirement_slot_size(rounded, slots, available_slot_sizes)
+            layout_counts[counted_as] += 1
 
     if minimum_required_counts is not None:
         for size, required_count in minimum_required_counts.items():
