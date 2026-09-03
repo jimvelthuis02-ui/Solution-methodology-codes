@@ -171,6 +171,31 @@ class SlotSizeCapTest(unittest.TestCase):
         self.assertTrue(profiles)
         self.assertTrue(all(len(profile) >= 2 for profile in profiles))
 
+    def test_profile_generation_keeps_valid_exact_profiles_for_all_feasible_configs(self):
+        stage6 = sys.modules["stage6_layout"]
+        profiles = stage6._generate_feasible_rack_profiles([89.0, 154.0, 234.0])
+        self.assertTrue(profiles)
+        self.assertTrue(any(stage6._profile_is_feasible_exact_fill(profile, [89.0, 154.0, 234.0]) for profile in profiles))
+
+    def test_deficit_coverage_layout_re_scores_each_column_against_current_remaining_counts(self):
+        stage6 = sys.modules["stage6_layout"]
+        columns = [f"A{idx:02d}" for idx in range(6)]
+        assignments = stage6._build_deficit_coverage_layout(
+            rack_columns=columns,
+            required_counts={64.0: 12, 119.0: 6, 234.0: 3},
+            config_slot_sizes=[64.0, 119.0, 234.0],
+        )
+
+        self.assertEqual(len(assignments), len(columns))
+        self.assertGreater(len({tuple(slots) for slots in assignments.values()}), 1)
+
+        counts = stage6.Counter()
+        for slots in assignments.values():
+            counts.update(stage6._effective_requirement_counts(slots, [64.0, 119.0, 234.0]))
+        self.assertGreaterEqual(counts.get(64, 0), 12)
+        self.assertGreaterEqual(counts.get(119, 0), 6)
+        self.assertGreaterEqual(counts.get(234, 0), 3)
+
     def test_legal_topfill_counts_as_the_underlying_required_slot_size(self):
         stage6 = sys.modules["stage6_layout"]
 

@@ -26,7 +26,7 @@ SCENARIO_LABELS = {
     "Scenario_6_Item_Height": "Scenario 6",
 }
 CLUSTER_COUNTS = (3, 4, 5, 6, 7)
-CLEARANCE_CM = 5.0
+CLEARANCE_CM = 10.0
 MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 
 
