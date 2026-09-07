@@ -116,11 +116,15 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 def _deduplicate_output_columns(
     fieldnames: list[str],
     rows: list[dict[str, str]],
+    preserve_fields: set[str] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
     # Remove duplicate output columns that carry identical values row-by-row.
+    # Some reporting columns are intentionally kept even when they are constant across a shortlist
+    # because they are diagnostic KPIs and should remain available in the exported summary.
     if not fieldnames or not rows:
         return fieldnames, rows
 
+    preserve = {str(field) for field in (preserve_fields or set())}
     column_values: dict[str, list[str]] = {
         field: [str(row.get(field, "")) for row in rows]
         for field in fieldnames
@@ -129,6 +133,9 @@ def _deduplicate_output_columns(
     kept_fields: list[str] = []
     seen_signatures: set[tuple[str, ...]] = set()
     for field in fieldnames:
+        if field in preserve:
+            kept_fields.append(field)
+            continue
         signature = tuple(column_values[field])
         if signature in seen_signatures:
             continue
@@ -145,10 +152,15 @@ def _deduplicate_output_columns(
     return kept_fields, cleaned_rows
 
 
-def _write_csv_clean(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+def _write_csv_clean(
+    path: Path,
+    fieldnames: list[str],
+    rows: list[dict[str, str]],
+    preserve_fields: set[str] | None = None,
+) -> None:
     # Standardized CSV writer with parent-folder creation and column cleanup.
     path.parent.mkdir(parents=True, exist_ok=True)
-    cleaned_fields, cleaned_rows = _deduplicate_output_columns(fieldnames, rows)
+    cleaned_fields, cleaned_rows = _deduplicate_output_columns(fieldnames, rows, preserve_fields=preserve_fields)
     with path.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(target, fieldnames=cleaned_fields)
         writer.writeheader()
