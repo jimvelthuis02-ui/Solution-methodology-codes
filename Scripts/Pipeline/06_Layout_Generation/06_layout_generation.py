@@ -1,6 +1,7 @@
 import csv
 import os
 import re
+import time
 from collections import Counter, defaultdict
 from functools import lru_cache
 from itertools import combinations_with_replacement, product
@@ -691,9 +692,8 @@ def _generate_feasible_rack_profiles_cached(candidate_slot_sizes: tuple[float, .
     legal_values = set(_legal_topfill_values(candidate_slot_sizes or []))
     family_set = set(configured_sizes)
     quota_limit = 3
-    quota_counts: dict[int, int] = {size: 0 for size in configured_sizes}
     seen: set[tuple[float, ...]] = set()
-    accepted_profiles: list[tuple[float, ...]] = []
+    ordered_profiles: list[tuple[float, ...]] = []
     max_count_cap = 12
 
     def profile_family_hits(profile: tuple[float, ...] | list[float]) -> set[int]:
@@ -728,22 +728,9 @@ def _generate_feasible_rack_profiles_cached(candidate_slot_sizes: tuple[float, .
         if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
             return
 
-        covered_sizes = profile_family_hits(candidate)
-        if any(
-            size in family_set and quota_counts.get(size, 0) >= quota_limit
-            for size in covered_sizes
-        ) and any(quota_counts.get(size, 0) < quota_limit for size in configured_sizes):
-            return
-
-        accepted_profiles.append(candidate)
-        for size in covered_sizes:
-            if size in family_set:
-                quota_counts[size] += 1
+        ordered_profiles.append(candidate)
 
     def recurse(size_index: int, lower_slots: list[float]) -> None:
-        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
-            return
-
         if size_index >= len(configured_sizes):
             try_emit_profile(lower_slots)
             return
@@ -760,6 +747,17 @@ def _generate_feasible_rack_profiles_cached(candidate_slot_sizes: tuple[float, .
             recurse(size_index + 1, next_lower_slots)
 
     recurse(0, [])
+
+    quota_counts: dict[int, int] = {size: 0 for size in configured_sizes}
+    accepted_profiles: list[tuple[float, ...]] = []
+    for profile in ordered_profiles:
+        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
+            break
+        accepted_profiles.append(profile)
+        for size in profile_family_hits(profile):
+            if size in family_set:
+                quota_counts[size] += 1
+
     return tuple(accepted_profiles)
 
 
@@ -2220,6 +2218,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     layout_counter = 1
     for config in configs:
         config_id = str(config.get("Config_ID", "")).strip()
+        config_start_time = time.perf_counter()
         rows = capacity_rows.get(config_id, [])
         if not rows:
             continue
@@ -2228,22 +2227,26 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         if not base_exact_counts:
             continue
 
+        config_profile_generation_start = time.perf_counter()
         print(f"[Stage 6] config {config_id}: base counts = {[f'{int(size)}:{count}' for size, count in sorted(base_exact_counts.items())]}")
         config_slot_sizes = _slot_sizes_from_capacity(rows)
         style_candidates: list[StyleCandidate] = []
         style = IMPLEMENTATION_STYLE
         layout_id = f"LAY_{layout_counter:03d}"
         layout_counter += 1
+        rack_search_start = None
 
         # The deficit-coverage rule is the actual assignment decision in Stage 6.
         # Subsequent repair passes are disabled here so they cannot rewrite the selected rack profile
         # away from the best remaining-deficit choice.
         print(f"[Stage 6] config {config_id}: building rack profiles from slot family {config_slot_sizes}")
+        rack_search_start = time.perf_counter()
         column_assignments = _build_deficit_coverage_layout(
             rack_columns=layout_columns,
             required_counts={float(size): int(count) for size, count in base_exact_counts.items()},
             config_slot_sizes=config_slot_sizes,
         )
+        rack_search_elapsed = time.perf_counter() - rack_search_start
         # The legal rack profile is selected directly from the generated legal candidate pool.
         # No post-assignment repair or rebuild step is allowed to mutate the chosen profile.
         print(f"[Stage 6] config {config_id}: assigned profiles to {len(column_assignments)} rack columns")
@@ -2347,9 +2350,16 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             "Feasible_Profiles_Used_Total": float(feasible_profiles_used_total),
         }
 
+        profile_generation_elapsed = time.perf_counter() - config_profile_generation_start
+        rack_search_elapsed = rack_search_elapsed if rack_search_start is not None else 0.0
+        total_runtime_seconds = time.perf_counter() - config_start_time
         summary_row = {
                 "Layout_ID": layout_id,
                 "Config_ID": config_id,
+                "Runtime_Seconds": f"{total_runtime_seconds:.3f}",
+                "Runtime_Minutes": f"{total_runtime_seconds / 60.0:.3f}",
+                "Profile_Generation_Seconds": f"{profile_generation_elapsed:.3f}",
+                "Rack_Search_Seconds": f"{rack_search_elapsed:.3f}",
                 "Layout_Feasible": "YES" if final_layout_feasible else "NO",
                 "Allocation_Feasible_Initial": "YES" if feasible_layout else "NO",
                 "Required_Locations_Total": str(required_locations_total),
@@ -2506,6 +2516,10 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     # Write layout-level KPIs.
     summary_export_fieldnames = [
         "Config_ID",
+        "Runtime_Seconds",
+        "Runtime_Minutes",
+        "Profile_Generation_Seconds",
+        "Rack_Search_Seconds",
         "Layout_Feasible",
         "Allocation_Feasible_Initial",
         "Required_Locations_Total",
