@@ -28,8 +28,6 @@ PRE_ROBUST_LAYOUT_LIMIT = None
 EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 3
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
-LOCAL_SEARCH_MAX_ITERATIONS = 6
-LOCAL_SEARCH_MAX_EVALUATIONS_PER_ITER = 120
 EXHAUSTIVE_PROFILE_LIMIT = 2000
 EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 200
 EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 20
@@ -73,7 +71,7 @@ def _write_csv_preserve(path: Path, fieldnames: list[str], rows: list[dict[str, 
         writer.writerows(rows)
 
 
-def _fallback_path(path: Path, suffix: str = "_Heuristic") -> Path:
+def _fallback_path(path: Path, suffix: str = "_Backup") -> Path:
     return path.with_name(f"{path.stem}{suffix}{path.suffix}")
 
 
@@ -677,84 +675,92 @@ def _normalize_slot_family(candidate_slot_sizes: SlotSizeSequence) -> tuple[floa
 
 @lru_cache(maxsize=32)
 def _generate_feasible_rack_profiles_cached(candidate_slot_sizes: tuple[float, ...]) -> tuple[tuple[float, ...], ...]:
-    """Generate and cache the full legal rack-profile space for a normalized slot family."""
-    configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])))
+    """Generate legal profiles in descending slot-size construction order.
+
+    The profile family is built by maximizing the largest configured slot size first, then the next
+    size, and so on. A legal topfill is only used as the final row needed to complete the exact
+    754 cm stack for that underlying family; it is never treated as a separate family. Once a size
+    has appeared in three generated profiles, later profiles containing that size are skipped until
+    every configured size has reached the same minimum, thereby implementing the requested quota as a
+    profile-order coverage rule rather than as a per-profile repeat count.
+    """
+    configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
     if not configured_sizes:
         return ()
 
     legal_values = set(_legal_topfill_values(candidate_slot_sizes or []))
-    valid_final_values = sorted(set(configured_sizes) | legal_values, reverse=True)
+    family_set = set(configured_sizes)
+    quota_limit = 3
+    quota_counts: dict[int, int] = {size: 0 for size in configured_sizes}
     seen: set[tuple[float, ...]] = set()
-    ranked_profiles: list[tuple[tuple[int, int, int, int, float, float], tuple[float, ...]]] = []
-    max_lower_rows = min(12, max(2, len(configured_sizes) * 6))
+    accepted_profiles: list[tuple[float, ...]] = []
+    max_count_cap = 12
 
-    size_values = tuple(sorted(configured_sizes, reverse=True))
-
-    def lower_stacks_for_exact_completion(final_value: int, lower_row_count: int) -> set[tuple[int, ...]]:
-        required_lower_sum = int(round(
-            common.MAX_USED_HEIGHT_BASE
-            - float(final_value)
-            - common.BEAM_HEIGHT * lower_row_count
-        ))
-        if required_lower_sum <= 0:
-            return set()
-
-        @lru_cache(maxsize=None)
-        def build(remaining: int, rows_left: int, start_index: int) -> list[tuple[int, ...]]:
-            if rows_left == 0:
-                return [()] if remaining == 0 else []
-            if remaining < 0:
-                return []
-
-            results: list[tuple[int, ...]] = []
-            for index in range(start_index, len(size_values)):
-                size = size_values[index]
-                if size > remaining:
-                    continue
-                if rows_left == 1 and remaining != size:
-                    continue
-                for suffix in build(remaining - size, rows_left - 1, index):
-                    results.append((size,) + suffix)
-            return results
-
-        exact_candidates = build(required_lower_sum, lower_row_count, 0)
-        valid: set[tuple[int, ...]] = set()
-        for combo in exact_candidates:
-            combo_tuple = tuple(sorted(combo, reverse=True))
-            if not combo_tuple:
+    def profile_family_hits(profile: tuple[float, ...] | list[float]) -> set[int]:
+        hits: set[int] = set()
+        for value in profile:
+            if float(value) <= 0.0:
                 continue
-            support_height = sum(combo_tuple) + max(len(combo_tuple) - 1, 0) * common.BEAM_HEIGHT
-            if support_height < 504.0 - 1e-9:
-                continue
-            valid.add(combo_tuple)
-        return valid
+            mapped = _effective_requirement_slot_size(float(value), profile, configured_sizes)
+            if mapped in family_set:
+                hits.add(mapped)
+        return hits
 
-    for final_value in valid_final_values:
-        if final_value > common.MAX_REPRESENTATIVE_SLOT_SIZE_CM:
-            continue
-        for lower_count in range(1, max_lower_rows + 1):
-            required_lower_sum = int(round(
-                common.MAX_USED_HEIGHT_BASE
-                - float(final_value)
-                - common.BEAM_HEIGHT * lower_count
-            ))
-            if required_lower_sum <= 0:
-                continue
-            if required_lower_sum > max(configured_sizes) * lower_count + 1:
-                continue
+    def try_emit_profile(lower_slots: list[float]) -> None:
+        if not lower_slots:
+            return
 
-            for lower_combo in lower_stacks_for_exact_completion(final_value, lower_count):
-                lower_slots = [float(value) for value in lower_combo]
-                candidate = tuple(sorted(lower_slots, reverse=True) + [float(final_value)])
-                if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes or lower_slots):
-                    continue
-                if candidate in seen:
-                    continue
-                seen.add(candidate)
-                ranked_profiles.append((_profile_generation_priority(list(candidate)), candidate))
+        lower_total = sum(lower_slots)
+        lower_rows = len(lower_slots)
+        final_value = common.MAX_USED_HEIGHT_BASE - lower_total - common.BEAM_HEIGHT * lower_rows
+        if final_value <= 0.0:
+            return
 
-    ranked_profiles.sort(key=lambda item: item[0], reverse=True)
-    return tuple(profile for _, profile in ranked_profiles)
+        rounded_final = int(round(float(final_value)))
+        if rounded_final not in family_set and rounded_final not in legal_values:
+            return
+
+        candidate = tuple(sorted(lower_slots, reverse=True) + [float(rounded_final)])
+        if candidate in seen:
+            return
+        seen.add(candidate)
+
+        if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
+            return
+
+        covered_sizes = profile_family_hits(candidate)
+        if any(
+            size in family_set and quota_counts.get(size, 0) >= quota_limit
+            for size in covered_sizes
+        ) and any(quota_counts.get(size, 0) < quota_limit for size in configured_sizes):
+            return
+
+        accepted_profiles.append(candidate)
+        for size in covered_sizes:
+            if size in family_set:
+                quota_counts[size] += 1
+
+    def recurse(size_index: int, lower_slots: list[float]) -> None:
+        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
+            return
+
+        if size_index >= len(configured_sizes):
+            try_emit_profile(lower_slots)
+            return
+
+        size = configured_sizes[size_index]
+        max_count = min(max_count_cap, int(round(common.MAX_USED_HEIGHT_BASE // size)) + 2)
+        for count in range(max_count, -1, -1):
+            next_lower_slots = lower_slots + [float(size)] * count
+            next_total = sum(next_lower_slots)
+            remaining_sizes = configured_sizes[size_index + 1:]
+            minimum_future = sum(remaining_sizes) if remaining_sizes else 0
+            if remaining_sizes and next_total + minimum_future > common.MAX_USED_HEIGHT_BASE:
+                continue
+            recurse(size_index + 1, next_lower_slots)
+
+    recurse(0, [])
+    return tuple(accepted_profiles)
 
 
 def _generate_feasible_rack_profiles(candidate_slot_sizes: SlotSizeSequence) -> list[list[float]]:
@@ -1021,11 +1027,11 @@ def _build_deficit_coverage_layout(
     required_counts: dict[float, int],
     config_slot_sizes: SlotSizeSequence,
 ) -> dict[str, list[float]]:
-    """Choose rack profiles with a quota-aware global search instead of a greedy local pass.
+    """Choose rack profiles with a quota-aware global search.
 
     The legal profile pool is generated once and then the assignment is optimized across the full set of
     racks so that the chosen profile mix still matches the minimal slot-size quotas. This prevents the
-    per-rack greedy loop from repeatedly selecting the same profile family and under-serving the rare
+    per-rack selection loop from repeatedly favoring the same profile family and under-serving the rare
     124/234 requirements.
     """
     if not rack_columns:
@@ -2078,6 +2084,72 @@ def _assignment_cache_key(column_assignments: dict[str, list[float]]) -> tuple[t
 
 
 
+def _rack_profile_rows_from_location_rows(
+    layout_id: str,
+    config_id: str,
+    location_rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Aggregate per-rack profile details for compact candidate/final layout reporting."""
+    rack_rows: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in location_rows:
+        rack = str(row.get("Rack", "")).strip()
+        if rack:
+            rack_rows[rack].append(row)
+
+    rack_summary_rows: list[dict[str, str]] = []
+    for rack in sorted(rack_rows):
+        rows = rack_rows[rack]
+        columns = sorted({str(item.get("Column", "")).strip() for item in rows if str(item.get("Column", "")).strip()})
+        slot_counts: Counter[int] = Counter()
+        column_profiles: dict[str, list[int]] = defaultdict(list)
+        for row in rows:
+            slot_size = common._to_float(row.get("Assigned_Slot_Size_cm"))
+            if slot_size is not None:
+                slot_counts[int(round(float(slot_size)))] += 1
+            column = str(row.get("Column", "")).strip()
+            if column and slot_size is not None:
+                column_profiles[column].append(int(round(float(slot_size))))
+
+        representative_column = min(columns, key=lambda value: int(value)) if columns else ""
+        representative_profile = []
+        if representative_column:
+            column_rows = sorted(
+                [row for row in rows if str(row.get("Column", "")).strip() == representative_column],
+                key=lambda row: int(str(row.get("Row", "")).strip() or "0"),
+            )
+            representative_profile = []
+            for row in column_rows:
+                slot_size = common._to_float(row.get("Assigned_Slot_Size_cm"))
+                if slot_size is not None:
+                    representative_profile.append(int(round(float(slot_size))))
+        if not representative_profile:
+            representative_profile = [
+                int(round(float(value))) for value in slot_counts.elements()
+            ]
+
+        slot_distribution = "|".join(
+            f"{size}:{count}"
+            for size, count in sorted(slot_counts.items())
+        )
+        rack_summary_rows.append(
+            {
+                "Layout_ID": layout_id,
+                "Config_ID": config_id,
+                "Rack": rack,
+                "Rack_Column_Count": str(len(columns)),
+                "Rack_Columns": ",".join(f"{rack}{int(column):02d}" for column in columns),
+                "Assigned_Locations_Total": str(len(rows)),
+                "Slot_Size_Distribution": slot_distribution,
+                "Rack_Profile_Order": ",".join(str(value) for value in representative_profile),
+                "Rack_Profile_Signature": "|".join(
+                    f"{size}:{count}"
+                    for size, count in sorted(slot_counts.items())
+                ),
+            }
+        )
+    return rack_summary_rows
+
+
 def _pre_robust_sort_key(summary_row: dict[str, str]) -> tuple[int, int, int, float, int, int]:
     feasible_penalty = 0 if str(summary_row.get("Layout_Feasible", "")).strip().upper() == "YES" else 1
     additional_beams = common._to_int_default(summary_row.get("Additional_Beams_Required"), 0)
@@ -2134,6 +2206,16 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     candidate_layout_column_rows: list[dict[str, str]] = []
     candidate_layout_location_rows_all: list[dict[str, str]] = []
     candidate_layout_column_rows_all: list[dict[str, str]] = []
+    candidate_layout_rack_rows_all: list[dict[str, str]] = []
+    candidate_layout_rack_rows: list[dict[str, str]] = []
+    beam_map_rows = _read_csv(INPUT_LOCATION_BEAM_MAP)
+    beam_height_rows = _read_csv(INPUT_BEAM_HEIGHT_COORDS)
+    current_beam_units, beam_segments, current_beam_unit_heights = common._build_current_beam_units_and_segments(
+        beam_map_rows,
+        prepared_rows,
+        beam_height_rows,
+    )
+    initial_beam_count, initial_grid_count = common._initial_beam_grid_counts(prepared_rows, current_beam_units)
     # Build layout variants for every shortlisted config and layout style.
     layout_counter = 1
     for config in configs:
@@ -2153,9 +2235,9 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         layout_id = f"LAY_{layout_counter:03d}"
         layout_counter += 1
 
-        # The greedy deficit-coverage rule is the actual assignment decision in Stage 6.
-        # All later repair and local-search passes are disabled here so they cannot rewrite
-        # the selected rack profile away from the best remaining-deficit choice.
+        # The deficit-coverage rule is the actual assignment decision in Stage 6.
+        # Subsequent repair passes are disabled here so they cannot rewrite the selected rack profile
+        # away from the best remaining-deficit choice.
         print(f"[Stage 6] config {config_id}: building rack profiles from slot family {config_slot_sizes}")
         column_assignments = _build_deficit_coverage_layout(
             rack_columns=layout_columns,
@@ -2173,39 +2255,50 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         expansion_slot_sizes = sorted(float(slot_size) for slot_size in base_exact_counts)
         layout_alignment_conversions = 0
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
+        feasible_profile_pool = _generate_feasible_rack_profiles(config_slot_sizes or expansion_slot_sizes)
+        unique_profile_signatures = {
+            tuple(sorted(int(round(float(value))) for value in profile))
+            for profile in (
+                [list(slots) for slots in column_assignments.values()] if "column_assignments" in locals() else []
+            )
+        }
 
-        # Baseline Stage 6 does not rebuild the physical beam layout or run local-search improvement.
-        # Those are intentionally deferred to a separate improvement heuristic after the baseline
-        # assignment logic is working and validated.
-        generated_location_rows = [
-            {
-                "Config_ID": config_id,
-                "Location": f"{rack}{column:02d}",
-                "Rack": rack,
-                "Column": str(column),
-                "Row": str(row_index + 1),
-                "Beam_Coordinate": "",
-                "Beam_Height_Range_cm": "",
-                "Assigned_Slot_Size_cm": f"{float(slot_size):.3f}",
-                "Usable_Location": "YES",
-            }
-            for rack_column, slots in sorted(column_assignments.items())
-            for row_index, slot_size in enumerate(slots)
-            for rack, column in [(str(rack_column).rstrip("0123456789"), int(str(rack_column)[-2:]))]
-        ]
+        # Baseline Stage 6 keeps the generated layout geometry aligned with the shared
+        # beam-structure model so material delta calculations remain meaningful even without
+        # any heuristic repair/rebuild pass.
+        generated_location_rows = common._build_generated_layout_location_rows(
+            layout_id,
+            config_id,
+            style,
+            column_assignments,
+            segments=beam_segments,
+            layout_thresholds_by_rack=layout_thresholds_by_rack,
+        )
         layout_slot_distribution, layout_slot_cumulative = _slot_signatures_from_location_rows(
             generated_location_rows,
             available_slot_sizes=expansion_slot_sizes,
         )
         layout_signature = _layout_signature(generated_location_rows)
-        relocation_total = 0
-        relocation_by_column = {key: 0 for key in column_assignments}
-        removed_by_column = {key: 0 for key in column_assignments}
-        added_by_column = {key: 0 for key in column_assignments}
-        required_beams = 0
-        required_grids = 0
-        additional_beams = 0
-        additional_grids = 0
+        proposed_beam_units, proposed_beam_unit_heights = common._build_proposed_beam_units_from_layout_rows(
+            generated_location_rows,
+            beam_segments,
+        )
+        current_units_by_column = common._beam_units_by_column(beam_map_rows)
+        proposed_units_by_column = common._beam_units_by_column(generated_location_rows)
+        relocation_total, relocation_by_column, removed_by_column, added_by_column = common._beam_relocations(
+            current_beam_units,
+            proposed_beam_units,
+            current_beam_unit_heights,
+            proposed_beam_unit_heights,
+            current_units_by_column=current_units_by_column,
+            proposed_units_by_column=proposed_units_by_column,
+        )
+        required_beams, required_grids, additional_beams, additional_grids = common._material_requirements(
+            initial_beam_count,
+            initial_grid_count,
+            proposed_beam_units,
+            generated_location_rows,
+        )
 
         # Compute utilization and implementation-effort KPIs per configuration.
         assigned_total = max(len(generated_location_rows) - common._fixed_layout_location_total(), 0)
@@ -2227,10 +2320,9 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         )
 
         # Final feasibility must reflect the repaired layout itself, not the stale
-        # signal from the initial allocator. The layout can become feasible only
-        # after repair and local search, so the export gate must validate the
-        # final assignment state rather than rejecting everything that was not
-        # initially marked feasible.
+        # signal from the initial allocator. The export gate validates the final
+        # assignment state rather than rejecting everything that was not initially
+        # marked feasible.
         final_layout_feasible = (
             assigned_total >= common._explicit_occupied_target_total()
             and capacity_margin >= 0
@@ -2245,11 +2337,14 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             )
         )
         feasible_layout = final_layout_feasible
+        feasible_profiles_used_total = len({
+            tuple(sorted(int(round(float(value))) for value in profile))
+            for profile in column_assignments.values()
+            if profile
+        })
         allocation_diagnostics = {
-            "Feasible_Columns_Considered_Total": float(len(column_assignments)),
-            "Feasible_Columns_Min": float(min(len(column_assignments), 1)),
-            "Feasible_Columns_Max": float(len(column_assignments)),
-            "Feasible_Columns_Average": float(len(column_assignments) / max(len(layout_columns), 1)),
+            "Feasible_Profiles_Considered_Total": float(len(feasible_profile_pool)),
+            "Feasible_Profiles_Used_Total": float(feasible_profiles_used_total),
         }
 
         summary_row = {
@@ -2263,14 +2358,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 "Assigned_Used_Height_Total": f"{total_used_height:.3f}",
                 "Total_Allowed_Height": f"{total_allowed_height:.3f}",
                 "Space_Left": f"{space_left:.3f}",
-                "Beam_Relocations_Total": "0",
-                "Beam_Relocations_Before_Local_Search": "0",
-                "Beam_Relocations_After_Local_Search": "0",
-                "Local_Search_Accepted_Moves": "0",
-                "Initial_Beams_Total": "0",
+                "Beam_Relocations_Total": str(relocation_total),
+                "Initial_Beams_Total": str(initial_beam_count),
                 "Required_Beams_Total": str(required_beams),
                 "Additional_Beams_Required": str(additional_beams),
-                "Initial_Grids_Total": "0",
+                "Initial_Grids_Total": str(initial_grid_count),
                 "Required_Grids_Total": str(required_grids),
                 "Additional_Grids_Required": str(additional_grids),
                 "Percentage_Rack_Height_Used": f"{pct_rack_height_used:.2f}",
@@ -2281,10 +2373,8 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 "Layout_Slot_Size_Cumulative_Coverage": layout_slot_cumulative,
                 "Source_Slot_Sizes": common._encode_excel_text(",".join(f"{int(size)}" for size in config_slot_sizes)),
                 "Layout_Usable_Alignment_Conversions": str(layout_alignment_conversions),
-                "Feasible_Columns_Considered_Total": str(int(allocation_diagnostics.get("Feasible_Columns_Considered_Total", 0.0))),
-                "Feasible_Columns_Min": str(int(allocation_diagnostics.get("Feasible_Columns_Min", 0.0))),
-                "Feasible_Columns_Max": str(int(allocation_diagnostics.get("Feasible_Columns_Max", 0.0))),
-                "Feasible_Columns_Average": f"{allocation_diagnostics.get('Feasible_Columns_Average', 0.0):.3f}",
+                "Feasible_Profiles_Considered_Total": str(int(allocation_diagnostics.get("Feasible_Profiles_Considered_Total", 0.0))),
+                "Feasible_Profiles_Used_Total": str(int(allocation_diagnostics.get("Feasible_Profiles_Used_Total", 0.0))),
             }
 
         # Capture per-column slot mix and beam movement details.
@@ -2391,12 +2481,19 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 # candidate assignment, not only the subset that passes the final boolean filter.
                 candidate_layout_column_rows_all.extend(column_rows)
                 candidate_layout_location_rows_all.extend(location_rows)
+                rack_rows = _rack_profile_rows_from_location_rows(
+                    str(summary.get("Layout_ID", "")),
+                    config_id,
+                    location_rows,
+                )
+                candidate_layout_rack_rows_all.extend(rack_rows)
                 if config_id in selected_config_ids:
                     summary["Pre_Robustness_Status"] = "SELECTED"
                     summary["Pre_Robustness_Rank"] = str(config_rank.get(config_id, ""))
                     summary["Pre_Robustness_Prune_Reason"] = ""
                     candidate_layout_column_rows.extend(column_rows)
                     candidate_layout_location_rows.extend(location_rows)
+                    candidate_layout_rack_rows.extend(rack_rows)
                 else:
                     summary["Pre_Robustness_Status"] = "PRUNED"
                     summary["Pre_Robustness_Rank"] = ""
@@ -2418,9 +2515,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "Total_Allowed_Height",
         "Space_Left",
         "Beam_Relocations_Total",
-        "Beam_Relocations_Before_Local_Search",
-        "Beam_Relocations_After_Local_Search",
-        "Local_Search_Accepted_Moves",
         "Initial_Beams_Total",
         "Required_Beams_Total",
         "Additional_Beams_Required",
@@ -2434,10 +2528,8 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         "Layout_Slot_Size_Cumulative_Coverage",
         "Source_Slot_Sizes",
         "Layout_Usable_Alignment_Conversions",
-        "Feasible_Columns_Considered_Total",
-        "Feasible_Columns_Min",
-        "Feasible_Columns_Max",
-        "Feasible_Columns_Average",
+        "Feasible_Profiles_Considered_Total",
+        "Feasible_Profiles_Used_Total",
     ]
     summary_output_rows = [{key: str(value) for key, value in row.items()} for row in candidate_layout_rows]
 
@@ -2448,8 +2540,6 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     )
     preserve_metric_fields = {
         "Beam_Relocations_Total",
-        "Beam_Relocations_Before_Local_Search",
-        "Beam_Relocations_After_Local_Search",
         "Initial_Beams_Total",
         "Required_Beams_Total",
         "Additional_Beams_Required",
@@ -2538,7 +2628,24 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         ],
     )
 
-    method_label = "Greedy" if "greedy" in str(LAYOUT_OUTPUT_DIR.name).lower() else "Baseline"
+    rack_export_fieldnames = [
+        "Layout_ID",
+        "Config_ID",
+        "Rack",
+        "Rack_Column_Count",
+        "Rack_Columns",
+        "Assigned_Locations_Total",
+        "Slot_Size_Distribution",
+        "Rack_Profile_Order",
+        "Rack_Profile_Signature",
+    ]
+    _write_csv_clean_with_fallback(
+        LAYOUT_OUTPUT_DIR / "Candidate_Layout_By_Rack.csv",
+        rack_export_fieldnames,
+        [{field: str(row.get(field, "")) for field in rack_export_fieldnames} for row in candidate_layout_rack_rows_all],
+    )
+
+    method_label = "Baseline"
     empty_rows = _empty_locations_rows_by_slot_size(summary_output_rows, method_label)
     _write_csv_clean_with_fallback(
         LAYOUT_OUTPUT_DIR / "Empty_Locations_By_Slot_Size.csv",

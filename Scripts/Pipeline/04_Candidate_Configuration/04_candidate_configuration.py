@@ -19,9 +19,8 @@ MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
 def _legal_slot_profile(slot_sizes: list[float]) -> bool:
     """Return True only when the configured family itself can support a legal physical stack.
 
-    Legacy heuristic codepaths that expanded each configured slot size by a +/-30 cm envelope are
-    intentionally not used here. Lower rows must remain on the actual configured family; only the
-    final top slot may legally complete the remaining physical height.
+    Lower rows must remain on the actual configured family; only the final top slot may legally
+    complete the remaining physical height.
     """
     if not slot_sizes:
         return False

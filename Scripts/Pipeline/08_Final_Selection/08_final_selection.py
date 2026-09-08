@@ -24,12 +24,14 @@ ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustnes
 LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
 LAYOUT_BY_COLUMN_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column.csv"
 LAYOUT_BY_LOCATION_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location.csv"
+LAYOUT_BY_RACK_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack.csv"
 OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Candidate_Layout_Metric_Ranking.csv"
 WSM_WEIGHTS_FILE = common.ROOT / "Input files" / "WSM_Weights.csv"
 WSM_OUTPUT_FILE = common.STAGE8_OUTPUT_DIR / "Weighted_Sum_Method_Ranking.csv"
 FINAL_LAYOUT_BY_COLUMN_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Rack_Column.csv"
 FINAL_LAYOUT_BY_LOCATION_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
 FINAL_LAYOUT_BY_SEGMENT_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Segment.csv"
+FINAL_LAYOUT_BY_RACK_FILE = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Rack.csv"
 LEGACY_OUTPUT_FILES = [
     common.STAGE8_OUTPUT_DIR / "Objective_Layout_Recommendations.csv",
     common.STAGE8_OUTPUT_DIR / "Management_Decision_Table.csv",
@@ -494,6 +496,10 @@ def build_final_selection() -> list[dict[str, str]]:
             str(row.get("Config_ID", "")),
         ),
     )
+    for row in candidate_rows:
+        for key in list(row):
+            if key.startswith("Rank_"):
+                row.pop(key, None)
 
     _write_csv_preserve(
         OUTPUT_FILE,
@@ -503,7 +509,6 @@ def build_final_selection() -> list[dict[str, str]]:
             "Assigned_Locations_Total",
             "Capacity_Margin",
             "Occupancy_Rate",
-            "Rank_Occupancy_Rate",
             "Occupied_Locations",
             "Empty_Locations",
             "Occupied_Slot_Space_cm",
@@ -511,23 +516,15 @@ def build_final_selection() -> list[dict[str, str]]:
             "Total_Slot_Space_cm",
             "Occupied_Slot_Space_m3",
             "Empty_Slot_Space_m3",
-            "Rank_Empty_Slot_Space_m3",
             "Total_Slot_Space_m3",
-            "Rank_Total_Slot_Space_m3",
             "Space_Utilization_Pct",
-            "Rank_Space_Utilization_Pct",
             "Beam_Relocations_Total",
-            "Rank_Beam_Relocations_Total",
             "Required_Beams_Total",
             "Additional_Beams_Required",
-            "Rank_Additional_Required_Beams",
             "Required_Grids_Total",
             "Additional_Grids_Required",
-            "Rank_Additional_Required_Grids",
             "Implementation_Effort_Total",
-            "Rank_Implementation_Effort_Total",
             "Standardization_Unique_Slot_Sizes",
-            "Rank_Standardization",
             "Additional_Fill_Height_Total_cm",
             "Additional_Fill_Extra_Slot_Size_Variants",
             "Additional_Fill_Extra_Slot_Sizes",
@@ -553,6 +550,12 @@ def build_final_selection() -> list[dict[str, str]]:
         for row in _read_csv(LAYOUT_BY_LOCATION_FILE):
             if str(row.get("Config_ID", "")).strip() in candidate_ids:
                 finalist_location_rows.append(row)
+
+    finalist_rack_rows: list[dict[str, str]] = []
+    if LAYOUT_BY_RACK_FILE.exists():
+        for row in _read_csv(LAYOUT_BY_RACK_FILE):
+            if str(row.get("Config_ID", "")).strip() in candidate_ids:
+                finalist_rack_rows.append(row)
 
     prepared_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv")
     beam_map_rows = _read_csv(common.STAGE1_OUTPUT_DIR / "Location_Beam_Map.csv")
@@ -640,6 +643,23 @@ def build_final_selection() -> list[dict[str, str]]:
             "Added_Beams_In_Segment",
         ],
         segment_rows,
+    )
+
+    rack_fields = [
+        "Layout_ID",
+        "Config_ID",
+        "Rack",
+        "Rack_Column_Count",
+        "Rack_Columns",
+        "Assigned_Locations_Total",
+        "Slot_Size_Distribution",
+        "Rack_Profile_Order",
+        "Rack_Profile_Signature",
+    ]
+    common._write_csv_clean(
+        FINAL_LAYOUT_BY_RACK_FILE,
+        rack_fields,
+        [{field: str(row.get(field, "")) for field in rack_fields} for row in finalist_rack_rows],
     )
 
     figures_module = _load_figures_module()

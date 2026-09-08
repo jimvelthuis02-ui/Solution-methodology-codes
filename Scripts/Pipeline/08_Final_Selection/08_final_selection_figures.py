@@ -56,7 +56,7 @@ def _save(figure, path: Path) -> None:
 
 
 def _label(row: dict[str, str]) -> str:
-    return f"{row.get('Config_ID', '')} | {row.get('Heuristic_Label', '')}"
+    return str(row.get('Config_ID', ''))
 
 
 def _top_rows(rows: list[dict[str, str]], count: int = 12) -> list[dict[str, str]]:
@@ -117,16 +117,6 @@ COMPARISON_METRICS = [
     ("Required_Grids_Total", "Total grids required", "min"),
     ("Standardization_Unique_Slot_Sizes", "Unique slot sizes", "min"),
 ]
-HEURISTIC_SHORT_LABELS = {
-    "Baseline_None": "Baseline",
-    "Baseline_LocalSearch": "Baseline + LS",
-    "Greedy_None": "Greedy",
-    "Greedy_LocalSearch": "Greedy + LS",
-    "ConstructiveBeam_None": "Beam-aware",
-    "ConstructiveBeam_LocalSearch": "Beam-aware + LS",
-}
-
-
 def _proposed_value(row: dict[str, str], metric: str) -> float:
     if metric == "Required_Beams_Total":
         return _number(row, "Required_Beams_Total_Raw")
@@ -238,12 +228,9 @@ def _write_contributions(rows: list[dict[str, str]], output_dir: Path) -> tuple[
 
 def _write_beam_grid_tradeoff(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str]:
     figure, axis = plt.subplots(figsize=(10, 7))
-    labels_seen: set[str] = set()
     for row in rows:
-        label = str(row.get("Heuristic_Label", ""))
+        label = str(row.get("Config_ID", ""))
         axis.scatter(_number(row, "Additional_Beams_Required_Raw"), _number(row, "Additional_Grids_Required_Raw"), label=label, alpha=0.65, s=32)
-        if label not in labels_seen:
-            labels_seen.add(label)
     axis.set_title("Additional beam versus grid requirements")
     axis.set_xlabel("Additional beams required")
     axis.set_ylabel("Additional grids required")
@@ -288,27 +275,11 @@ def _write_normalized_heatmap(rows: list[dict[str, str]], output_dir: Path) -> t
     return "05_normalized_metric_heatmap.png", "Normalized metric comparison for top configurations", "Weighted_Sum_Method_Ranking.csv"
 
 
-def _write_heuristic_comparison(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str]:
-    labels = sorted({str(row.get("Heuristic_Label", "")) for row in rows})
-    short_labels = [HEURISTIC_SHORT_LABELS.get(label, label) for label in labels]
-    metrics = [("Weighted_Sum_Score", "WSM score"), ("Beam_Relocations_Total_Raw", "Beam relocations"), ("Space_Utilization_Pct_Raw", "Space utilization (%)"), ("Occupancy_Rate_Raw", "Occupancy rate")]
-    figure, axes = plt.subplots(2, 2, figsize=(15, 10))
-    for axis, (field, title) in zip(axes.flat, metrics):
-        values_by_label = [[_number(row, field) for row in rows if row.get("Heuristic_Label") == label] for label in labels]
-        axis.boxplot(values_by_label, tick_labels=short_labels, patch_artist=True, boxprops={"facecolor": "#99f6e4"}, medianprops={"color": "#b91c1c", "linewidth": 2})
-        axis.set_title(title)
-        axis.tick_params(axis="x", rotation=35, labelsize=8)
-        axis.grid(axis="y", alpha=0.25)
-    figure.suptitle("Distribution of results by heuristic", fontsize=15)
-    _save(figure, output_dir / "06_heuristic_comparison.png")
-    return "06_heuristic_comparison.png", "Readable distributions of WSM score, implementation, space, and occupancy by heuristic", "Weighted_Sum_Method_Ranking.csv"
-
-
 def _write_layout_heatmap(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str] | None:
     if not rows:
         return None
     selected_id = min(rows, key=lambda row: _number(row, "Weighted_Sum_Rank", 10**9)).get("Config_ID", "")
-    locations_path = common.OUTPUT_ROOT / "08_Final_Selection_Comparison_AllHeuristics" / "Final_Layout_By_Location.csv"
+    locations_path = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
     if not locations_path.exists():
         locations_path = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
     if not locations_path.exists():
@@ -357,7 +328,6 @@ def generate_figures(ranking_file: Path, output_dir: Path) -> list[Path]:
         return []
     entries = [
         _write_contributions(rows, output_dir),
-        _write_heuristic_comparison(rows, output_dir),
     ]
     entries.extend(_write_original_comparison(rows, output_dir))
     index_path = output_dir / "Figure_Index.csv"
@@ -369,7 +339,7 @@ def generate_figures(ranking_file: Path, output_dir: Path) -> list[Path]:
 
 
 if __name__ == "__main__":
-    source = common.OUTPUT_ROOT / "08_Final_Selection_Comparison_AllHeuristics" / "Weighted_Sum_Method_Ranking.csv"
-    destination = common.OUTPUT_ROOT / "08_Final_Selection_Comparison_AllHeuristics" / "Figures"
+    source = common.OUTPUT_ROOT / "08_Final_Selection" / "Weighted_Sum_Method_Ranking.csv"
+    destination = common.OUTPUT_ROOT / "08_Final_Selection" / "Figures"
     generated = generate_figures(source, destination)
     print(f"Generated {len(generated)} figures in {destination}")

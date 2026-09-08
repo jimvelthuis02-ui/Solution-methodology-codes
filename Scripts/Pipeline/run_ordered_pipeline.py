@@ -1171,34 +1171,18 @@ ORDERED_SCRIPTS = [
     "04_Candidate_Configuration/04_candidate_configuration.py",
     "05_Capacity_Determination/05_capacity_determination.py",
     "06_Layout_Generation/06_layout_generation.py",
-    "06_Layout_Generation/06_layout_generation_greedy.py",
     "07_Robustness_Evaluation/07_robustness_evaluation.py",
-    "07_Robustness_Evaluation/07_robustness_evaluation_greedy.py",
     "08_Final_Selection/08_final_selection.py",
-    "08_Final_Selection/08_final_selection_greedy.py",
-    "Heuristic_Variants/heuristic_variants.py",
-    "06_Layout_Generation/06_layout_generation_heuristics.py",
-    "07_Robustness_Evaluation/07_robustness_heuristics.py",
-    "08_Final_Selection/08_final_selection_heuristics.py",
 ]
 
 
-def _include_heuristic_scripts() -> bool:
-    # The active execution path is the strict legal layout flow. Greedy and
-    # heuristic variant scripts remain available for manual/diagnostic runs, but
-    # they must not override the normal pipeline behavior by default.
-    value = str(os.getenv("PIPELINE_INCLUDE_HEURISTICS", "0")).strip().lower()
-    return value not in {"0", "false", "no", "off"}
+def _include_variant_scripts() -> bool:
+    # Variant comparison scripts are intentionally removed from the active pipeline.
+    return False
 
 
 def ordered_scripts() -> list[str]:
-    scripts = list(ORDERED_SCRIPTS)
-    if not _include_heuristic_scripts():
-        return [
-            script_name for script_name in scripts
-            if "heuristic" not in script_name.lower() and "heuristic_variants" not in script_name.lower()
-        ]
-    return scripts
+    return list(ORDERED_SCRIPTS)
 
 
 def _script_path(script_name: str) -> Path:
