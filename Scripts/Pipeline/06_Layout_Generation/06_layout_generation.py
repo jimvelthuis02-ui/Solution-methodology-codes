@@ -26,16 +26,17 @@ LAYOUT_DIAGNOSTICS_DIR = LAYOUT_OUTPUT_DIR
 # The pre-robust pass should keep every valid generated layout candidate rather
 # than artificially chopping the search space down to a fixed-size shortlist.
 PRE_ROBUST_LAYOUT_LIMIT = None
-EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 3
+EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 20
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
 EXHAUSTIVE_PROFILE_LIMIT = 2000
 EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 200
 EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 20
 STAGE6_CONFIG_SLOT_SIZE_FOCUS = 3
-DEFAULT_TARGET_CONFIGS = "CFG_001,CFG_002"
+DEFAULT_TARGET_CONFIGS = None
 PROFILE_CANDIDATE_LIMIT = 40
 PROFILE_CANDIDATE_GUARD_SIZE_COVERAGE = 2
+PROFILE_QUOTA_LIMIT = 3
 
 SummaryRow: TypeAlias = dict[str, str]
 DetailRows: TypeAlias = list[dict[str, str]]
@@ -582,6 +583,44 @@ def _expand_layout_capacity(
     return compact_assignments, compact_used
 
 
+def _profile_has_legal_extension(
+    profile: list[float] | tuple[float, ...],
+    available_slot_sizes: SlotSizeSequence = None,
+) -> bool:
+    """Return True when the current exact-fill profile can be legally extended by another configured slot.
+
+    This enforces the rule that an unfinished stack must be continued whenever a configured family size
+    can legally complete it further; otherwise a shorter residual such as 214 would incorrectly win over
+    the longer exact continuation 129 + 69.
+    """
+    slots = [float(value) for value in (profile or []) if float(value) > 0.0]
+    if len(slots) < 2:
+        return False
+
+    config_values = sorted(_config_size_values(available_slot_sizes or slots))
+    if not config_values:
+        return False
+
+    lower_slots = [float(value) for value in slots[:-1]]
+    for next_size in config_values:
+        extended_lower = sorted([*lower_slots, float(next_size)], reverse=True)
+        residual = common.MAX_USED_HEIGHT_BASE - sum(extended_lower) - common.BEAM_HEIGHT * len(extended_lower)
+        if residual <= 0.0:
+            continue
+
+        rounded_residual = int(round(float(residual)))
+        if rounded_residual > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+            continue
+        if rounded_residual not in config_values and rounded_residual not in _legal_topfill_values(available_slot_sizes or slots):
+            continue
+
+        trial_profile = tuple(sorted(extended_lower + [float(rounded_residual)], reverse=True))
+        if _profile_is_feasible_exact_fill(list(trial_profile), available_slot_sizes):
+            return True
+
+    return False
+
+
 def _profile_is_feasible_exact_fill(
     profile: list[float] | tuple[float, ...],
     available_slot_sizes: SlotSizeSequence = None,
@@ -681,13 +720,12 @@ def _normalize_slot_family(candidate_slot_sizes: SlotSizeSequence) -> tuple[floa
 
 @lru_cache(maxsize=32)
 def _generate_feasible_rack_profiles_cached(candidate_slot_sizes: tuple[float, ...]) -> tuple[tuple[float, ...], ...]:
-    """Generate the canonical ordered exact-fill family stream for a configuration.
+    """Generate the accepted exact-fill profile stream in descending legal order.
 
-    The stream is generated in descending family dominance: the largest configured slot family is
-    prioritized first, then the next family size, and so on. A final topfill is only a residual
-    completion of the lower stack; it is never treated as an independent family member. Profiles are
-    then pruned in-generation once a configured size has reached the requested quota so that the
-    accepted stream matches the intended exact family list for each configuration.
+    Profiles are generated in the canonical descending family walk. Each candidate is evaluated
+    immediately against the remaining quota. If it contributes to no configured family that still
+    needs quota, it is skipped and the next candidate is assessed. Generation stops only once every
+    configured family has reached the required quota of 3.
     """
     configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
     if not configured_sizes:
@@ -695,79 +733,73 @@ def _generate_feasible_rack_profiles_cached(candidate_slot_sizes: tuple[float, .
 
     family_set = set(configured_sizes)
     legal_values = set(_legal_topfill_values(candidate_slot_sizes or []))
-    max_configured = max(configured_sizes)
     seen: set[tuple[float, ...]] = set()
-    exact_profiles: list[tuple[float, ...]] = []
-
-    def _ordered_profile_signature(profile: tuple[float, ...]) -> tuple[int, ...]:
-        mapped_counts = {size: 0 for size in configured_sizes}
-        for value in profile:
-            if float(value) <= 0.0:
-                continue
-            mapped = int(round(float(_effective_requirement_slot_size(float(value), list(profile), configured_sizes))))
-            if mapped in mapped_counts:
-                mapped_counts[mapped] += 1
-        return tuple(mapped_counts[size] for size in configured_sizes)
-
-    max_lower_rows = min(12, max(2, len(configured_sizes) * 4))
-    for lower_count in range(1, max_lower_rows + 1):
-        for lower_combo in combinations_with_replacement(configured_sizes, lower_count):
-            lower_slots = [float(value) for value in lower_combo]
-            if not lower_slots:
-                continue
-            support_height = sum(lower_slots) + (len(lower_slots) - 1) * common.BEAM_HEIGHT
-            if support_height < 504.0 - 1e-9:
-                continue
-            final_value = common.MAX_USED_HEIGHT_BASE - sum(lower_slots) - common.BEAM_HEIGHT * len(lower_slots)
-            if final_value <= 0.0:
-                continue
-            rounded_final = int(round(float(final_value)))
-            if rounded_final > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
-                continue
-            if rounded_final not in family_set and rounded_final not in legal_values:
-                continue
-            candidate = tuple(sorted((lower_slots + [float(rounded_final)]), reverse=True))
-            if candidate in seen:
-                continue
-            if max(int(round(float(value))) for value in candidate) != max_configured:
-                continue
-            if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
-                continue
-            seen.add(candidate)
-            exact_profiles.append(candidate)
-
-    ordered_profiles = sorted(
-        set(exact_profiles),
-        key=lambda profile: _ordered_profile_signature(profile),
-        reverse=True,
-    )
-
-    quota_limit = 3
     accepted_profiles: list[tuple[float, ...]] = []
+    quota_limit = PROFILE_QUOTA_LIMIT
     quota_counts: dict[int, int] = {size: 0 for size in configured_sizes}
-    for profile in ordered_profiles:
-        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
+    max_lower_rows = min(12, max(2, len(configured_sizes) * 4))
+
+    def _iter_canonical_profiles():
+        for lower_count in range(1, max_lower_rows + 1):
+            for lower_combo in combinations_with_replacement(configured_sizes, lower_count):
+                lower_slots = [float(value) for value in lower_combo]
+                if not lower_slots:
+                    continue
+
+                support_height = sum(lower_slots) + (len(lower_slots) - 1) * common.BEAM_HEIGHT
+                if support_height < 504.0 - 1e-9:
+                    continue
+
+                final_value = common.MAX_USED_HEIGHT_BASE - sum(lower_slots) - common.BEAM_HEIGHT * len(lower_slots)
+                if final_value <= 0.0:
+                    continue
+
+                rounded_final = int(round(float(final_value)))
+                if rounded_final > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+                    continue
+                if rounded_final not in family_set and rounded_final not in legal_values:
+                    continue
+
+                ordered_lower = tuple(sorted(lower_slots, reverse=True))
+                if rounded_final in family_set:
+                    candidate = tuple(sorted(ordered_lower + (float(rounded_final),), reverse=True))
+                else:
+                    candidate = ordered_lower + (float(rounded_final),)
+
+                if candidate in seen:
+                    continue
+                if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
+                    continue
+                if _profile_has_legal_extension(candidate, candidate_slot_sizes):
+                    continue
+
+                seen.add(candidate)
+                yield candidate
+
+    profile_stream = _iter_canonical_profiles()
+    while not all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
+        try:
+            candidate = next(profile_stream)
+        except StopIteration:
             break
 
-        family_hits = {
-            int(round(float(_effective_requirement_slot_size(float(value), list(profile), configured_sizes))))
-            for value in profile
+        mapped_profile_values = [
+            int(round(float(_effective_requirement_slot_size(float(value), list(candidate), configured_sizes))))
+            for value in candidate
             if float(value) > 0.0
-            and int(round(float(_effective_requirement_slot_size(float(value), list(profile), configured_sizes)))) in family_set
-        }
-        if not family_hits:
+        ]
+        profile_family_presence = {size for size in mapped_profile_values if size in family_set}
+        if not profile_family_presence:
             continue
 
         remaining_sizes = [size for size in configured_sizes if quota_counts.get(size, 0) < quota_limit]
-        if not any(size in family_hits for size in remaining_sizes):
+        increment_sizes = [size for size in sorted(profile_family_presence, reverse=True) if size in remaining_sizes]
+        if not increment_sizes:
             continue
 
-        accepted_profiles.append(profile)
-        for size in family_hits:
+        accepted_profiles.append(candidate)
+        for size in increment_sizes:
             quota_counts[size] = quota_counts.get(size, 0) + 1
-
-        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
-            break
 
     return tuple(accepted_profiles)
 
@@ -1050,9 +1082,11 @@ def _build_deficit_coverage_layout(
     profile_generation_start = time.perf_counter()
     profiles = _generate_feasible_rack_profiles(config_slot_sizes or list(required_counts.keys()))
     _LAST_STAGE6_STEP_TIMINGS["profile_generation"] = time.perf_counter() - profile_generation_start
-    shortlist_start = time.perf_counter()
-    profiles = _choose_profile_shortlist(profiles, required, PROFILE_CANDIDATE_LIMIT)
-    _LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = time.perf_counter() - shortlist_start
+
+    # The canonical pool is already the exact legal family stream after the generation + quota-pruning
+    # rules. Do not re-trim it with a second shortlist here; rack assignment and distribution ranking
+    # must operate only on that accepted profile family, not on a reduced heuristic subset.
+    _LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
     if not profiles:
         return {column_key: [] for column_key in rack_columns}
 
