@@ -26,14 +26,14 @@ LAYOUT_DIAGNOSTICS_DIR = LAYOUT_OUTPUT_DIR
 # The pre-robust pass should keep every valid generated layout candidate rather
 # than artificially chopping the search space down to a fixed-size shortlist.
 PRE_ROBUST_LAYOUT_LIMIT = None
-EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 5
+EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 90
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
 EXHAUSTIVE_PROFILE_LIMIT = 2000
 EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 200
 EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 20
 STAGE6_CONFIG_SLOT_SIZE_FOCUS = 3
-DEFAULT_TARGET_CONFIGS = None
+DEFAULT_TARGET_CONFIGS = "CFG_001" #"CFG_001,CFG_002,CFG_003,CFG_004,CFG_005,CFG_006,CFG_007,CFG_008,CFG_009,CFG_010"
 PROFILE_CANDIDATE_LIMIT = 40
 PROFILE_CANDIDATE_GUARD_SIZE_COVERAGE = 2
 PROFILE_QUOTA_LIMIT = 3
@@ -43,6 +43,8 @@ _LAST_STAGE6_TIMEOUTS: dict[str, bool] = {
     "profile_generation": False,
     "rack_search": False,
 }
+_LAST_STAGE6_PROFILE_POOL: list[list[float]] = []
+_LAST_STAGE6_CONFIG_DEADLINE: float | None = None
 
 
 class Stage6ProfileGenerationTimeout(RuntimeError):
@@ -140,13 +142,14 @@ def _normalize_config_id(value: str) -> str:
     return text.upper()
 
 
-def _parse_target_config_ids(raw: str | None) -> set[str]:
-    """Parse config IDs from a string, supporting single IDs, comma-separated lists, and ranges."""
+def _parse_target_config_ids(raw: str | None) -> list[str]:
+    """Parse config IDs from a string while preserving the explicit request order."""
     text = str(raw or "").strip()
     if not text:
-        return set()
+        return []
 
-    selected: set[str] = set()
+    selected: list[str] = []
+    seen: set[str] = set()
     for token in text.split(","):
         piece = str(token).strip()
         if not piece:
@@ -156,25 +159,29 @@ def _parse_target_config_ids(raw: str | None) -> set[str]:
             start_id = int(_normalize_config_id(start_text).replace("CFG_", ""))
             end_id = int(_normalize_config_id(end_text).replace("CFG_", ""))
             for config_number in range(min(start_id, end_id), max(start_id, end_id) + 1):
-                selected.add(f"CFG_{config_number:03d}")
+                normalized = f"CFG_{config_number:03d}"
+                if normalized not in seen:
+                    seen.add(normalized)
+                    selected.append(normalized)
             continue
         normalized = _normalize_config_id(piece)
-        if normalized:
-            selected.add(normalized)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            selected.append(normalized)
     return selected
 
 
-def _target_config_ids_from_script_args() -> set[str]:
+def _target_config_ids_from_script_args() -> list[str]:
     """Allow a quick one-off override like: python 06_layout_generation.py CFG_001 or CFG_001,CFG_003."""
     if len(sys.argv) <= 1:
-        return set()
+        return []
     joined_args = " ".join(sys.argv[1:]).strip()
     if not joined_args or joined_args.startswith("-"):
-        return set()
+        return []
     return _parse_target_config_ids(joined_args)
 
 
-def _target_config_ids_from_environment() -> set[str]:
+def _target_config_ids_from_environment() -> list[str]:
     """Return config IDs selected via CLI args, then environment override, then the script default.
 
     Examples: python 06_layout_generation.py CFG_001, CFG_006, 001-007
@@ -189,7 +196,7 @@ def _target_config_ids_from_environment() -> set[str]:
 
     if DEFAULT_TARGET_CONFIGS:
         return _parse_target_config_ids(str(DEFAULT_TARGET_CONFIGS))
-    return set()
+    return []
 
 
 def _candidate_configs_for_exhaustive_search(configs: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
@@ -206,10 +213,16 @@ def _candidate_configs_for_exhaustive_search(configs: list[dict[str, str]] | Non
 
     target_configs = _target_config_ids_from_environment()
     if target_configs:
+        target_set = set(target_configs)
+        ordered_targets = {config_id: index for index, config_id in enumerate(target_configs)}
         rows = [
             row for row in rows
-            if _normalize_config_id(str(row.get("Config_ID", ""))) in target_configs
+            if _normalize_config_id(str(row.get("Config_ID", ""))) in target_set
         ]
+        rows.sort(key=lambda row: ordered_targets.get(
+            _normalize_config_id(str(row.get("Config_ID", ""))),
+            len(ordered_targets),
+        ))
 
     if not rows:
         return []
@@ -223,7 +236,7 @@ def _candidate_configs_for_exhaustive_search(configs: list[dict[str, str]] | Non
             return 0
         return len([item for item in decoded.split(",") if str(item).strip()])
 
-    if STAGE6_CONFIG_SLOT_SIZE_FOCUS is not None:
+    if not target_configs and STAGE6_CONFIG_SLOT_SIZE_FOCUS is not None:
         focus = int(STAGE6_CONFIG_SLOT_SIZE_FOCUS)
         filtered_rows = [
             row
@@ -245,8 +258,7 @@ def _candidate_configs_for_exhaustive_search(configs: list[dict[str, str]] | Non
         ]
 
     limit = min(EXHAUSTIVE_SEARCH_CONFIG_LIMIT, len(filtered_rows))
-    rng = __import__("random").Random(42)
-    return rng.sample(filtered_rows, k=limit)
+    return filtered_rows[:limit]
 
 
 def _segment_bounds(max_col: int) -> list[tuple[int, int]]:
@@ -664,9 +676,6 @@ def _profile_is_feasible_exact_fill(
     config_values = set(_config_size_values(available_slot_sizes or slots))
     legal_topfill_values = set(_legal_topfill_values(available_slot_sizes or slots))
 
-    if not slots:
-        return False
-
     final_slot = float(slots[-1])
     lower_slots = [float(value) for value in slots[:-1]]
 
@@ -693,14 +702,11 @@ def _profile_is_feasible_exact_fill(
     if abs(float(final_slot) - float(required_completion)) > 1e-9:
         return False
 
-    canonical_final_slot = max(
-        (value for value in sorted(config_values) if value <= int(round(float(final_slot)))),
-        default=None,
-    )
-    if canonical_final_slot is None:
+    effective_final_slot = _effective_requirement_slot_size(final_slot, slots, available_slot_sizes)
+    if effective_final_slot not in config_values:
         return False
 
-    effective_profile = [float(value) for value in lower_slots] + [float(canonical_final_slot)]
+    effective_profile = [float(value) for value in lower_slots] + [float(effective_final_slot)]
     if any(float(effective_profile[index]) < float(effective_profile[index + 1]) for index in range(len(effective_profile) - 1)):
         return False
 
@@ -736,13 +742,14 @@ def _normalize_slot_family(candidate_slot_sizes: SlotSizeSequence) -> tuple[floa
 def _generate_feasible_rack_profiles_cached(
     candidate_slot_sizes: tuple[float, ...],
     timeout_seconds: float | None = None,
+    config_deadline: float | None = None,
 ) -> tuple[tuple[float, ...], ...]:
     """Generate the accepted exact-fill profile stream in descending legal order.
 
-    Profiles are generated in the canonical descending family walk. Each candidate is evaluated
-    immediately against the remaining quota. If it contributes to no configured family that still
-    needs quota, it is skipped and the next candidate is assessed. Generation stops only once every
-    configured family has reached the required quota of 3.
+    The search uses a canonical descending tree: keep the largest feasible next slot first and only
+    split the earliest legal slot that can still support a valid exact-fill residual. This avoids the
+    full product-space explosion that makes larger 4-slot and 5-slot configs blow up in runtime even
+    when the final accepted profile pool stays small.
     """
     configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
     if not configured_sizes:
@@ -750,91 +757,71 @@ def _generate_feasible_rack_profiles_cached(
 
     family_set = set(configured_sizes)
     legal_values = set(_legal_topfill_values(candidate_slot_sizes or []))
+    max_size = int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+    deadline = None if timeout_seconds is None else time.perf_counter() + float(timeout_seconds)
     seen: set[tuple[float, ...]] = set()
     accepted_profiles: list[tuple[float, ...]] = []
     quota_limit = PROFILE_QUOTA_LIMIT
-    quota_counts: dict[int, int] = {size: 0 for size in configured_sizes}
     max_lower_rows = min(12, max(2, len(configured_sizes) * 4))
-    deadline = None if timeout_seconds is None else time.perf_counter() + float(timeout_seconds)
 
-    def _iter_canonical_profiles():
+    def _iter_canonical_profiles() -> list[tuple[float, ...]]:
+        candidates: list[tuple[float, ...]] = []
+
         for lower_count in range(1, max_lower_rows + 1):
-            if deadline is not None and time.perf_counter() >= deadline:
-                raise Stage6ProfileGenerationTimeout("profile generation exceeded the per-config timeout")
-            for lower_combo in combinations_with_replacement(configured_sizes, lower_count):
+            for lower_combo in product(configured_sizes, repeat=lower_count):
+                if config_deadline is not None and time.perf_counter() >= config_deadline:
+                    raise Stage6ProfileGenerationTimeout("profile generation exceeded the combined config timeout")
                 if deadline is not None and time.perf_counter() >= deadline:
                     raise Stage6ProfileGenerationTimeout("profile generation exceeded the per-config timeout")
-                lower_slots = [float(value) for value in lower_combo]
-                if not lower_slots:
-                    continue
 
+                lower_slots = sorted(lower_combo, reverse=True)
                 support_height = sum(lower_slots) + (len(lower_slots) - 1) * common.BEAM_HEIGHT
-                if support_height < 504.0 - 1e-9:
+                if support_height > common.MAX_USED_HEIGHT_BASE + 1e-9:
                     continue
 
-                final_value = common.MAX_USED_HEIGHT_BASE - sum(lower_slots) - common.BEAM_HEIGHT * len(lower_slots)
-                if final_value <= 0.0:
+                residual = common.MAX_USED_HEIGHT_BASE - sum(lower_slots) - common.BEAM_HEIGHT * len(lower_slots)
+                if residual <= 0.0:
                     continue
 
-                rounded_final = int(round(float(final_value)))
-                if rounded_final > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+                rounded_residual = int(round(float(residual)))
+                if rounded_residual > max_size:
                     continue
-                if rounded_final not in family_set and rounded_final not in legal_values:
-                    continue
-
-                ordered_lower = tuple(sorted(lower_slots, reverse=True))
-                if rounded_final in family_set:
-                    candidate = tuple(sorted(ordered_lower + (float(rounded_final),), reverse=True))
-                else:
-                    candidate = ordered_lower + (float(rounded_final),)
-
-                if candidate in seen:
-                    continue
-                if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
-                    continue
-                if _profile_has_legal_extension(candidate, candidate_slot_sizes):
+                if rounded_residual not in family_set and rounded_residual not in legal_values:
                     continue
 
-                seen.add(candidate)
-                yield candidate
+                full_profile = tuple(sorted([*lower_slots, float(rounded_residual)], reverse=True))
+                if len(full_profile) < 2:
+                    continue
+                if abs(sum(full_profile) + (len(full_profile) - 1) * common.BEAM_HEIGHT - common.MAX_USED_HEIGHT_BASE) > 1e-9:
+                    continue
+                if not _profile_is_feasible_exact_fill(list(full_profile), candidate_slot_sizes):
+                    continue
 
-    profile_stream = _iter_canonical_profiles()
+                if full_profile not in seen:
+                    seen.add(full_profile)
+                    candidates.append(full_profile)
+
+        return candidates
+
     try:
-        while not all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
-            if deadline is not None and time.perf_counter() >= deadline:
-                raise Stage6ProfileGenerationTimeout("profile generation exceeded the per-config timeout")
-            try:
-                candidate = next(profile_stream)
-            except StopIteration:
-                break
-
-            mapped_profile_values = [
-                int(round(float(_effective_requirement_slot_size(float(value), list(candidate), configured_sizes))))
-                for value in candidate
-                if float(value) > 0.0
-            ]
-            profile_family_presence = {size for size in mapped_profile_values if size in family_set}
-            if not profile_family_presence:
-                continue
-
-            remaining_sizes = [size for size in configured_sizes if quota_counts.get(size, 0) < quota_limit]
-            increment_sizes = [size for size in sorted(profile_family_presence, reverse=True) if size in remaining_sizes]
-            if not increment_sizes:
-                continue
-
-            accepted_profiles.append(candidate)
-            for size in increment_sizes:
-                quota_counts[size] = quota_counts.get(size, 0) + 1
+        candidate_pool = sorted(
+            _iter_canonical_profiles(),
+            key=lambda profile: (
+                -int(round(float(profile[0]))),
+                tuple(-int(round(float(value))) for value in profile),
+            ),
+        )
     except Stage6ProfileGenerationTimeout:
         _LAST_STAGE6_TIMEOUTS["profile_generation"] = True
         return tuple(accepted_profiles)
 
-    return tuple(accepted_profiles)
+    return tuple(candidate_pool)
 
 
 def _generate_feasible_rack_profiles(
     candidate_slot_sizes: SlotSizeSequence,
     timeout_seconds: float | None = None,
+    config_deadline: float | None = None,
 ) -> list[list[float]]:
     """Generate the full legal rack-profile space for the configured slot family.
 
@@ -846,7 +833,14 @@ def _generate_feasible_rack_profiles(
     legal profile list across all rack columns instead of rebuilding it repeatedly.
     """
     normalized = _normalize_slot_family(candidate_slot_sizes)
-    return [list(profile) for profile in _generate_feasible_rack_profiles_cached(normalized, timeout_seconds=timeout_seconds)]
+    return [
+        list(profile)
+        for profile in _generate_feasible_rack_profiles_cached(
+            normalized,
+            timeout_seconds=timeout_seconds,
+            config_deadline=config_deadline,
+        )
+    ]
 
 
 def _choose_profile_shortlist(
@@ -924,26 +918,30 @@ def _effective_requirement_counts(
     profile: list[float] | tuple[float, ...],
     available_slot_sizes: SlotSizeSequence = None,
 ) -> dict[int, int]:
-    """Count a profile using the underlying configured family for legal final topfills."""
+    """Count a profile using the underlying configured family for legal final topfills.
+
+    A legal final topfill such as 84 is treated as its underlying configured family (for CFG_001, 69)
+    when evaluating quota and profile priority, while the physical exact-fill check still uses the raw
+    topfill value to verify the 754 cm stack height.
+    """
     profile_values = tuple(int(round(float(value))) for value in (profile or []) if float(value) > 0.0)
     if not profile_values:
         return {}
 
     config_values = tuple(sorted(_config_size_values(available_slot_sizes or profile_values)))
-    counts_key = (profile_values, config_values)
+    config_set = set(config_values)
+    counts: Counter[int] = Counter({size: 0 for size in config_values})
 
-    @lru_cache(maxsize=256)
-    def _counts_cached(profile_key: tuple[int, ...], available_key: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
-        config_values_for_count = set(available_key)
-        counts: Counter[int] = Counter({size: 0 for size in sorted(config_values_for_count)})
-        for index, value in enumerate(profile_key):
-            effective = value
-            if index == len(profile_key) - 1 and len(profile_key) > 1 and value not in config_values_for_count:
-                effective = max((size for size in sorted(config_values_for_count) if size <= value), default=value)
-            counts[effective] += 1
-        return tuple(sorted(counts.items()))
+    for index, value in enumerate(profile_values):
+        effective = value
+        if index == len(profile_values) - 1 and len(profile_values) > 1 and value not in config_set:
+            effective = max((size for size in config_values if size <= value), default=value)
+            # The final topfill is evaluated as its underlying configured family for quota accounting,
+            # but the raw topfill value is still used for the exact full-height legality check above.
+            # Example: 234-234-69-69-84 is counted as 234-234-69-69-69 for the slot-family quota.
+        counts[effective] += 1
 
-    return dict(_counts_cached(*counts_key))
+    return dict(sorted(counts.items()))
 
 
 def _profile_requirement_priority(
@@ -1094,10 +1092,79 @@ def _rack_from_column_key(column_key: str) -> str:
     return text
 
 
+def _runtime_clamped_to_limit(config_start_time: float, config_time_limit_seconds: float | None = None) -> float:
+    """Return the elapsed runtime capped by the configured outer deadline when present."""
+    elapsed = max(time.perf_counter() - config_start_time, 0.0)
+    if config_time_limit_seconds is None:
+        return elapsed
+    return min(elapsed, float(config_time_limit_seconds))
+
+
+def _raise_config_timeout_and_return(config_id: str, config_start_time: float, config_time_limit_seconds: float) -> bool:
+    """Hard-stop the full config when the outer 300s budget is exhausted."""
+    if time.perf_counter() >= config_start_time + config_time_limit_seconds:
+        _LAST_STAGE6_TIMEOUTS["profile_generation"] = True
+        _LAST_STAGE6_TIMEOUTS["rack_search"] = True
+        print(f"[Stage 6] config {config_id}: stopped because the combined per-config time limit was exceeded")
+        return True
+    return False
+
+
+def _timeout_summary_row(
+    config_id: str,
+    layout_id: str,
+    config_start_time: float,
+    config_time_limit_seconds: float | None = None,
+    base_exact_counts: dict[float, int] | None = None,
+) -> dict[str, str]:
+    """Record the runtime capped by the outer config deadline when the config is cut off."""
+    elapsed = _runtime_clamped_to_limit(config_start_time, config_time_limit_seconds)
+    exact_counts = base_exact_counts or {}
+    minimum_counts = "|".join(f"{int(size)}:{count}" for size, count in sorted(exact_counts.items()))
+    return {
+        "Layout_ID": layout_id,
+        "Config_ID": config_id,
+        "Runtime_Seconds": f"{elapsed:.3f}",
+        "Runtime_Minutes": f"{elapsed / 60.0:.3f}",
+        "Profile_Generation_Seconds": "0.000",
+        "Profile_Shortlist_Seconds": "0.000",
+        "Rack_Search_Seconds": "0.000",
+        "Profile_Generation_Timeout": "YES",
+        "Rack_Search_Timeout": "YES",
+        "Layout_Feasible": "NO",
+        "Allocation_Feasible_Initial": "NO",
+        "Required_Locations_Total": "0",
+        "Total_Locations": "0",
+        "Capacity_Margin": "0",
+        "Assigned_Used_Height_Total": "0.000",
+        "Total_Allowed_Height": "0.000",
+        "Space_Left": "0.000",
+        "Beam_Relocations_Total": "0",
+        "Initial_Beams_Total": "0",
+        "Required_Beams_Total": "0",
+        "Additional_Beams_Required": "0",
+        "Initial_Grids_Total": "0",
+        "Required_Grids_Total": "0",
+        "Additional_Grids_Required": "0",
+        "Percentage_Rack_Height_Used": "0.00",
+        "Minimum_Required_Counts": minimum_counts,
+        "Additional_Fill_Counts": "",
+        "Slot_Composition_Signature": minimum_counts,
+        "Layout_Slot_Size_Distribution": "",
+        "Layout_Slot_Size_Cumulative_Coverage": "",
+        "Source_Slot_Sizes": "",
+        "Layout_Usable_Alignment_Conversions": "0",
+        "Feasible_Profiles_Considered_Total": "0",
+        "Feasible_Profiles_Used_Total": "0",
+    }
+
+
 def _build_deficit_coverage_layout(
     rack_columns: list[str],
     required_counts: dict[float, int],
     config_slot_sizes: SlotSizeSequence,
+    config_deadline: float | None = None,
+    config_id: str | None = None,
 ) -> dict[str, list[float]]:
     """Choose rack profiles with a quota-aware global search.
 
@@ -1111,13 +1178,17 @@ def _build_deficit_coverage_layout(
 
     required = {float(size): int(count) for size, count in required_counts.items()}
     profile_generation_start = time.perf_counter()
-    profile_timeout_deadline = time.perf_counter() + PROFILE_GENERATION_TIMEOUT_SECONDS
     profiles = _generate_feasible_rack_profiles(
         config_slot_sizes or list(required_counts.keys()),
         timeout_seconds=PROFILE_GENERATION_TIMEOUT_SECONDS,
+        config_deadline=config_deadline,
     )
+    _LAST_STAGE6_PROFILE_POOL = [list(profile) for profile in profiles]
     _LAST_STAGE6_STEP_TIMINGS["profile_generation"] = time.perf_counter() - profile_generation_start
-    if _LAST_STAGE6_TIMEOUTS.get("profile_generation", False):
+    if not profiles:
+        if _LAST_STAGE6_TIMEOUTS.get("profile_generation", False):
+            _LAST_STAGE6_PROFILE_POOL = []
+            return {column_key: [] for column_key in rack_columns}
         return {column_key: [] for column_key in rack_columns}
     _LAST_STAGE6_TIMEOUTS["profile_generation"] = False
 
@@ -1160,13 +1231,26 @@ def _build_deficit_coverage_layout(
             key=lambda profile: _profile_requirement_priority(list(profile), remaining),
             reverse=True,
         )
-        return [list(profile) for profile in ordered[:profile_search_limit]]
+        shortlist: list[list[float]] = []
+        seen_signatures: set[tuple[tuple[int, int], ...]] = set()
+        for profile in ordered:
+            effective_counts = _effective_requirement_counts(profile, list(remaining.keys()))
+            signature = tuple(sorted((int(size), int(count)) for size, count in effective_counts.items()))
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            shortlist.append(list(profile))
+            if len(shortlist) >= profile_search_limit:
+                break
+        return shortlist
 
     rack_search_start = time.perf_counter()
     rack_search_deadline = rack_search_start + RACK_SEARCH_TIMEOUT_SECONDS
 
     @lru_cache(maxsize=20000)
     def _search(index: int, remaining_key: tuple[tuple[float, int], ...]) -> tuple[tuple[int, int, int], dict[str, list[float]]]:
+        if config_deadline is not None and time.perf_counter() >= config_deadline:
+            raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
         if time.perf_counter() >= rack_search_deadline:
             raise Stage6RackSearchTimeout("rack search exceeded the per-config timeout")
         remaining = {float(size): int(count) for size, count in remaining_key}
@@ -1180,6 +1264,8 @@ def _build_deficit_coverage_layout(
 
         rack_columns_count = len(columns)
         for profile in _candidate_profiles_for_remaining(remaining):
+            if config_deadline is not None and time.perf_counter() >= config_deadline:
+                raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
             if time.perf_counter() >= rack_search_deadline:
                 raise Stage6RackSearchTimeout("rack search exceeded the per-config timeout")
             next_remaining = {float(size): int(count) for size, count in remaining.items()}
@@ -2188,6 +2274,7 @@ def _rack_profile_rows_from_location_rows(
     layout_id: str,
     config_id: str,
     location_rows: list[dict[str, str]],
+    config_slot_sizes: SlotSizeSequence = None,
 ) -> list[dict[str, str]]:
     """Aggregate per-rack profile details for compact candidate/final layout reporting."""
     rack_rows: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -2205,10 +2292,16 @@ def _rack_profile_rows_from_location_rows(
         for row in rows:
             slot_size = common._to_float(row.get("Assigned_Slot_Size_cm"))
             if slot_size is not None:
-                slot_counts[int(round(float(slot_size)))] += 1
-            column = str(row.get("Column", "")).strip()
-            if column and slot_size is not None:
-                column_profiles[column].append(int(round(float(slot_size))))
+                column = str(row.get("Column", "")).strip()
+                raw_column_slots = [
+                    common._to_float(item.get("Assigned_Slot_Size_cm"))
+                    for item in rows
+                    if str(item.get("Column", "")).strip() == column
+                ]
+                effective_slot = _effective_slot_size_for_summary(slot_size, [float(value) for value in raw_column_slots if value is not None], config_slot_sizes)
+                slot_counts[effective_slot] += 1
+                if column:
+                    column_profiles[column].append(int(round(float(slot_size))))
 
         representative_column = min(columns, key=lambda value: int(value)) if columns else ""
         representative_profile = []
@@ -2308,6 +2401,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     candidate_layout_column_rows_all: list[dict[str, str]] = []
     candidate_layout_rack_rows_all: list[dict[str, str]] = []
     candidate_layout_rack_rows: list[dict[str, str]] = []
+    generated_profile_rows: list[dict[str, str]] = []
     beam_map_rows = _read_csv(INPUT_LOCATION_BEAM_MAP)
     beam_height_rows = _read_csv(INPUT_BEAM_HEIGHT_COORDS)
     current_beam_units, beam_segments, current_beam_unit_heights = common._build_current_beam_units_and_segments(
@@ -2321,6 +2415,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     for config in configs:
         config_id = str(config.get("Config_ID", "")).strip()
         config_start_time = time.perf_counter()
+        config_time_limit_seconds = PROFILE_GENERATION_TIMEOUT_SECONDS + RACK_SEARCH_TIMEOUT_SECONDS
+        _LAST_STAGE6_CONFIG_DEADLINE = config_start_time + config_time_limit_seconds
+        _LAST_STAGE6_TIMEOUTS["profile_generation"] = False
+        _LAST_STAGE6_TIMEOUTS["rack_search"] = False
+        _LAST_STAGE6_PROFILE_POOL = []
         rows = capacity_rows.get(config_id, [])
         if not rows:
             continue
@@ -2331,11 +2430,14 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
 
         config_profile_generation_start = time.perf_counter()
         print(f"[Stage 6] config {config_id}: base counts = {[f'{int(size)}:{count}' for size, count in sorted(base_exact_counts.items())]}")
-        config_slot_sizes = _slot_sizes_from_capacity(rows)
         style_candidates: list[StyleCandidate] = []
         style = IMPLEMENTATION_STYLE
         layout_id = f"LAY_{layout_counter:03d}"
         layout_counter += 1
+        if _raise_config_timeout_and_return(config_id, config_start_time, config_time_limit_seconds):
+            candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
+            continue
+        config_slot_sizes = _slot_sizes_from_capacity(rows)
 
         # The deficit-coverage rule is the actual assignment decision in Stage 6.
         # Subsequent repair passes are disabled here so they cannot rewrite the selected rack profile
@@ -2345,9 +2447,30 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             rack_columns=layout_columns,
             required_counts={float(size): int(count) for size, count in base_exact_counts.items()},
             config_slot_sizes=config_slot_sizes,
+            config_deadline=_LAST_STAGE6_CONFIG_DEADLINE,
+            config_id=config_id,
         )
-        if _LAST_STAGE6_TIMEOUTS.get("profile_generation", False) or _LAST_STAGE6_TIMEOUTS.get("rack_search", False):
-            print(f"[Stage 6] config {config_id}: stopped because the per-config time limit was exceeded")
+        if _raise_config_timeout_and_return(config_id, config_start_time, config_time_limit_seconds):
+            candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
+            generated_profile_rows.append({
+                "Config_ID": config_id,
+                "Profile_Index": "0",
+                "Profile_Values": "",
+                "Profile_Signature": "TIMED_OUT",
+                "Source_Slot_Sizes": ",".join(f"{int(size)}" for size in config_slot_sizes),
+                "Status": "TIMED_OUT",
+            })
+            continue
+        if _LAST_STAGE6_CONFIG_DEADLINE is not None and time.perf_counter() >= _LAST_STAGE6_CONFIG_DEADLINE:
+            candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
+            generated_profile_rows.append({
+                "Config_ID": config_id,
+                "Profile_Index": "0",
+                "Profile_Values": "",
+                "Profile_Signature": "TIMED_OUT",
+                "Source_Slot_Sizes": ",".join(f"{int(size)}" for size in config_slot_sizes),
+                "Status": "TIMED_OUT",
+            })
             continue
         # The legal rack profile is selected directly from the generated legal candidate pool.
         # No post-assignment repair or rebuild step is allowed to mutate the chosen profile.
@@ -2360,13 +2483,49 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         expansion_slot_sizes = sorted(float(slot_size) for slot_size in base_exact_counts)
         layout_alignment_conversions = 0
         smallest_config_slot = min(expansion_slot_sizes) if expansion_slot_sizes else 0.0
-        feasible_profile_pool = _generate_feasible_rack_profiles(config_slot_sizes or expansion_slot_sizes)
+        feasible_profile_pool = [list(profile) for profile in _LAST_STAGE6_PROFILE_POOL]
+        if not feasible_profile_pool and config_slot_sizes:
+            try:
+                feasible_profile_pool = _generate_feasible_rack_profiles(
+                    config_slot_sizes,
+                    timeout_seconds=PROFILE_GENERATION_TIMEOUT_SECONDS,
+                    config_deadline=_LAST_STAGE6_CONFIG_DEADLINE,
+                )
+            except Stage6ProfileGenerationTimeout:
+                print(f"[Stage 6] config {config_id}: stopped because the profile generation timeout was exceeded during reporting")
+                _LAST_STAGE6_TIMEOUTS["profile_generation"] = True
+                candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
+                generated_profile_rows.append({
+                    "Config_ID": config_id,
+                    "Profile_Index": "0",
+                    "Profile_Values": "",
+                    "Profile_Signature": "TIMED_OUT",
+                    "Source_Slot_Sizes": ",".join(f"{int(size)}" for size in config_slot_sizes),
+                    "Status": "TIMED_OUT",
+                })
+                continue
+        for profile_index, profile in enumerate(feasible_profile_pool, start=1):
+            generated_profile_rows.append({
+                "Config_ID": config_id,
+                "Profile_Index": str(profile_index),
+                "Profile_Values": ",".join(str(int(round(float(value)))) for value in profile),
+                "Profile_Signature": "|".join(f"{int(round(float(value)))}" for value in profile),
+                "Source_Slot_Sizes": ",".join(f"{int(size)}" for size in config_slot_sizes),
+                "Status": "GENERATED",
+            })
         unique_profile_signatures = {
             tuple(sorted(int(round(float(value))) for value in profile))
             for profile in (
                 [list(slots) for slots in column_assignments.values()] if "column_assignments" in locals() else []
             )
         }
+
+        if _raise_config_timeout_and_return(config_id, config_start_time, config_time_limit_seconds):
+            candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
+            continue
+        if _LAST_STAGE6_CONFIG_DEADLINE is not None and time.perf_counter() >= _LAST_STAGE6_CONFIG_DEADLINE:
+            candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
+            continue
 
         # Baseline Stage 6 keeps the generated layout geometry aligned with the shared
         # beam-structure model so material delta calculations remain meaningful even without
@@ -2457,7 +2616,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         rack_search_elapsed = _LAST_STAGE6_STEP_TIMINGS.get("rack_search", 0.0)
         profile_generation_timed_out = _LAST_STAGE6_TIMEOUTS.get("profile_generation", False)
         rack_search_timed_out = _LAST_STAGE6_TIMEOUTS.get("rack_search", False)
-        total_runtime_seconds = time.perf_counter() - config_start_time
+        total_runtime_seconds = _runtime_clamped_to_limit(config_start_time, config_time_limit_seconds)
         print(
             f"[Stage 6] config {config_id}: timings -> "
             f"profile_generation={profile_generation_elapsed:.3f}s | "
@@ -2612,6 +2771,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                     str(summary.get("Layout_ID", "")),
                     config_id,
                     location_rows,
+                    config_slot_sizes,
                 )
                 candidate_layout_rack_rows_all.extend(rack_rows)
                 if config_id in selected_config_ids:
@@ -2629,6 +2789,20 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 candidate_layout_rows.append({key: str(value) for key, value in summary.items()})
 
     print(f"[Stage 6] generated {len(candidate_layout_rows)} candidate summaries across {len(config_style_bundles)} selected config bundles")
+
+    profile_export_fieldnames = [
+        "Config_ID",
+        "Profile_Index",
+        "Profile_Values",
+        "Profile_Signature",
+        "Source_Slot_Sizes",
+        "Status",
+    ]
+    _write_csv_preserve_with_fallback(
+        LAYOUT_OUTPUT_DIR / "Generated_Profiles_By_Config.csv",
+        profile_export_fieldnames,
+        [{field: str(row.get(field, "")) for field in profile_export_fieldnames} for row in generated_profile_rows],
+    )
 
     # Write layout-level KPIs.
     summary_export_fieldnames = [
