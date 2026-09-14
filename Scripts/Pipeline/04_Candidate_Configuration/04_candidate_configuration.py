@@ -13,7 +13,7 @@ import run_ordered_pipeline as common
 
 
 OUTPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
-MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
+MAX_REPRESENTATIVE_SLOT_SIZE_CM = common.MAX_REPRESENTATIVE_SLOT_SIZE_CM
 
 
 def _legal_slot_profile(slot_sizes: list[float]) -> bool:

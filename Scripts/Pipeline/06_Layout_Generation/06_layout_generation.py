@@ -34,11 +34,13 @@ EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 200
 EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 20
 STAGE6_CONFIG_SLOT_SIZE_FOCUS = 3
 DEFAULT_TARGET_CONFIGS = "CFG_001" #"CFG_001,CFG_002,CFG_003,CFG_004,CFG_005,CFG_006,CFG_007,CFG_008,CFG_009,CFG_010"
-PROFILE_CANDIDATE_LIMIT = 40
+# Keep the screening pass lightweight so K-value benchmarking can score a config quickly without
+# spending the majority of the run on a combinatorial profile explosion.
+PROFILE_CANDIDATE_LIMIT = 12
 PROFILE_CANDIDATE_GUARD_SIZE_COVERAGE = 2
-PROFILE_QUOTA_LIMIT = 3
-PROFILE_GENERATION_TIMEOUT_SECONDS = 150.0
-RACK_SEARCH_TIMEOUT_SECONDS = 150.0
+PROFILE_QUOTA_LIMIT = 2
+PROFILE_GENERATION_TIMEOUT_SECONDS = 60.0
+RACK_SEARCH_TIMEOUT_SECONDS = 60.0
 _LAST_STAGE6_TIMEOUTS: dict[str, bool] = {
     "profile_generation": False,
     "rack_search": False,
@@ -609,46 +611,8 @@ def _expand_layout_capacity(
     return compact_assignments, compact_used
 
 
-def _profile_has_legal_extension(
-    profile: list[float] | tuple[float, ...],
-    available_slot_sizes: SlotSizeSequence = None,
-) -> bool:
-    """Return True when the current exact-fill profile can be legally extended by another configured slot.
-
-    This enforces the rule that an unfinished stack must be continued whenever a configured family size
-    can legally complete it further; otherwise a shorter residual such as 214 would incorrectly win over
-    the longer exact continuation 129 + 69.
-    """
-    slots = [float(value) for value in (profile or []) if float(value) > 0.0]
-    if len(slots) < 2:
-        return False
-
-    config_values = sorted(_config_size_values(available_slot_sizes or slots))
-    if not config_values:
-        return False
-
-    lower_slots = [float(value) for value in slots[:-1]]
-    for next_size in config_values:
-        extended_lower = sorted([*lower_slots, float(next_size)], reverse=True)
-        residual = common.MAX_USED_HEIGHT_BASE - sum(extended_lower) - common.BEAM_HEIGHT * len(extended_lower)
-        if residual <= 0.0:
-            continue
-
-        rounded_residual = int(round(float(residual)))
-        if rounded_residual > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
-            continue
-        if rounded_residual not in config_values and rounded_residual not in _legal_topfill_values(available_slot_sizes or slots):
-            continue
-
-        trial_profile = tuple(sorted(extended_lower + [float(rounded_residual)], reverse=True))
-        if _profile_is_feasible_exact_fill(list(trial_profile), available_slot_sizes):
-            return True
-
-    return False
-
-
 def _profile_is_feasible_exact_fill(
-    profile: list[float] | tuple[float, ...],
+    profile: Sequence[float],
     available_slot_sizes: SlotSizeSequence = None,
 ) -> bool:
     """Return True when a candidate profile is an exact legal full-height stack.
@@ -706,7 +670,14 @@ def _profile_is_feasible_exact_fill(
     if effective_final_slot not in config_values:
         return False
 
-    effective_profile = [float(value) for value in lower_slots] + [float(effective_final_slot)]
+    effective_profile = []
+    for index, raw_value in enumerate(slots):
+        rounded = int(round(float(raw_value)))
+        if index == len(slots) - 1 and rounded not in config_values:
+            effective_profile.append(float(effective_final_slot))
+        else:
+            effective_profile.append(float(rounded))
+
     if any(float(effective_profile[index]) < float(effective_profile[index + 1]) for index in range(len(effective_profile) - 1)):
         return False
 
@@ -738,11 +709,23 @@ def _normalize_slot_family(candidate_slot_sizes: SlotSizeSequence) -> tuple[floa
     return tuple(sorted({float(size) for size in (candidate_slot_sizes or []) if size is not None}))
 
 
+def _normalize_required_counts(required_counts: dict[float, int] | Sequence[tuple[float, int]] | None) -> tuple[tuple[float, int], ...] | None:
+    """Convert requirement quotas into a hashable key for cache-safe profile generation."""
+    if required_counts is None:
+        return None
+    if isinstance(required_counts, dict):
+        items = required_counts.items()
+    else:
+        items = required_counts
+    return tuple(sorted((float(size), int(count)) for size, count in items if int(count) > 0))
+
+
 @lru_cache(maxsize=32)
 def _generate_feasible_rack_profiles_cached(
     candidate_slot_sizes: tuple[float, ...],
     timeout_seconds: float | None = None,
     config_deadline: float | None = None,
+    required_counts: tuple[tuple[float, int], ...] | None = None,
 ) -> tuple[tuple[float, ...], ...]:
     """Generate the accepted exact-fill profile stream in descending legal order.
 
@@ -758,63 +741,164 @@ def _generate_feasible_rack_profiles_cached(
     family_set = set(configured_sizes)
     legal_values = set(_legal_topfill_values(candidate_slot_sizes or []))
     max_size = int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+    required_map = {float(size): int(count) for size, count in (required_counts or ())}
     deadline = None if timeout_seconds is None else time.perf_counter() + float(timeout_seconds)
     seen: set[tuple[float, ...]] = set()
     accepted_profiles: list[tuple[float, ...]] = []
-    quota_limit = PROFILE_QUOTA_LIMIT
-    max_lower_rows = min(12, max(2, len(configured_sizes) * 4))
+    # Screening K benchmark runs need a much tighter branch bound than the exhaustive full-layout pass.
+    # This keeps the legal-family search fast while still preserving the exact-fill semantics that
+    # determine valid final profiles.
+    max_lower_rows = min(9, max(2, len(configured_sizes) * 3))
+    explored_prefixes: set[tuple[int, ...]] = set()
+    feasibility_cache: dict[tuple[int, ...], bool] = {}
 
-    def _iter_canonical_profiles() -> list[tuple[float, ...]]:
-        candidates: list[tuple[float, ...]] = []
+    def _prefix_has_legal_completion(prefix: tuple[int, ...]) -> bool:
+        """Return True when a descending prefix can still finish to a legal exact-fill profile.
 
-        for lower_count in range(1, max_lower_rows + 1):
-            for lower_combo in product(configured_sizes, repeat=lower_count):
-                if config_deadline is not None and time.perf_counter() >= config_deadline:
-                    raise Stage6ProfileGenerationTimeout("profile generation exceeded the combined config timeout")
-                if deadline is not None and time.perf_counter() >= deadline:
-                    raise Stage6ProfileGenerationTimeout("profile generation exceeded the per-config timeout")
+        This is the key pruning gate: prefixes whose combined height cannot still reach the 754 cm
+        exact-fill condition, or whose remaining exact height cannot be covered by any configured slot
+        value or legal topfill, are pruned early without losing any valid exact-fill family members.
+        """
+        if prefix in feasibility_cache:
+            return feasibility_cache[prefix]
 
-                lower_slots = sorted(lower_combo, reverse=True)
-                support_height = sum(lower_slots) + (len(lower_slots) - 1) * common.BEAM_HEIGHT
-                if support_height > common.MAX_USED_HEIGHT_BASE + 1e-9:
+        if not prefix:
+            feasibility_cache[prefix] = True
+            return True
+
+        prefix_total = sum(prefix)
+        # A valid exact-fill completion still needs one extra beam gap for the final topfill slot.
+        # Using len(prefix) - 1 incorrectly makes a legal lower stack look impossible before the final
+        # residual is even added, which prunes valid CFG_001 / CFG_002 profiles.
+        beam_gap_count = max(len(prefix), 0)
+        remaining_height = common.MAX_USED_HEIGHT_BASE - prefix_total - beam_gap_count * common.BEAM_HEIGHT
+        if remaining_height <= 0.0:
+            feasibility_cache[prefix] = False
+            return False
+
+        # The exact-fill completion must be either a configured family value or a legal residual value.
+        # If none of those can close the remaining height, this branch cannot lead to a valid profile.
+        candidate_finishers = set(family_set) | legal_values
+        compatible_finishers = [
+            value for value in candidate_finishers
+            if value > 0 and value <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
+            and abs((remaining_height - float(value))) <= 1e-9
+        ]
+        if compatible_finishers:
+            feasibility_cache[prefix] = True
+            return True
+
+        # If the remaining height is not exactly one of the single legal finishers, the branch may still
+        # be valid if it can continue with another configured slot before the final exact-fill topfill.
+        # Check the next feasible continuation using the canonical descending family order.
+        for next_size in configured_sizes:
+            if next_size >= max(prefix, default=0):
+                next_prefix = tuple(sorted([*prefix, int(round(float(next_size)))], reverse=True))
+                if len(next_prefix) >= max_lower_rows:
                     continue
+                next_total = sum(next_prefix)
+                # The exact-fill completion check still needs the final topfill beam gap, not the lower-stack
+                # beam count. This is the off-by-one that was incorrectly pruning valid profiles.
+                next_gap_count = max(len(next_prefix), 0)
+                next_remaining = common.MAX_USED_HEIGHT_BASE - next_total - next_gap_count * common.BEAM_HEIGHT
+                if next_remaining <= 0.0:
+                    continue
+                if any(
+                    abs(next_remaining - float(value)) <= 1e-9
+                    for value in (set(family_set) | legal_values)
+                ):
+                    feasibility_cache[prefix] = True
+                    return True
+                if _prefix_has_legal_completion(next_prefix):
+                    feasibility_cache[prefix] = True
+                    return True
 
-                residual = common.MAX_USED_HEIGHT_BASE - sum(lower_slots) - common.BEAM_HEIGHT * len(lower_slots)
-                if residual <= 0.0:
-                    continue
+        feasibility_cache[prefix] = False
+        return False
 
-                rounded_residual = int(round(float(residual)))
-                if rounded_residual > max_size:
-                    continue
-                if rounded_residual not in family_set and rounded_residual not in legal_values:
-                    continue
+    def _emit_profile_for_prefix(prefix: tuple[int, ...]) -> None:
+        if not prefix:
+            return
 
-                full_profile = tuple(sorted([*lower_slots, float(rounded_residual)], reverse=True))
-                if len(full_profile) < 2:
-                    continue
-                if abs(sum(full_profile) + (len(full_profile) - 1) * common.BEAM_HEIGHT - common.MAX_USED_HEIGHT_BASE) > 1e-9:
-                    continue
-                if not _profile_is_feasible_exact_fill(list(full_profile), candidate_slot_sizes):
-                    continue
+        residual = common.MAX_USED_HEIGHT_BASE - sum(prefix) - common.BEAM_HEIGHT * len(prefix)
+        if residual <= 0.0:
+            return
 
-                if full_profile not in seen:
-                    seen.add(full_profile)
-                    candidates.append(full_profile)
+        rounded_residual = int(round(float(residual)))
+        if rounded_residual > max_size:
+            return
+        if rounded_residual not in family_set and rounded_residual not in legal_values:
+            return
 
-        return candidates
+        # Preserve the raw legal topfill at the end of the stack. The exact-fill validator remaps that
+        # value back to its underlying configured family for ordering checks, so we must not sort the
+        # physical topfill into the middle of the stack before the effective-family comparison runs.
+        full_profile = tuple([*prefix, float(rounded_residual)])
+        if len(full_profile) < 2:
+            return
+        if abs(sum(full_profile) + (len(full_profile) - 1) * common.BEAM_HEIGHT - common.MAX_USED_HEIGHT_BASE) > 1e-9:
+            return
+        if not _profile_is_feasible_exact_fill(list(full_profile), candidate_slot_sizes):
+            return
+        if full_profile in seen:
+            return
+
+        # Do not reject a valid exact-fill profile merely because it could still be extended. The
+        # continuation rule belongs to a later selection/pruning layer, not the raw legal generation pass.
+        seen.add(full_profile)
+        accepted_profiles.append(full_profile)
+        if required_counts is not None and _quota_coverage_met(accepted_profiles, {float(size): int(count) for size, count in required_counts}):
+            raise StopIteration
+
+    def _dfs(prefix: tuple[int, ...]) -> None:
+        if config_deadline is not None and time.perf_counter() >= config_deadline:
+            raise Stage6ProfileGenerationTimeout("profile generation exceeded the combined config timeout")
+        if deadline is not None and time.perf_counter() >= deadline:
+            raise Stage6ProfileGenerationTimeout("profile generation exceeded the per-config timeout")
+
+        if len(prefix) >= max_lower_rows:
+            return
+
+        if not _prefix_has_legal_completion(prefix):
+            return
+
+        _emit_profile_for_prefix(prefix)
+
+        for next_size in configured_sizes:
+            if prefix and next_size > prefix[0]:
+                continue
+            next_prefix = tuple(sorted([*prefix, int(round(float(next_size)))], reverse=True))
+            if next_prefix in explored_prefixes:
+                continue
+            explored_prefixes.add(next_prefix)
+
+            new_total = sum(next_prefix)
+            new_count = len(next_prefix)
+            # The prefix still needs to leave room for the final topfill beam gap. This is the exact-fill
+            # condition for the next lower stack before the legal residual is appended.
+            if new_total + max(new_count, 0) * common.BEAM_HEIGHT > common.MAX_USED_HEIGHT_BASE + 1e-9:
+                continue
+            if not _prefix_has_legal_completion(next_prefix):
+                continue
+
+            _dfs(next_prefix)
 
     try:
-        candidate_pool = sorted(
-            _iter_canonical_profiles(),
-            key=lambda profile: (
-                -int(round(float(profile[0]))),
-                tuple(-int(round(float(value))) for value in profile),
-            ),
-        )
+        explored_prefixes.add(tuple())
+        _dfs(tuple())
+    except StopIteration:
+        pass
     except Stage6ProfileGenerationTimeout:
         _LAST_STAGE6_TIMEOUTS["profile_generation"] = True
         return tuple(accepted_profiles)
 
+    candidate_pool = sorted(
+        accepted_profiles,
+        key=lambda profile: (
+            -int(round(float(profile[0]))),
+            tuple(-int(round(float(value))) for value in profile),
+        ),
+    )
     return tuple(candidate_pool)
 
 
@@ -822,6 +906,7 @@ def _generate_feasible_rack_profiles(
     candidate_slot_sizes: SlotSizeSequence,
     timeout_seconds: float | None = None,
     config_deadline: float | None = None,
+    required_counts: dict[float, int] | None = None,
 ) -> list[list[float]]:
     """Generate the full legal rack-profile space for the configured slot family.
 
@@ -833,12 +918,14 @@ def _generate_feasible_rack_profiles(
     legal profile list across all rack columns instead of rebuilding it repeatedly.
     """
     normalized = _normalize_slot_family(candidate_slot_sizes)
+    normalized_required = _normalize_required_counts(required_counts)
     return [
         list(profile)
         for profile in _generate_feasible_rack_profiles_cached(
             normalized,
             timeout_seconds=timeout_seconds,
             config_deadline=config_deadline,
+            required_counts=normalized_required,
         )
     ]
 
@@ -915,7 +1002,7 @@ def _effective_requirement_slot_size(
 
 
 def _effective_requirement_counts(
-    profile: list[float] | tuple[float, ...],
+    profile: Sequence[float],
     available_slot_sizes: SlotSizeSequence = None,
 ) -> dict[int, int]:
     """Count a profile using the underlying configured family for legal final topfills.
@@ -944,8 +1031,42 @@ def _effective_requirement_counts(
     return dict(sorted(counts.items()))
 
 
+def _profile_meets_required_quota(
+    profile: Sequence[float],
+    required_counts: dict[float, int] | None,
+) -> bool:
+    """Return True once a profile covers the required quota for the current configuration."""
+    if not required_counts:
+        return True
+    if not profile:
+        return False
+    counts = _effective_requirement_counts(profile, list(required_counts.keys()))
+    return all(
+        counts.get(int(round(float(size))), 0) >= int(count)
+        for size, count in required_counts.items()
+        if int(count) > 0
+    )
+
+
+def _quota_coverage_met(
+    generated_profiles: Sequence[Sequence[float]],
+    required_counts: dict[float, int] | None,
+) -> bool:
+    """Return True when the generated profiles already cover the required exact counts."""
+    if not required_counts:
+        return True
+    combined: Counter[int] = Counter()
+    for profile in generated_profiles:
+        combined.update(_effective_requirement_counts(profile, list(required_counts.keys())))
+    return all(
+        combined.get(int(round(float(size))), 0) >= int(count)
+        for size, count in required_counts.items()
+        if int(count) > 0
+    )
+
+
 def _profile_requirement_priority(
-    profile: list[float],
+    profile: Sequence[float],
     remaining: dict[float, int],
 ) -> ProfileRequirementPriorityKey:
     """Rank feasible profiles by exact remaining-deficit coverage.
@@ -1182,6 +1303,7 @@ def _build_deficit_coverage_layout(
         config_slot_sizes or list(required_counts.keys()),
         timeout_seconds=PROFILE_GENERATION_TIMEOUT_SECONDS,
         config_deadline=config_deadline,
+        required_counts=required_counts,
     )
     _LAST_STAGE6_PROFILE_POOL = [list(profile) for profile in profiles]
     _LAST_STAGE6_STEP_TIMINGS["profile_generation"] = time.perf_counter() - profile_generation_start
@@ -1205,7 +1327,7 @@ def _build_deficit_coverage_layout(
     rack_order = sorted(rack_to_columns)
 
     sizes = sorted(required, key=lambda size: int(round(float(size))))
-    profile_search_limit = min(5, len(profiles))
+    profile_search_limit = min(3, len(profiles))
 
     def _remaining_objective(remaining: dict[float, int]) -> tuple[int, int, int]:
         satisfied = sum(1 for size in sizes if int(remaining.get(size, 0)) <= 0)
@@ -1437,23 +1559,6 @@ def _empty_locations_rows_by_slot_size(
             )
 
     return rows
-
-
-def _enforce_segment_uniform_slot_profiles(
-    column_assignments: dict[str, list[float]],
-    segments: set[tuple[str, int, int]],
-    layout_thresholds_by_rack: dict[str, tuple[int, float]] | None = None,
-) -> dict[str, list[float]]:
-    """Deprecated no-op: the legal rack assignment is fixed at the pool-selection stage.
-
-    The active Stage 6 flow intentionally does not mutate profiles after the candidate pool is chosen.
-    """
-    if not column_assignments:
-        return {}
-    return {
-        column_key: [float(value) for value in slots if float(value) > 0.0]
-        for column_key, slots in column_assignments.items()
-    }
 
 
 def _is_legal_config_slot_size(
@@ -2137,34 +2242,6 @@ def _build_legal_row_count_column(
     return candidate
 
 
-def _build_uniform_rack_columns(
-    column_assignments: dict[str, list[float]],
-    available_slot_sizes: SlotSizeSequence = None,
-    minimum_required_counts: dict[float, int] | None = None,
-) -> dict[str, list[float]]:
-    """Deprecated no-op: rack repair is intentionally disabled in this Stage 6 path."""
-    if not column_assignments:
-        return {}
-    return {
-        column_key: [float(value) for value in slots if float(value) > 0.0]
-        for column_key, slots in column_assignments.items()
-    }
-
-
-def _enforce_rack_row_count_consistency(
-    column_assignments: dict[str, list[float]],
-    available_slot_sizes: SlotSizeSequence = None,
-    minimum_required_counts: dict[float, int] | None = None,
-) -> dict[str, list[float]]:
-    """Deprecated no-op: Stage 6 no longer repairs rack profiles after the pool selection."""
-    if not column_assignments:
-        return {}
-    return {
-        column_key: [float(value) for value in slots if float(value) > 0.0]
-        for column_key, slots in column_assignments.items()
-    }
-
-
 def _cumulative_coverage_signature(column_assignments: dict[str, list[float]]) -> str:
     exact_counts: dict[int, int] = defaultdict(int)
     for slots in column_assignments.values():
@@ -2246,18 +2323,6 @@ def _slot_signatures_from_location_rows(
     return distribution, cumulative_signature
 
 
-def _enforce_min_locations_per_column(
-    column_assignments: dict[str, list[float]],
-    column_keys: list[str],
-    min_slot_size: float,
-) -> dict[str, list[float]]:
-    """Deprecated no-op: Stage 6 does not pad or repair columns after the legal pool is assigned."""
-    if not column_assignments:
-        return {}
-    return {
-        column_key: [float(value) for value in slots if float(value) > 0.0]
-        for column_key, slots in column_assignments.items()
-    }
 def _clone_column_assignments(column_assignments: dict[str, list[float]]) -> dict[str, list[float]]:
     return {key: [float(value) for value in values] for key, values in column_assignments.items()}
 

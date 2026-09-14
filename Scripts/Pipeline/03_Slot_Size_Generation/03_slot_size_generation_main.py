@@ -2,6 +2,7 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
+import run_ordered_pipeline as common
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -25,9 +26,9 @@ SCENARIO_LABELS = {
     "Scenario_5_Item_Height": "Scenario 5",
     "Scenario_6_Item_Height": "Scenario 6",
 }
-CLUSTER_COUNTS = (3, 4, 5, 6, 7)
+CLUSTER_COUNTS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 CLEARANCE_CM = 10.0
-MAX_REPRESENTATIVE_SLOT_SIZE_CM = 234.0
+MAX_REPRESENTATIVE_SLOT_SIZE_CM = common.MAX_REPRESENTATIVE_SLOT_SIZE_CM
 
 
 @dataclass(frozen=True)
