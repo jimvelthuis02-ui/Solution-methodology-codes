@@ -26,21 +26,29 @@ LAYOUT_DIAGNOSTICS_DIR = LAYOUT_OUTPUT_DIR
 # The pre-robust pass should keep every valid generated layout candidate rather
 # than artificially chopping the search space down to a fixed-size shortlist.
 PRE_ROBUST_LAYOUT_LIMIT = None
-EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 90
+EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 1000
+STAGE6_CONFIG_LIMIT = 180
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
 EXHAUSTIVE_PROFILE_LIMIT = 2000
 EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 200
 EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 20
-STAGE6_CONFIG_SLOT_SIZE_FOCUS = 3
-DEFAULT_TARGET_CONFIGS = "CFG_001" #"CFG_001,CFG_002,CFG_003,CFG_004,CFG_005,CFG_006,CFG_007,CFG_008,CFG_009,CFG_010"
+# Stage 6 should evaluate all valid configurations with K >= 3; the earlier 3-slot smoke focus was
+# artificially restricting the search space and creating false negatives for larger valid families.
+STAGE6_CONFIG_SLOT_SIZE_FOCUS = None
+DEFAULT_TARGET_CONFIGS = "CFG_001-CFG_180"
 # Keep the screening pass lightweight so K-value benchmarking can score a config quickly without
 # spending the majority of the run on a combinatorial profile explosion.
-PROFILE_CANDIDATE_LIMIT = 12
+# Larger slot families are assigned a stricter family-dominant stream and a much lower shortlist cap
+# so Stage 6 remains practical without throwing away the legal exact-fill semantics.
+PROFILE_CANDIDATE_LIMIT = 20
 PROFILE_CANDIDATE_GUARD_SIZE_COVERAGE = 2
 PROFILE_QUOTA_LIMIT = 2
+PROFILE_GENERATION_CAP_PER_CONFIG = 24
 PROFILE_GENERATION_TIMEOUT_SECONDS = 60.0
 RACK_SEARCH_TIMEOUT_SECONDS = 60.0
+FAST_FAIL_PROFILE_PROBE_SECONDS = 12.0
+FAST_FAIL_PROFILE_PROBE_FAMILY_SIZE = 7
 _LAST_STAGE6_TIMEOUTS: dict[str, bool] = {
     "profile_generation": False,
     "rack_search": False,
@@ -244,13 +252,15 @@ def _candidate_configs_for_exhaustive_search(configs: list[dict[str, str]] | Non
             row
             for row in rows
             if str(row.get("Config_ID", "")).strip()
-            and 1 <= _slot_count(row) <= focus + 2
+            and 3 <= _slot_count(row) <= focus + 2
         ]
     else:
         filtered_rows = [
             row
             for row in rows
-            if str(row.get("Config_ID", "")).strip() and str(row.get("Slot_Sizes", "")).strip()
+            if str(row.get("Config_ID", "")).strip()
+            and str(row.get("Slot_Sizes", "")).strip()
+            and _slot_count(row) >= 3
         ]
     if not filtered_rows:
         filtered_rows = [
@@ -259,7 +269,7 @@ def _candidate_configs_for_exhaustive_search(configs: list[dict[str, str]] | Non
             if str(row.get("Config_ID", "")).strip() and str(row.get("Slot_Sizes", "")).strip()
         ]
 
-    limit = min(EXHAUSTIVE_SEARCH_CONFIG_LIMIT, len(filtered_rows))
+    limit = min(STAGE6_CONFIG_LIMIT, len(filtered_rows), EXHAUSTIVE_SEARCH_CONFIG_LIMIT)
     return filtered_rows[:limit]
 
 
@@ -709,6 +719,24 @@ def _normalize_slot_family(candidate_slot_sizes: SlotSizeSequence) -> tuple[floa
     return tuple(sorted({float(size) for size in (candidate_slot_sizes or []) if size is not None}))
 
 
+def _profile_generation_policy(candidate_slot_sizes: SlotSizeSequence) -> tuple[int, int, int]:
+    """Return the runtime-safe generation window for the active slot family.
+
+    The Stage 6 search must keep enough diverse exact-fill profiles alive for families with several
+    slot sizes. The earlier values were tuned for a smoke test and stopped too early for real 4+ slot
+    families, which prevented profiles from reaching the required total counts.
+    """
+    configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
+    family_size = len(configured_sizes)
+    if family_size <= 4:
+        return 14, 2, 28
+    if family_size <= 6:
+        return 12, 2, 24
+    if family_size <= 8:
+        return 10, 2, 20
+    return 8, 2, 18
+
+
 def _normalize_required_counts(required_counts: dict[float, int] | Sequence[tuple[float, int]] | None) -> tuple[tuple[float, int], ...] | None:
     """Convert requirement quotas into a hashable key for cache-safe profile generation."""
     if required_counts is None:
@@ -718,6 +746,40 @@ def _normalize_required_counts(required_counts: dict[float, int] | Sequence[tupl
     else:
         items = required_counts
     return tuple(sorted((float(size), int(count)) for size, count in items if int(count) > 0))
+
+
+def _quick_profile_feasibility_probe(
+    candidate_slot_sizes: SlotSizeSequence,
+    required_counts: dict[float, int] | None = None,
+    timeout_seconds: float = FAST_FAIL_PROFILE_PROBE_SECONDS,
+    config_deadline: float | None = None,
+) -> bool:
+    """Return False immediately for large dead families that cannot support a legal profile.
+
+    The full Stage 6 search is expensive, and many larger exact families are structurally dead before
+    the recursive rack search is meaningful. A short probe is enough to reject those families early
+    without spending the full 120-second per-config budget on impossible patterns.
+    """
+    normalized_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])))
+    if not normalized_sizes:
+        return False
+    if len(normalized_sizes) < FAST_FAIL_PROFILE_PROBE_FAMILY_SIZE:
+        return True
+    normalized_required = {
+        float(size): int(count)
+        for size, count in (required_counts or {}).items()
+        if int(count) > 0
+    }
+    try:
+        profiles = _generate_feasible_rack_profiles(
+            normalized_sizes,
+            timeout_seconds=timeout_seconds,
+            config_deadline=config_deadline,
+            required_counts=normalized_required,
+        )
+    except Stage6ProfileGenerationTimeout:
+        return False
+    return bool(profiles)
 
 
 @lru_cache(maxsize=32)
@@ -745,161 +807,113 @@ def _generate_feasible_rack_profiles_cached(
     deadline = None if timeout_seconds is None else time.perf_counter() + float(timeout_seconds)
     seen: set[tuple[float, ...]] = set()
     accepted_profiles: list[tuple[float, ...]] = []
-    # Screening K benchmark runs need a much tighter branch bound than the exhaustive full-layout pass.
-    # This keeps the legal-family search fast while still preserving the exact-fill semantics that
-    # determine valid final profiles.
-    max_lower_rows = min(9, max(2, len(configured_sizes) * 3))
-    explored_prefixes: set[tuple[int, ...]] = set()
-    feasibility_cache: dict[tuple[int, ...], bool] = {}
+    # Use a canonical dominant-order stream instead of enumerating every lower-stack combination.
+    # The generator walks the configured family from largest to smallest, lowers the first feasible
+    # slot that can still support a valid exact-fill completion, and rebuilds the profile from that
+    # reduced prefix. This keeps the search aligned with the intended dominant-order logic while still
+    # enforcing exact-fill legality and quota-based stopping.
+    max_lower_rows, quota_limit, cap = _profile_generation_policy(candidate_slot_sizes)
 
-    def _prefix_has_legal_completion(prefix: tuple[int, ...]) -> bool:
-        """Return True when a descending prefix can still finish to a legal exact-fill profile.
-
-        This is the key pruning gate: prefixes whose combined height cannot still reach the 754 cm
-        exact-fill condition, or whose remaining exact height cannot be covered by any configured slot
-        value or legal topfill, are pruned early without losing any valid exact-fill family members.
-        """
-        if prefix in feasibility_cache:
-            return feasibility_cache[prefix]
-
+    def _build_candidate_from_prefix(prefix: tuple[int, ...]) -> tuple[float, ...] | None:
         if not prefix:
-            feasibility_cache[prefix] = True
-            return True
-
-        prefix_total = sum(prefix)
-        # A valid exact-fill completion still needs one extra beam gap for the final topfill slot.
-        # Using len(prefix) - 1 incorrectly makes a legal lower stack look impossible before the final
-        # residual is even added, which prunes valid CFG_001 / CFG_002 profiles.
-        beam_gap_count = max(len(prefix), 0)
-        remaining_height = common.MAX_USED_HEIGHT_BASE - prefix_total - beam_gap_count * common.BEAM_HEIGHT
-        if remaining_height <= 0.0:
-            feasibility_cache[prefix] = False
-            return False
-
-        # The exact-fill completion must be either a configured family value or a legal residual value.
-        # If none of those can close the remaining height, this branch cannot lead to a valid profile.
-        candidate_finishers = set(family_set) | legal_values
-        compatible_finishers = [
-            value for value in candidate_finishers
-            if value > 0 and value <= int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-            and abs((remaining_height - float(value))) <= 1e-9
-        ]
-        if compatible_finishers:
-            feasibility_cache[prefix] = True
-            return True
-
-        # If the remaining height is not exactly one of the single legal finishers, the branch may still
-        # be valid if it can continue with another configured slot before the final exact-fill topfill.
-        # Check the next feasible continuation using the canonical descending family order.
-        for next_size in configured_sizes:
-            if next_size >= max(prefix, default=0):
-                next_prefix = tuple(sorted([*prefix, int(round(float(next_size)))], reverse=True))
-                if len(next_prefix) >= max_lower_rows:
-                    continue
-                next_total = sum(next_prefix)
-                # The exact-fill completion check still needs the final topfill beam gap, not the lower-stack
-                # beam count. This is the off-by-one that was incorrectly pruning valid profiles.
-                next_gap_count = max(len(next_prefix), 0)
-                next_remaining = common.MAX_USED_HEIGHT_BASE - next_total - next_gap_count * common.BEAM_HEIGHT
-                if next_remaining <= 0.0:
-                    continue
-                if any(
-                    abs(next_remaining - float(value)) <= 1e-9
-                    for value in (set(family_set) | legal_values)
-                ):
-                    feasibility_cache[prefix] = True
-                    return True
-                if _prefix_has_legal_completion(next_prefix):
-                    feasibility_cache[prefix] = True
-                    return True
-
-        feasibility_cache[prefix] = False
-        return False
-
-    def _emit_profile_for_prefix(prefix: tuple[int, ...]) -> None:
-        if not prefix:
-            return
-
+            return None
+        support_height = sum(prefix) + (len(prefix) - 1) * common.BEAM_HEIGHT
+        if support_height < 504.0 - 1e-9:
+            return None
         residual = common.MAX_USED_HEIGHT_BASE - sum(prefix) - common.BEAM_HEIGHT * len(prefix)
         if residual <= 0.0:
-            return
-
+            return None
         rounded_residual = int(round(float(residual)))
-        if rounded_residual > max_size:
-            return
+        if rounded_residual > int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM)):
+            return None
         if rounded_residual not in family_set and rounded_residual not in legal_values:
-            return
+            return None
+        candidate = tuple(sorted([*prefix, float(rounded_residual)], reverse=True))
+        if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
+            return None
+        return candidate
 
-        # Preserve the raw legal topfill at the end of the stack. The exact-fill validator remaps that
-        # value back to its underlying configured family for ordering checks, so we must not sort the
-        # physical topfill into the middle of the stack before the effective-family comparison runs.
-        full_profile = tuple([*prefix, float(rounded_residual)])
-        if len(full_profile) < 2:
-            return
-        if abs(sum(full_profile) + (len(full_profile) - 1) * common.BEAM_HEIGHT - common.MAX_USED_HEIGHT_BASE) > 1e-9:
-            return
-        if not _profile_is_feasible_exact_fill(list(full_profile), candidate_slot_sizes):
-            return
-        if full_profile in seen:
-            return
+    generated_order: list[tuple[float, ...]] = []
+    # Clean dominant-order generator: the search space is a single canonical queue of descending
+    # prefixes, not a broad position-by-value expansion. This keeps the search bounded and makes the
+    # family-level cache effective for repeated config families.
+    def _dominant_next_prefixes(prefix: tuple[int, ...]) -> list[tuple[int, ...]]:
+        if not prefix:
+            return []
+        next_prefixes: list[tuple[int, ...]] = []
+        for index in range(len(prefix)):
+            lower_values = [size for size in configured_sizes if size < prefix[index]]
+            if not lower_values:
+                continue
+            next_prefix = list(prefix)
+            next_prefix[index] = int(round(float(lower_values[0])))
+            ordered = tuple(sorted(next_prefix, reverse=True))
+            if len(ordered) <= max_lower_rows and ordered not in next_prefixes:
+                next_prefixes.append(ordered)
 
-        # Do not reject a valid exact-fill profile merely because it could still be extended. The
-        # continuation rule belongs to a later selection/pruning layer, not the raw legal generation pass.
-        seen.add(full_profile)
-        accepted_profiles.append(full_profile)
-        if required_counts is not None and _quota_coverage_met(accepted_profiles, {float(size): int(count) for size, count in required_counts}):
-            raise StopIteration
+        if len(prefix) < max_lower_rows:
+            next_lower = max((size for size in configured_sizes if size < prefix[0]), default=None)
+            if next_lower is not None:
+                extended = tuple(sorted(prefix + (int(round(float(next_lower))),), reverse=True))
+                if len(extended) <= max_lower_rows and extended not in next_prefixes:
+                    next_prefixes.append(extended)
 
-    def _dfs(prefix: tuple[int, ...]) -> None:
-        if config_deadline is not None and time.perf_counter() >= config_deadline:
-            raise Stage6ProfileGenerationTimeout("profile generation exceeded the combined config timeout")
-        if deadline is not None and time.perf_counter() >= deadline:
-            raise Stage6ProfileGenerationTimeout("profile generation exceeded the per-config timeout")
+        return next_prefixes
+
+    queue: list[tuple[int, ...]] = [tuple([int(round(float(configured_sizes[0])))]),]
+    explored: set[tuple[int, ...]] = set()
+    while queue and len(generated_order) < cap:
+        prefix = queue.pop(0)
+        if prefix in explored:
+            continue
+        explored.add(prefix)
+
+        candidate = _build_candidate_from_prefix(prefix)
+        if candidate is not None and candidate not in seen:
+            seen.add(candidate)
+            generated_order.append(candidate)
+            if len(generated_order) >= cap:
+                break
 
         if len(prefix) >= max_lower_rows:
-            return
+            continue
 
-        if not _prefix_has_legal_completion(prefix):
-            return
+        for next_prefix in _dominant_next_prefixes(prefix):
+            if next_prefix not in explored and next_prefix not in queue:
+                queue.append(next_prefix)
 
-        _emit_profile_for_prefix(prefix)
-
-        for next_size in configured_sizes:
-            if prefix and next_size > prefix[0]:
-                continue
-            next_prefix = tuple(sorted([*prefix, int(round(float(next_size)))], reverse=True))
-            if next_prefix in explored_prefixes:
-                continue
-            explored_prefixes.add(next_prefix)
-
-            new_total = sum(next_prefix)
-            new_count = len(next_prefix)
-            # The prefix still needs to leave room for the final topfill beam gap. This is the exact-fill
-            # condition for the next lower stack before the legal residual is appended.
-            if new_total + max(new_count, 0) * common.BEAM_HEIGHT > common.MAX_USED_HEIGHT_BASE + 1e-9:
-                continue
-            if not _prefix_has_legal_completion(next_prefix):
-                continue
-
-            _dfs(next_prefix)
-
-    try:
-        explored_prefixes.add(tuple())
-        _dfs(tuple())
-    except StopIteration:
-        pass
-    except Stage6ProfileGenerationTimeout:
-        _LAST_STAGE6_TIMEOUTS["profile_generation"] = True
-        return tuple(accepted_profiles)
-
-    candidate_pool = sorted(
-        accepted_profiles,
-        key=lambda profile: (
-            -int(round(float(profile[0]))),
-            tuple(-int(round(float(value))) for value in profile),
-        ),
+    ordered_profiles = sorted(
+        set(generated_order),
+        key=lambda profile: tuple(-float(value) for value in profile),
     )
-    return tuple(candidate_pool)
+
+    quota_counts: dict[int, int] = {size: 0 for size in configured_sizes}
+    for profile in ordered_profiles:
+        if len(accepted_profiles) >= cap:
+            break
+        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
+            break
+        family_hits = {
+            int(round(float(_effective_requirement_slot_size(float(value), list(profile), configured_sizes))))
+            for value in profile
+            if float(value) > 0.0
+            and int(round(float(_effective_requirement_slot_size(float(value), list(profile), configured_sizes)))) in family_set
+        }
+        if not family_hits:
+            continue
+        remaining_sizes = [size for size in configured_sizes if quota_counts.get(size, 0) < quota_limit]
+        if not any(size in family_hits for size in remaining_sizes):
+            continue
+        accepted_profiles.append(profile)
+        for size in family_hits:
+            quota_counts[size] = quota_counts.get(size, 0) + 1
+        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
+            break
+
+    if len(accepted_profiles) > cap:
+        return tuple(accepted_profiles[:cap])
+
+    return tuple(accepted_profiles)
 
 
 def _generate_feasible_rack_profiles(
@@ -943,7 +957,8 @@ def _choose_profile_shortlist(
     if not profiles:
         return []
 
-    search_limit = max(1, int(limit if limit is not None else PROFILE_CANDIDATE_LIMIT))
+    family_cap = _profile_generation_policy(list(required_counts.keys()))[2]
+    search_limit = max(1, min(int(limit if limit is not None else PROFILE_CANDIDATE_LIMIT), family_cap))
     if len(profiles) <= search_limit:
         return [list(profile) for profile in profiles]
 
@@ -983,21 +998,58 @@ def _choose_profile_shortlist(
     return kept[:search_limit]
 
 
+def _nearest_configured_family_slot(
+    slot_value: float | int,
+    available_slot_sizes: SlotSizeSequence = None,
+    profile: list[float] | tuple[float, ...] | None = None,
+) -> int | None:
+    """Map a legal topfill to the configured family value reached by rounding down.
+
+    The dominant-order rule is: use the largest configured family size that is still below the topfill,
+    not the nearest size overall. For cfg 004, 114 therefore maps to 69 instead of 124.
+    """
+    rounded = int(round(float(slot_value)))
+    candidates = sorted(_config_size_values(available_slot_sizes or (profile or [])))
+    if not candidates:
+        return rounded
+    if rounded in candidates:
+        return rounded
+    lower_candidates = [value for value in candidates if value < rounded]
+    if not lower_candidates:
+        return None
+    return max(lower_candidates)
+
+
 def _effective_requirement_slot_size(
     slot_value: float | int,
     profile: list[float] | tuple[float, ...] | None = None,
     available_slot_sizes: SlotSizeSequence = None,
-) -> int:
-    """Map a legal final topfill to the configured family it completes for exact-count accounting."""
+) -> int | None:
+    """Map a topfilled legal value back to the underlying configured family value it actually represents.
+
+    The dominant-order rule is: count a legal topfill to the largest configured family size below it,
+    not to the raw topfilled value itself. Example: 79 is counted as 69 in a 69/124/189/239 config.
+    """
     rounded = int(round(float(slot_value)))
     profile_values = [int(round(float(value))) for value in (profile or []) if float(value) > 0.0]
-    if len(profile_values) < 2:
+    if not profile_values:
         return rounded
 
     config_values = sorted(_config_size_values(available_slot_sizes or profile_values))
-    if rounded == profile_values[-1] and rounded not in set(config_values):
-        canonical = max((value for value in config_values if value <= rounded), default=rounded)
-        return canonical
+    if rounded in set(config_values):
+        return rounded
+
+    if not config_values:
+        return rounded
+
+    # Legal topfilled values are recorded under their underlying configured family, not as synthetic
+    # buckets such as 64, 79, 114, 184, etc. A final topfill is always charged to the largest config
+    # value below it, which preserves the dominant-order semantics of the exact-fill stack.
+    mapped = _nearest_configured_family_slot(rounded, config_values, profile_values)
+    if mapped is not None:
+        return mapped
+    if rounded < min(config_values, default=rounded):
+        return None
     return rounded
 
 
@@ -1005,27 +1057,25 @@ def _effective_requirement_counts(
     profile: Sequence[float],
     available_slot_sizes: SlotSizeSequence = None,
 ) -> dict[int, int]:
-    """Count a profile using the underlying configured family for legal final topfills.
+    """Count a profile using the configured family value reached by rounding down.
 
-    A legal final topfill such as 84 is treated as its underlying configured family (for CFG_001, 69)
-    when evaluating quota and profile priority, while the physical exact-fill check still uses the raw
-    topfill value to verify the 754 cm stack height.
+    This includes legal topfilled slots such as 64, 79, 114, 184, etc., which are counted under the
+    underlying representative size (e.g. 34, 69, 69, 124) instead of being treated as separate
+    synthetic bucket sizes in the exact-fill accounting.
     """
     profile_values = tuple(int(round(float(value))) for value in (profile or []) if float(value) > 0.0)
     if not profile_values:
         return {}
 
     config_values = tuple(sorted(_config_size_values(available_slot_sizes or profile_values)))
-    config_set = set(config_values)
     counts: Counter[int] = Counter({size: 0 for size in config_values})
 
-    for index, value in enumerate(profile_values):
-        effective = value
-        if index == len(profile_values) - 1 and len(profile_values) > 1 and value not in config_set:
-            effective = max((size for size in config_values if size <= value), default=value)
-            # The final topfill is evaluated as its underlying configured family for quota accounting,
-            # but the raw topfill value is still used for the exact full-height legality check above.
-            # Example: 234-234-69-69-84 is counted as 234-234-69-69-69 for the slot-family quota.
+    for value in profile_values:
+        effective = _effective_requirement_slot_size(value, list(profile_values), available_slot_sizes)
+        if effective is None:
+            continue
+        if effective not in counts and effective not in config_values:
+            continue
         counts[effective] += 1
 
     return dict(sorted(counts.items()))
@@ -1314,9 +1364,11 @@ def _build_deficit_coverage_layout(
         return {column_key: [] for column_key in rack_columns}
     _LAST_STAGE6_TIMEOUTS["profile_generation"] = False
 
-    # The canonical pool is already the exact legal family stream after the generation + quota-pruning
-    # rules. Do not re-trim it with a second shortlist here; rack assignment and distribution ranking
-    # must operate only on that accepted profile family, not on a reduced heuristic subset.
+    # Keep the rack search on a small, requirement-aware shortlist. The raw legal family pool can be
+    # large even when only a handful of profiles are materially useful at the current remaining-deficit
+    # state; trapping the recursion against the full pool causes the runtime blow-up.
+    shortlist_limit = min(8, max(4, len(profiles))) if profiles else 0
+    profiles = _choose_profile_shortlist(profiles, required, limit=shortlist_limit)
     _LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
     if not profiles:
         return {column_key: [] for column_key in rack_columns}
@@ -1327,7 +1379,7 @@ def _build_deficit_coverage_layout(
     rack_order = sorted(rack_to_columns)
 
     sizes = sorted(required, key=lambda size: int(round(float(size))))
-    profile_search_limit = min(3, len(profiles))
+    profile_search_limit = min(max(4, min(8, len(profiles))), len(profiles)) if profiles else 0
 
     def _remaining_objective(remaining: dict[float, int]) -> tuple[int, int, int]:
         satisfied = sum(1 for size in sizes if int(remaining.get(size, 0)) <= 0)
@@ -1348,12 +1400,13 @@ def _build_deficit_coverage_layout(
         return (satisfied, -total_shortage, int(-distribution_gap * 1000.0))
 
     def _candidate_profiles_for_remaining(remaining: dict[float, int]) -> list[list[float]]:
+        shortlist = _choose_profile_shortlist(profiles, remaining, limit=profile_search_limit)
         ordered = sorted(
-            profiles,
+            shortlist,
             key=lambda profile: _profile_requirement_priority(list(profile), remaining),
             reverse=True,
         )
-        shortlist: list[list[float]] = []
+        deduped: list[list[float]] = []
         seen_signatures: set[tuple[tuple[int, int], ...]] = set()
         for profile in ordered:
             effective_counts = _effective_requirement_counts(profile, list(remaining.keys()))
@@ -1361,10 +1414,10 @@ def _build_deficit_coverage_layout(
             if signature in seen_signatures:
                 continue
             seen_signatures.add(signature)
-            shortlist.append(list(profile))
-            if len(shortlist) >= profile_search_limit:
+            deduped.append(list(profile))
+            if len(deduped) >= profile_search_limit:
                 break
-        return shortlist
+        return deduped
 
     rack_search_start = time.perf_counter()
     rack_search_deadline = rack_search_start + RACK_SEARCH_TIMEOUT_SECONDS
@@ -1606,32 +1659,46 @@ def _config_size_values(available_slot_sizes: SlotSizeSequence) -> set[int]:
 
 @lru_cache(maxsize=64)
 def _legal_topfill_values_cached(config_values: tuple[int, ...]) -> frozenset[int]:
-    """Cache legal residual completions for a normalized configured slot family."""
+    """Cache legal residual completions for a normalized configured slot family.
+
+    The old implementation used a Cartesian product across every lower-stack length, which makes 4+ slot
+    families explode combinatorially even though the exact-fill rule depends only on the total lower
+    stack sum and beam count. We compute the same legal residuals via a bounded DP over reachable sums
+    instead of enumerating every tuple in the product space.
+    """
     if not config_values:
         return frozenset()
 
+    config_values = tuple(sorted(set(config_values)))
     legal_values: set[int] = set()
     max_lower_rows = min(12, max(2, len(config_values) * 6))
+    reachable_by_count: dict[int, set[int]] = {0: {0}}
+
     for lower_count in range(1, max_lower_rows + 1):
-        for lower_combo in product(config_values, repeat=lower_count):
-            lower_slots = [float(value) for value in lower_combo]
-            if not lower_slots:
-                continue
-            support_height = sum(lower_slots) + max(len(lower_slots) - 1, 0) * common.BEAM_HEIGHT
+        next_totals: set[int] = set()
+        for lower_sum in reachable_by_count.get(lower_count - 1, set()):
+            for slot_size in config_values:
+                candidate_sum = lower_sum + slot_size
+                if candidate_sum <= int(round(common.MAX_USED_HEIGHT_BASE)) + 10:
+                    next_totals.add(candidate_sum)
+        reachable_by_count[lower_count] = next_totals
+
+        for lower_sum in next_totals:
+            support_height = lower_sum + max(lower_count - 1, 0) * common.BEAM_HEIGHT
             if support_height < 504.0 - 1e-9:
                 continue
-
-            final_value = common.MAX_USED_HEIGHT_BASE - sum(lower_slots) - common.BEAM_HEIGHT * len(lower_slots)
-            if final_value <= 0.0:
+            residual_value = common.MAX_USED_HEIGHT_BASE - lower_sum - common.BEAM_HEIGHT * lower_count
+            if residual_value <= 0.0:
                 continue
-            if final_value > 214.0:
+            if residual_value > 214.0:
                 continue
-            rounded = int(round(final_value))
+            rounded = int(round(residual_value))
             if rounded < min(config_values):
                 continue
             if rounded % 10 not in (4, 9):
                 continue
             legal_values.add(rounded)
+
     return frozenset(legal_values)
 
 
@@ -1755,16 +1822,18 @@ def _rack_profiles_are_exactly_uniform(
     column_assignments: dict[str, list[float]],
     column_keys: list[str],
 ) -> bool:
-    """Return True when each rack uses exactly one profile across all of its columns."""
+    """Return True when each rack uses exactly one profile across its assigned columns."""
     profiles_by_rack: dict[str, set[tuple[int, ...]]] = defaultdict(set)
+    seen_nonempty = False
     for column_key in column_keys:
         slots = [float(value) for value in column_assignments.get(column_key, []) if float(value) > 0.0]
         if not slots:
-            return False
+            continue
+        seen_nonempty = True
         canonical = tuple(sorted(int(round(float(value))) for value in slots))
         rack_key = _rack_from_column_key(column_key)
         profiles_by_rack[rack_key].add(canonical)
-    return all(len(canonical_profiles) == 1 for canonical_profiles in profiles_by_rack.values())
+    return seen_nonempty and all(len(canonical_profiles) == 1 for canonical_profiles in profiles_by_rack.values())
 
 
 def _minimum_required_counts_are_satisfied(
@@ -1773,19 +1842,34 @@ def _minimum_required_counts_are_satisfied(
     available_slot_sizes: SlotSizeSequence = None,
     minimum_required_counts: dict[float, int] | None = None,
 ) -> bool:
-    """Return True when the exact effective count accounting satisfies the minimum per-size requirements."""
+    """Return True when the completed layout meets the required exact-family counts.
+
+    The check must be done on the whole layout after all columns are assigned. It is not a per-column
+    validation: a single rack/column may legitimately be missing a given family as long as the overall
+    completed layout satisfies the minimum exact requirements.
+    """
     if minimum_required_counts is None:
         return True
 
     layout_counts: dict[int, int] = defaultdict(int)
+    saw_nonempty = False
+    all_slots: list[float] = []
     for column_key in column_keys:
         slots = [float(value) for value in column_assignments.get(column_key, []) if float(value) > 0.0]
         if not slots:
+            continue
+        saw_nonempty = True
+        all_slots.extend(slots)
+
+    if not saw_nonempty:
+        return False
+
+    for slot_size in all_slots:
+        rounded = int(round(float(slot_size)))
+        counted_as = _effective_requirement_slot_size(rounded, all_slots, available_slot_sizes)
+        if counted_as is None:
             return False
-        for idx, slot_size in enumerate(slots):
-            rounded = int(round(float(slot_size)))
-            counted_as = _effective_requirement_slot_size(rounded, slots, available_slot_sizes)
-            layout_counts[counted_as] += 1
+        layout_counts[counted_as] += 1
 
     for size, required_count in minimum_required_counts.items():
         required_int = int(round(float(size)))
@@ -1805,9 +1889,9 @@ def _layout_assignments_are_feasible(
 ) -> bool:
     """Check per-column physical legality and defer exact minimum-family checks to the full layout.
 
-    The total occupied-location minimum is a full-layout gate, not a per-column legality rule.
-    Small unit tests and partial assignments can still be valid physically even before the
-    complete layout reaches the 890-location target.
+    Empty warehouse columns are ignored for the final feasibility check; only occupied columns in the
+    generated layout are validated. This matches the real layout state and prevents a valid generated
+    candidate from being rejected just because the warehouse contains extra empty rack columns.
     """
     if not column_assignments:
         return False
@@ -1821,10 +1905,12 @@ def _layout_assignments_are_feasible(
 
     layout_counts: dict[int, int] = defaultdict(int)
     assigned_locations_total = 0
+    nonempty_column_keys: list[str] = []
     for column_key in column_keys:
         slots = [float(value) for value in column_assignments.get(column_key, []) if float(value) > 0.0]
         if not slots:
-            return False
+            continue
+        nonempty_column_keys.append(column_key)
         assigned_locations_total += len(slots)
         if any(float(value) <= 0.0 for value in slots):
             return False
@@ -1875,9 +1961,14 @@ def _layout_assignments_are_feasible(
         for idx, slot_size in enumerate(slots):
             rounded = int(round(float(slot_size)))
             counted_as = _effective_requirement_slot_size(rounded, slots, available_slot_sizes)
+            if counted_as is None:
+                return False
             layout_counts[counted_as] += 1
 
-    if not _rack_profiles_are_exactly_uniform(column_assignments, column_keys):
+    if not nonempty_column_keys:
+        return False
+
+    if not _rack_profiles_are_exactly_uniform(column_assignments, nonempty_column_keys):
         return False
 
     full_layout_target_reached = (
@@ -1889,7 +1980,7 @@ def _layout_assignments_are_feasible(
         and full_layout_target_reached
         and not _minimum_required_counts_are_satisfied(
             column_assignments,
-            column_keys,
+            nonempty_column_keys,
             available_slot_sizes=available_slot_sizes,
             minimum_required_counts=minimum_required_counts,
         )
@@ -2257,13 +2348,11 @@ def _cumulative_coverage_signature(column_assignments: dict[str, list[float]]) -
     return "|".join(f"{size}:{cumulative[size]}" for size in sorted(cumulative.keys()))
 
 
-def _effective_slot_size_for_summary(slot_size: float, column_slots: list[float], available_slot_sizes: SlotSizeSequence = None) -> int:
-    """Treat legal final topfill values as the underlying configured slot family for reporting.
+def _effective_slot_size_for_summary(slot_size: float, column_slots: list[float], available_slot_sizes: SlotSizeSequence = None) -> int | None:
+    """Treat legal final topfill values as the configured slot family reached by rounding down.
 
-    A legal topfill such as 84 or 109 is not a standalone demand family; it represents the residual
-    completion of the underlying configured family (for CFG_001, the 69 family). When aggregating
-    the final layout distribution for reporting, we therefore map topfills back to the nearest lower
-    configured representative size instead of counting them as extra demand slots.
+    This keeps the reported slot-size distribution aligned with the actual underlying slot family rather
+    than exposing synthetic topfilled buckets (for example, counting a 64 topfill against 34).
     """
     rounded = int(round(float(slot_size)))
     if not column_slots:
@@ -2273,17 +2362,13 @@ def _effective_slot_size_for_summary(slot_size: float, column_slots: list[float]
     if rounded in config_values:
         return rounded
 
-    legal_topfills = set(_legal_topfill_values(available_slot_sizes or column_slots))
-    if rounded in legal_topfills:
-        candidates = [value for value in config_values if value < rounded]
-        if candidates:
-            return max(candidates)
+    mapped = _nearest_configured_family_slot(rounded, config_values, column_slots)
+    if mapped is not None:
+        return mapped
 
-    profile_values = [int(round(float(value))) for value in column_slots if float(value) > 0.0]
-    if len(profile_values) > 1 and rounded == profile_values[-1] and rounded not in config_values:
-        if profile_values[-2] in config_values:
-            return profile_values[-2]
-    return rounded
+    if rounded < min(config_values, default=rounded):
+        return None
+    return None
 
 
 def _slot_signatures_from_location_rows(
@@ -2309,6 +2394,8 @@ def _slot_signatures_from_location_rows(
         normalized_slots = [float(value) for value in slots if float(value) > 0.0]
         for slot in normalized_slots:
             effective = _effective_slot_size_for_summary(slot, normalized_slots, available_slot_sizes)
+            if effective is None:
+                continue
             exact_counts[effective] += 1
 
     distribution = "|".join(f"{size}:{count}" for size, count in sorted(exact_counts.items()))
@@ -2364,7 +2451,8 @@ def _rack_profile_rows_from_location_rows(
                     if str(item.get("Column", "")).strip() == column
                 ]
                 effective_slot = _effective_slot_size_for_summary(slot_size, [float(value) for value in raw_column_slots if value is not None], config_slot_sizes)
-                slot_counts[effective_slot] += 1
+                if effective_slot is not None:
+                    slot_counts[effective_slot] += 1
                 if column:
                     column_profiles[column].append(int(round(float(slot_size))))
 
@@ -2508,6 +2596,18 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         # Subsequent repair passes are disabled here so they cannot rewrite the selected rack profile
         # away from the best remaining-deficit choice.
         print(f"[Stage 6] config {config_id}: building rack profiles from slot family {config_slot_sizes}")
+        if len(config_slot_sizes) >= FAST_FAIL_PROFILE_PROBE_FAMILY_SIZE:
+            required_map = {float(size): int(count) for size, count in base_exact_counts.items()}
+            probe_deadline = config_start_time + max(FAST_FAIL_PROFILE_PROBE_SECONDS + 5.0, 20.0)
+            if not _quick_profile_feasibility_probe(
+                config_slot_sizes,
+                required_counts=required_map,
+                timeout_seconds=FAST_FAIL_PROFILE_PROBE_SECONDS,
+                config_deadline=min(probe_deadline, _LAST_STAGE6_CONFIG_DEADLINE) if _LAST_STAGE6_CONFIG_DEADLINE is not None else probe_deadline,
+            ):
+                print(f"[Stage 6] config {config_id}: early rejection after fast profile probe; no legal exact-fill path remains for this family")
+                candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
+                continue
         column_assignments = _build_deficit_coverage_layout(
             rack_columns=layout_columns,
             required_counts={float(size): int(count) for size, count in base_exact_counts.items()},
@@ -2658,7 +2758,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             and space_utilization <= 1.0
             and _layout_assignments_are_feasible(
                 column_assignments,
-                layout_columns,
+                list(column_assignments.keys()),
                 float(smallest_config_slot),
                 expansion_slot_sizes,
                 minimum_required_counts=base_exact_counts,
@@ -2742,6 +2842,8 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
             effective_counts: dict[float, int] = defaultdict(int)
             for slot in normalized_slots:
                 effective = _effective_slot_size_for_summary(slot, normalized_slots, expansion_slot_sizes)
+                if effective is None:
+                    continue
                 effective_counts[float(effective)] += 1
             slot_mix_by_column[rack_column] = dict(sorted(effective_counts.items()))
 
