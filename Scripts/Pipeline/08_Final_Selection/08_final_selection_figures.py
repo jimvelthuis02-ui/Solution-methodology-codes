@@ -7,6 +7,7 @@ from pathlib import Path
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import matplotlib
+
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap

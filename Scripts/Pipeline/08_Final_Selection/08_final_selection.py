@@ -98,40 +98,6 @@ def _final_column_fieldnames(rows: list[dict[str, str]]) -> list[str]:
     return base
 
 
-def _additional_fill_added_height_by_layout() -> dict[str, float]:
-    return {}
-
-
-def _source_slot_sizes_by_layout(layouts: dict[str, dict[str, str]]) -> dict[str, set[int]]:
-    # Parse the original configured slot sizes per layout before topfill adjustments.
-    by_layout: dict[str, set[int]] = {}
-    for layout_id, row in layouts.items():
-        source_text = common._decode_excel_text(row.get("Source_Slot_Sizes", ""))
-        sizes: set[int] = set()
-        if source_text:
-            for token in source_text.split(","):
-                token = token.strip()
-                if not token:
-                    continue
-                size = common._to_int_default(token, -1)
-                if size >= 0:
-                    sizes.add(size)
-        by_layout[layout_id] = sizes
-    return by_layout
-
-
-def _additional_fill_extra_slot_size_variants_by_layout(
-    source_slot_sizes_by_layout: dict[str, set[int]],
-) -> dict[str, int]:
-    return {}
-
-
-def _additional_fill_extra_slot_sizes_by_layout(
-    source_slot_sizes_by_layout: dict[str, set[int]],
-) -> dict[str, str]:
-    return {}
-
-
 def _count_unique_slot_sizes(layout_row: dict[str, str]) -> int:
     # Standardization proxy: fewer unique slot sizes means higher standardization.
     source = common._decode_excel_text(layout_row.get("Source_Slot_Sizes", ""))
@@ -392,10 +358,6 @@ def build_final_selection() -> list[dict[str, str]]:
     """Build a full all-candidate metric table with per-metric ranks for weighted-sum analysis."""
     robustness_rows = [row for row in _robustness_rows() if _is_robustness_passing(row)]
     layouts = _layout_map()
-    additional_fill_added_height = _additional_fill_added_height_by_layout()
-    source_slot_sizes = _source_slot_sizes_by_layout(layouts)
-    additional_fill_extra_slot_size_variants = _additional_fill_extra_slot_size_variants_by_layout(source_slot_sizes)
-    additional_fill_extra_slot_sizes = _additional_fill_extra_slot_sizes_by_layout(source_slot_sizes)
 
     joined_rows: list[dict[str, str]] = []
     # Join Stage 6 layout metadata with Stage 7 robustness metrics.
@@ -460,13 +422,6 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Additional_Grids_Required": str(common._to_int_default(row.get("Additional_Grids_Required"), 0)),
                 "Implementation_Effort_Total": str(implementation_effort_total),
                 "Standardization_Unique_Slot_Sizes": str(common._to_int_default(row.get("Unique_Slot_Sizes_Count"), 0)),
-                "Additional_Fill_Height_Total_cm": f"{additional_fill_added_height.get(str(row.get('Config_ID', '')).strip(), 0.0):.0f}",
-                "Additional_Fill_Extra_Slot_Size_Variants": str(
-                    additional_fill_extra_slot_size_variants.get(str(row.get("Config_ID", "")).strip(), 0)
-                ),
-                "Additional_Fill_Extra_Slot_Sizes": common._encode_excel_text(
-                    str(additional_fill_extra_slot_sizes.get(str(row.get("Config_ID", "")).strip(), ""))
-                ),
             }
         )
 

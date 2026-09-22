@@ -1,6 +1,6 @@
 import csv
-from collections import defaultdict
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -9,19 +9,10 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 import run_ordered_pipeline as common
 
-
 INPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
 SUMMARY_OUTPUT_FILE = common.STAGE5_OUTPUT_DIR / "Capacity_Determination_Summary.csv"
 COUNT_OUTPUT_FILE = common.STAGE5_OUTPUT_DIR / "Constraint_Location_Counts_By_Slot_Size.csv"
 SCENARIO_HEIGHT_INPUT_FILE = common.STAGE2_OUTPUT_DIR / "02_Item_Height_Scenarios_Delta_Weighted.csv"
-SCENARIO_HEIGHT_COLUMNS = [
-    "Scenario_1_Item_Height",
-    "Scenario_2_Item_Height",
-    "Scenario_3_Item_Height",
-    "Scenario_4_Item_Height",
-    "Scenario_5_Item_Height",
-    "Scenario_6_Item_Height",
-]
 SCENARIO_HEIGHT_LABELS = {
     "Scenario_1_Item_Height": "Scenario 1",
     "Scenario_2_Item_Height": "Scenario 2",

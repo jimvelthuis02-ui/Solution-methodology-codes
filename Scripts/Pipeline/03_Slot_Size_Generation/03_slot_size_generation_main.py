@@ -2,8 +2,8 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
-import run_ordered_pipeline as common
 
+import run_ordered_pipeline as common
 
 ROOT = Path(__file__).resolve().parents[3]
 INPUT_FILE = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"

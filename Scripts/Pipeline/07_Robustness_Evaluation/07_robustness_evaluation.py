@@ -1,6 +1,6 @@
 import csv
-from collections import defaultdict
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -8,7 +8,6 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
-
 
 LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
 ROBUSTNESS_SUMMARY_FILE = common.STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv"

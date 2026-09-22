@@ -5,9 +5,10 @@ import re
 import runpy
 import shutil
 import stat
+import sys
 import time
-from functools import lru_cache
 from collections import defaultdict
+from functools import cache, lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,19 +25,12 @@ STAGE8_OUTPUT_DIR = OUTPUT_ROOT / "08_Final_Selection"
 SLOT_SIZE_ROOT = STAGE3_OUTPUT_DIR
 
 METHODS = ("quantile_binning", "hierarchical_clustering", "kmeans_clustering")
-BASE_OCCUPIED_LOCATIONS_COUNT = 926
-OCCUPIED_LOCATION_SCENARIO_FACTORS = {
-    "Low_Count": 0.9,
-    "Base_Count": 1.0,
-    "High_Count": 1.1,
-}
-CANDIDATE_LAYOUT_STYLES = ("implementation",)
+
 
 COLUMN_MAX_HEIGHT = 770.0
 TOP_BEAM_HEIGHT = 16.0
 MAX_USED_HEIGHT_BASE = COLUMN_MAX_HEIGHT - TOP_BEAM_HEIGHT
 MIN_BEAMS_PER_COLUMN = 3
-MIN_LOCATIONS_PER_COLUMN = 4
 BEAM_HEIGHT = 16.0
 BEAM_RELOCATION_TOLERANCE_CM = 0.0
 
@@ -113,6 +107,49 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(reader)
 
 
+def _average_current_layout_occupied_locations() -> int:
+    """Return the live average occupied-location count from the current utilization file."""
+    path = STAGE1_OUTPUT_DIR / "Current_Layout_Space_Utilization.csv"
+    if not path.exists():
+        return 926
+    try:
+        rows = _read_csv(path)
+    except FileNotFoundError:
+        return 926
+    values = [
+        int(round(float(str(row.get("Occupied_Locations", "")).strip())))
+        for row in rows
+        if str(row.get("Occupied_Locations", "")).strip() not in {"", "nan", "NaN"}
+    ]
+    if not values:
+        return 926
+    return max(int(round(sum(values) / len(values))), 0)
+
+
+def _resolve_pipeline_target_override() -> str | None:
+    """Return a Stage 6 target override supplied via the ordered pipeline CLI."""
+    if len(sys.argv) <= 1:
+        return None
+
+    raw = " ".join(sys.argv[1:]).strip()
+    if not raw or raw.startswith("-"):
+        return None
+
+    normalized = raw.strip().lower()
+    if normalized in {"random", "full"}:
+        return raw
+    if normalized.startswith("random:"):
+        return raw
+    if re.fullmatch(r"(?:cfg_)?\d{3}(?:\s*,\s*(?:cfg_)?\d{3})*", raw, flags=re.IGNORECASE):
+        return raw
+    if re.fullmatch(r"(?:cfg_)?\d{3}\s*-\s*(?:cfg_)?\d{3}", raw, flags=re.IGNORECASE):
+        return raw
+    return None
+
+
+BASE_OCCUPIED_LOCATIONS_COUNT = _average_current_layout_occupied_locations()
+
+
 def _deduplicate_output_columns(
     fieldnames: list[str],
     rows: list[dict[str, str]],
@@ -124,7 +161,12 @@ def _deduplicate_output_columns(
     if not fieldnames or not rows:
         return fieldnames, rows
 
-    preserve = {str(field) for field in (preserve_fields or set())}
+    default_preserve = {
+        "Rack_Search_Timeout",
+        "Layout_Feasible",
+        "Allocation_Feasible_Initial",
+    }
+    preserve = {str(field) for field in (preserve_fields or set())} | default_preserve
     column_values: dict[str, list[str]] = {
         field: [str(row.get(field, "")) for row in rows]
         for field in fieldnames
@@ -210,7 +252,7 @@ def _safe_rmtree(path: Path | str, retries: int = 8, delay_seconds: float = 0.35
                 return
             shutil.rmtree(target)
             return
-        except (PermissionError, FileNotFoundError, OSError) as exc:
+        except (PermissionError, FileNotFoundError, OSError):
             if attempt == retries:
                 raise
             time.sleep(delay_seconds * attempt)
@@ -222,7 +264,31 @@ def _slot_size_variable_name(slot_size: float) -> str:
 
 
 FIXED_LAYOUT_SLOT_COUNTS: dict[int, int] = {}
-MAX_REPRESENTATIVE_SLOT_SIZE_CM = 239.0
+
+
+def _max_representative_slot_size_from_generated_data() -> float:
+    """Infer the current representative max from generated slot-size data when available."""
+    candidate_paths = (
+        SLOT_SIZE_ROOT / "Stage3_Slot_Size_Configuration_Summary_All.csv",
+    )
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        try:
+            rows = _read_csv(path)
+        except FileNotFoundError:
+            continue
+        values = [
+            float(str(row.get("Representative Slot Size", "")).strip())
+            for row in rows
+            if str(row.get("Representative Slot Size", "")).strip() not in {"", "nan", "NaN"}
+        ]
+        if values:
+            return max(float(value) for value in values)
+    return 239.0
+
+
+MAX_REPRESENTATIVE_SLOT_SIZE_CM = _max_representative_slot_size_from_generated_data()
 
 
 def _ignore_layout_constraints() -> bool:
@@ -236,7 +302,7 @@ def _should_ignore_layout_for_layout_generation() -> bool:
     return _ignore_layout_constraints()
 
 
-def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> float:
+def _cap_slot_size(value: float, maximum: float | None = None) -> float:
     """Clamp generated slot sizes to the working maximum representative size."""
     capped_max = float(MAX_REPRESENTATIVE_SLOT_SIZE_CM if maximum is None else maximum)
     slot_value = float(value)
@@ -449,7 +515,7 @@ def _allocate_layout_by_column(
 
     available_sizes = sorted({
         float(size)
-        for size in target_exact_counts.keys()
+        for size in target_exact_counts
         if float(size) > 0.0
     })
 
@@ -849,7 +915,7 @@ def _best_slot_order_for_targets(
         matched = 1 if min_delta <= BEAM_RELOCATION_TOLERANCE_CM else 0
         return matched, min_delta
 
-    @lru_cache(maxsize=None)
+    @cache
     def _solve(remaining_counts: tuple[int, ...]) -> tuple[int, float, tuple[int, ...]]:
         remaining_total = sum(remaining_counts)
         if remaining_total <= 0:
@@ -926,7 +992,7 @@ def _exact_beam_height_sequences(
     if target_height <= 0 or max_slots <= 0 or not slot_sizes:
         return ()
 
-    @lru_cache(maxsize=None)
+    @cache
     def _compositions(total: int, length: int) -> tuple[tuple[int, ...], ...]:
         if length == 0:
             return ((),) if total == 0 else ()
@@ -1154,15 +1220,6 @@ def _material_requirements(
     return required_beams, required_grids, additional_beams, additional_grids
 
 
-def _build_occupied_location_count_scenarios(_scenario_rows: list[dict[str, str]]) -> dict[str, int]:
-    # Shared low/base/high occupied-location demand assumptions used downstream.
-    base_count = BASE_OCCUPIED_LOCATIONS_COUNT
-    return {
-        name: int(round(base_count * factor))
-        for name, factor in OCCUPIED_LOCATION_SCENARIO_FACTORS.items()
-    }
-
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 ORDERED_SCRIPTS = [
     "01_Data_Preparation/01_data_preparation.py",
@@ -1196,7 +1253,19 @@ def _run_script(script_name: str) -> None:
     if not script_path.exists():
         raise FileNotFoundError(f"Pipeline stage script not found: {script_path}")
     print(f"Running: {script_name}")
-    runpy.run_path(str(script_path), run_name="__main__")
+
+    previous_override = os.environ.get("PIPELINE_TARGET_CONFIGS")
+    override = _resolve_pipeline_target_override() if script_name.endswith("06_layout_generation.py") else None
+    if override is not None:
+        os.environ["PIPELINE_TARGET_CONFIGS"] = override
+
+    try:
+        runpy.run_path(str(script_path), run_name="__main__")
+    finally:
+        if previous_override is None:
+            os.environ.pop("PIPELINE_TARGET_CONFIGS", None)
+        else:
+            os.environ["PIPELINE_TARGET_CONFIGS"] = previous_override
 
 
 def run_pipeline() -> None:

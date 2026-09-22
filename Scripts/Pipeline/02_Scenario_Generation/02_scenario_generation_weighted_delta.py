@@ -1,7 +1,6 @@
 import csv
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 INPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
 OUTPUT_FILE = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"

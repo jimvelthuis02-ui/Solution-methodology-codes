@@ -1,8 +1,6 @@
 import csv
-from collections import defaultdict
 import sys
-from functools import lru_cache
-from itertools import combinations_with_replacement, permutations
+from collections import defaultdict
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +8,6 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
-
 
 OUTPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
 MAX_REPRESENTATIVE_SLOT_SIZE_CM = common.MAX_REPRESENTATIVE_SLOT_SIZE_CM

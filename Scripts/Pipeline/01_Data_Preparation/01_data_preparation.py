@@ -5,7 +5,6 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-
 ROOT = Path(__file__).resolve().parents[3]
 INPUT_DIR = ROOT / "Input files" / "Locations"
 PREPARED_OUTPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
