@@ -45,9 +45,9 @@ PROFILE_CANDIDATE_LIMIT = 20
 PROFILE_CANDIDATE_GUARD_SIZE_COVERAGE = 2
 PROFILE_QUOTA_LIMIT = 2
 PROFILE_GENERATION_CAP_PER_CONFIG = 24
-PROFILE_GENERATION_TIMEOUT_SECONDS = 60.0
-RACK_SEARCH_TIMEOUT_SECONDS = 60.0
-FAST_FAIL_PROFILE_PROBE_SECONDS = 12.0
+PROFILE_GENERATION_TIMEOUT_SECONDS = 300.0
+RACK_SEARCH_TIMEOUT_SECONDS = 300.0
+FAST_FAIL_PROFILE_PROBE_SECONDS = 30.0
 FAST_FAIL_PROFILE_PROBE_FAMILY_SIZE = 7
 _LAST_STAGE6_TIMEOUTS: dict[str, bool] = {
     "profile_generation": False,
@@ -719,22 +719,22 @@ def _normalize_slot_family(candidate_slot_sizes: SlotSizeSequence) -> tuple[floa
     return tuple(sorted({float(size) for size in (candidate_slot_sizes or []) if size is not None}))
 
 
-def _profile_generation_policy(candidate_slot_sizes: SlotSizeSequence) -> tuple[int, int, int]:
+def _profile_generation_policy(candidate_slot_sizes: SlotSizeSequence) -> tuple[int, int, int, int]:
     """Return the runtime-safe generation window for the active slot family.
 
-    The Stage 6 search must keep enough diverse exact-fill profiles alive for families with several
-    slot sizes. The earlier values were tuned for a smoke test and stopped too early for real 4+ slot
-    families, which prevented profiles from reaching the required total counts.
+    Larger families need a wider legal profile pool and a wider shortlist so the rack search does not
+    starve itself on a tiny subset of exact-fill candidates. This keeps the pool family-aware while
+    still preventing the broad combinatorial explosion that would otherwise happen for 8+ slot values.
     """
     configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
     family_size = len(configured_sizes)
     if family_size <= 4:
-        return 14, 2, 28
+        return 14, 2, 28, 12
     if family_size <= 6:
-        return 12, 2, 24
+        return 12, 2, 24, 16
     if family_size <= 8:
-        return 10, 2, 20
-    return 8, 2, 18
+        return 10, 2, 20, 18
+    return 8, 2, 18, 22
 
 
 def _normalize_required_counts(required_counts: dict[float, int] | Sequence[tuple[float, int]] | None) -> tuple[tuple[float, int], ...] | None:
@@ -812,7 +812,7 @@ def _generate_feasible_rack_profiles_cached(
     # slot that can still support a valid exact-fill completion, and rebuilds the profile from that
     # reduced prefix. This keeps the search aligned with the intended dominant-order logic while still
     # enforcing exact-fill legality and quota-based stopping.
-    max_lower_rows, quota_limit, cap = _profile_generation_policy(candidate_slot_sizes)
+    max_lower_rows = max(2, min(8, len(configured_sizes)))
 
     def _build_candidate_from_prefix(prefix: tuple[int, ...]) -> tuple[float, ...] | None:
         if not prefix:
@@ -834,9 +834,7 @@ def _generate_feasible_rack_profiles_cached(
         return candidate
 
     generated_order: list[tuple[float, ...]] = []
-    # Clean dominant-order generator: the search space is a single canonical queue of descending
-    # prefixes, not a broad position-by-value expansion. This keeps the search bounded and makes the
-    # family-level cache effective for repeated config families.
+
     def _dominant_next_prefixes(prefix: tuple[int, ...]) -> list[tuple[int, ...]]:
         if not prefix:
             return []
@@ -862,7 +860,7 @@ def _generate_feasible_rack_profiles_cached(
 
     queue: list[tuple[int, ...]] = [tuple([int(round(float(configured_sizes[0])))]),]
     explored: set[tuple[int, ...]] = set()
-    while queue and len(generated_order) < cap:
+    while queue:
         prefix = queue.pop(0)
         if prefix in explored:
             continue
@@ -872,8 +870,6 @@ def _generate_feasible_rack_profiles_cached(
         if candidate is not None and candidate not in seen:
             seen.add(candidate)
             generated_order.append(candidate)
-            if len(generated_order) >= cap:
-                break
 
         if len(prefix) >= max_lower_rows:
             continue
@@ -886,34 +882,7 @@ def _generate_feasible_rack_profiles_cached(
         set(generated_order),
         key=lambda profile: tuple(-float(value) for value in profile),
     )
-
-    quota_counts: dict[int, int] = {size: 0 for size in configured_sizes}
-    for profile in ordered_profiles:
-        if len(accepted_profiles) >= cap:
-            break
-        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
-            break
-        family_hits = {
-            int(round(float(_effective_requirement_slot_size(float(value), list(profile), configured_sizes))))
-            for value in profile
-            if float(value) > 0.0
-            and int(round(float(_effective_requirement_slot_size(float(value), list(profile), configured_sizes)))) in family_set
-        }
-        if not family_hits:
-            continue
-        remaining_sizes = [size for size in configured_sizes if quota_counts.get(size, 0) < quota_limit]
-        if not any(size in family_hits for size in remaining_sizes):
-            continue
-        accepted_profiles.append(profile)
-        for size in family_hits:
-            quota_counts[size] = quota_counts.get(size, 0) + 1
-        if all(quota_counts.get(size, 0) >= quota_limit for size in configured_sizes):
-            break
-
-    if len(accepted_profiles) > cap:
-        return tuple(accepted_profiles[:cap])
-
-    return tuple(accepted_profiles)
+    return tuple(ordered_profiles)
 
 
 def _generate_feasible_rack_profiles(
@@ -951,14 +920,18 @@ def _choose_profile_shortlist(
 ) -> list[list[float]]:
     """Keep the legal profile search focused without losing required slot-size coverage.
 
-    The shortlist is ranked by remaining-deficit usefulness, then a coverage guard adds profiles that
-    introduce a missing slot family so the search never drops a required size from the candidate pool.
+    The shortlist is ranked by remaining-deficit usefulness, but the selection is also family-aware:
+    at least one profile covering a required family size is kept when possible so the rack search does
+    not starve on a single dominant profile pattern. This preserves diversity without inflating the
+    shortlist to the full raw exact-fill pool.
     """
     if not profiles:
         return []
 
-    family_cap = _profile_generation_policy(list(required_counts.keys()))[2]
-    search_limit = max(1, min(int(limit if limit is not None else PROFILE_CANDIDATE_LIMIT), family_cap))
+    configured_sizes = sorted(set(_config_size_values(list(required_counts.keys()))), reverse=True)
+    _, _, _, shortlist_cap = _profile_generation_policy(configured_sizes)
+    explicit_limit = int(limit if limit is not None else PROFILE_CANDIDATE_LIMIT)
+    search_limit = max(1, min(explicit_limit, shortlist_cap, len(profiles)))
     if len(profiles) <= search_limit:
         return [list(profile) for profile in profiles]
 
@@ -975,7 +948,12 @@ def _choose_profile_shortlist(
 
     kept: list[list[float]] = []
     covered_sizes: set[int] = set()
+    seen_profiles: set[tuple[float, ...]] = set()
     for profile in ranked:
+        profile_key = tuple(float(value) for value in profile)
+        if profile_key in seen_profiles:
+            continue
+        seen_profiles.add(profile_key)
         counts = _effective_requirement_counts(profile, list(required_counts.keys()))
         uncovered = [
             size for size in required_sizes
@@ -990,10 +968,34 @@ def _choose_profile_shortlist(
     if len(kept) < search_limit:
         for profile in ranked:
             candidate = list(profile)
-            if candidate not in kept:
-                kept.append(candidate)
+            candidate_key = tuple(float(value) for value in candidate)
+            if candidate_key in {tuple(float(value) for value in item) for item in kept}:
+                continue
+            kept.append(candidate)
             if len(kept) >= search_limit:
                 break
+
+    if not kept:
+        return [list(profile) for profile in ranked[:search_limit]]
+
+    # Preserve at least one profile covering each required family size when possible, before we allow
+    # the shortlist to fall back to generic top-ranked profiles. This keeps the rack search from
+    # starving on a single dominant family even when that family is not the one currently in deficit.
+    family_coverage: set[int] = set()
+    for profile in kept:
+        counts = _effective_requirement_counts(profile, list(required_counts.keys()))
+        family_coverage.update(size for size in required_sizes if counts.get(size, 0) > 0)
+    for size in required_sizes:
+        if size in family_coverage:
+            continue
+        for profile in ranked:
+            counts = _effective_requirement_counts(profile, list(required_counts.keys()))
+            if counts.get(size, 0) > 0 and list(profile) not in kept:
+                kept.append(list(profile))
+                if len(kept) >= search_limit:
+                    break
+        if len(kept) >= search_limit:
+            break
 
     return kept[:search_limit]
 
@@ -1001,7 +1003,7 @@ def _choose_profile_shortlist(
 def _nearest_configured_family_slot(
     slot_value: float | int,
     available_slot_sizes: SlotSizeSequence = None,
-    profile: list[float] | tuple[float, ...] | None = None,
+    profile: Sequence[float | int] | None = None,
 ) -> int | None:
     """Map a legal topfill to the configured family value reached by rounding down.
 
@@ -1364,10 +1366,11 @@ def _build_deficit_coverage_layout(
         return {column_key: [] for column_key in rack_columns}
     _LAST_STAGE6_TIMEOUTS["profile_generation"] = False
 
-    # Keep the rack search on a small, requirement-aware shortlist. The raw legal family pool can be
-    # large even when only a handful of profiles are materially useful at the current remaining-deficit
-    # state; trapping the recursion against the full pool causes the runtime blow-up.
-    shortlist_limit = min(8, max(4, len(profiles))) if profiles else 0
+    # Keep the rack search on a family-aware shortlist. Larger slot families need a wider candidate
+    # pool to avoid starving the recursion on a single dominant profile pattern while still keeping the
+    # search compact enough that the runtime stays controlled.
+    family_policy_cap = _profile_generation_policy(list(required_counts.keys()))[3]
+    shortlist_limit = max(4, min(len(profiles), family_policy_cap)) if profiles else 0
     profiles = _choose_profile_shortlist(profiles, required, limit=shortlist_limit)
     _LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
     if not profiles:
@@ -1379,108 +1382,128 @@ def _build_deficit_coverage_layout(
     rack_order = sorted(rack_to_columns)
 
     sizes = sorted(required, key=lambda size: int(round(float(size))))
-    profile_search_limit = min(max(4, min(8, len(profiles))), len(profiles)) if profiles else 0
+    base_limit = max(4, min(len(profiles), _profile_generation_policy(list(required_counts.keys()))[3])) if profiles else 0
+    widening_limits = []
+    if profiles:
+        widening_limits.append(max(4, min(len(profiles), base_limit)))
+        for target in (12, 16, 20, 28, 40):
+            candidate_limit = min(len(profiles), max(base_limit, target))
+            if candidate_limit > 0 and candidate_limit not in widening_limits:
+                widening_limits.append(candidate_limit)
+        if len(profiles) not in widening_limits:
+            widening_limits.append(len(profiles))
+    widening_limits = sorted(set(limit for limit in widening_limits if limit > 0))
 
-    def _remaining_objective(remaining: dict[float, int]) -> tuple[int, int, int]:
-        satisfied = sum(1 for size in sizes if int(remaining.get(size, 0)) <= 0)
-        total_shortage = sum(max(0, int(remaining.get(size, 0))) for size in sizes)
-        distribution_gap = 0.0
-        total_need = sum(int(value) for value in remaining.values())
-        if total_need > 0:
-            target_mix = {
-                float(size): float(int(remaining.get(size, 0))) / float(total_need)
-                for size in sizes
-            }
-            # The selection objective is driven by how well the remaining distribution would be satisfied
-            # by the final rack-profile mix, not merely by the next local profile score.
-            for size in sizes:
-                if int(remaining.get(size, 0)) <= 0:
+    last_assignments: dict[str, list[float]] | None = None
+    last_timeout = False
+
+    for profile_search_limit in widening_limits:
+        profile_pool = _choose_profile_shortlist(profiles, required, limit=profile_search_limit)
+        if not profile_pool:
+            continue
+
+        def _remaining_objective(remaining: dict[float, int]) -> tuple[int, int, int]:
+            satisfied = sum(1 for size in sizes if int(remaining.get(size, 0)) <= 0)
+            total_shortage = sum(max(0, int(remaining.get(size, 0))) for size in sizes)
+            distribution_gap = 0.0
+            total_need = sum(int(value) for value in remaining.values())
+            if total_need > 0:
+                for size in sizes:
+                    if int(remaining.get(size, 0)) <= 0:
+                        continue
+                    distribution_gap += abs(float(int(remaining.get(size, 0))) / float(total_need))
+            return (satisfied, -total_shortage, int(-distribution_gap * 1000.0))
+
+        def _candidate_profiles_for_remaining(remaining: dict[float, int]) -> list[list[float]]:
+            shortlist = _choose_profile_shortlist(profile_pool, remaining, limit=min(max(4, min(8, len(profile_pool))), len(profile_pool)))
+            ordered = sorted(
+                shortlist,
+                key=lambda profile: _profile_requirement_priority(list(profile), remaining),
+                reverse=True,
+            )
+            deduped: list[list[float]] = []
+            seen_signatures: set[tuple[tuple[int, int], ...]] = set()
+            for profile in ordered:
+                effective_counts = _effective_requirement_counts(profile, list(remaining.keys()))
+                signature = tuple(sorted((int(size), int(count)) for size, count in effective_counts.items()))
+                if signature in seen_signatures:
                     continue
-                distribution_gap += abs(float(int(remaining.get(size, 0))) / float(total_need))
-        return (satisfied, -total_shortage, int(-distribution_gap * 1000.0))
+                seen_signatures.add(signature)
+                deduped.append(list(profile))
+                if len(deduped) >= min(max(4, min(8, len(profile_pool))), len(profile_pool)):
+                    break
+            return deduped
 
-    def _candidate_profiles_for_remaining(remaining: dict[float, int]) -> list[list[float]]:
-        shortlist = _choose_profile_shortlist(profiles, remaining, limit=profile_search_limit)
-        ordered = sorted(
-            shortlist,
-            key=lambda profile: _profile_requirement_priority(list(profile), remaining),
-            reverse=True,
-        )
-        deduped: list[list[float]] = []
-        seen_signatures: set[tuple[tuple[int, int], ...]] = set()
-        for profile in ordered:
-            effective_counts = _effective_requirement_counts(profile, list(remaining.keys()))
-            signature = tuple(sorted((int(size), int(count)) for size, count in effective_counts.items()))
-            if signature in seen_signatures:
-                continue
-            seen_signatures.add(signature)
-            deduped.append(list(profile))
-            if len(deduped) >= profile_search_limit:
-                break
-        return deduped
+        rack_search_start = time.perf_counter()
+        rack_search_deadline = rack_search_start + RACK_SEARCH_TIMEOUT_SECONDS
 
-    rack_search_start = time.perf_counter()
-    rack_search_deadline = rack_search_start + RACK_SEARCH_TIMEOUT_SECONDS
-
-    @lru_cache(maxsize=20000)
-    def _search(index: int, remaining_key: tuple[tuple[float, int], ...]) -> tuple[tuple[int, int, int], dict[str, list[float]]]:
-        if config_deadline is not None and time.perf_counter() >= config_deadline:
-            raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
-        if time.perf_counter() >= rack_search_deadline:
-            raise Stage6RackSearchTimeout("rack search exceeded the per-config timeout")
-        remaining = {float(size): int(count) for size, count in remaining_key}
-        if index >= len(rack_order):
-            return _remaining_objective(remaining), {}
-
-        rack = rack_order[index]
-        columns = sorted(rack_to_columns[rack])
-        best_score: tuple[int, int, int] | None = None
-        best_assignments: dict[str, list[float]] | None = None
-
-        rack_columns_count = len(columns)
-        for profile in _candidate_profiles_for_remaining(remaining):
+        @lru_cache(maxsize=20000)
+        def _search(index: int, remaining_key: tuple[tuple[float, int], ...]) -> tuple[tuple[int, int, int], dict[str, list[float]]]:
             if config_deadline is not None and time.perf_counter() >= config_deadline:
                 raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
             if time.perf_counter() >= rack_search_deadline:
                 raise Stage6RackSearchTimeout("rack search exceeded the per-config timeout")
-            next_remaining = {float(size): int(count) for size, count in remaining.items()}
-            effective_counts = _effective_requirement_counts(profile, list(required.keys()))
-            for size_int, count in effective_counts.items():
-                size_key = next((key for key in next_remaining if int(round(float(key))) == size_int), None)
-                if size_key is None:
-                    continue
-                next_remaining[size_key] = max(next_remaining[size_key] - count * rack_columns_count, 0)
+            remaining = {float(size): int(count) for size, count in remaining_key}
+            if index >= len(rack_order):
+                return _remaining_objective(remaining), {}
 
-            try:
-                child_score, child_assignments = _search(index + 1, tuple(sorted((float(size), int(value)) for size, value in next_remaining.items())))
-            except Stage6RackSearchTimeout:
-                raise
-            candidate_score = child_score
-            if best_score is None or candidate_score > best_score:
-                best_score = candidate_score
-                best_assignments = {column_key: list(profile) for column_key in columns}
-                best_assignments.update(child_assignments)
+            rack = rack_order[index]
+            columns = sorted(rack_to_columns[rack])
+            best_score: tuple[int, int, int] | None = None
+            best_assignments: dict[str, list[float]] | None = None
 
-        if best_score is None or best_assignments is None:
-            fallback_profile = list(profiles[0])
-            return _remaining_objective(remaining), {column_key: list(fallback_profile) for column_key in columns}
+            rack_columns_count = len(columns)
+            for profile in _candidate_profiles_for_remaining(remaining):
+                if config_deadline is not None and time.perf_counter() >= config_deadline:
+                    raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
+                if time.perf_counter() >= rack_search_deadline:
+                    raise Stage6RackSearchTimeout("rack search exceeded the per-config timeout")
+                next_remaining = {float(size): int(count) for size, count in remaining.items()}
+                effective_counts = _effective_requirement_counts(profile, list(required.keys()))
+                for size_int, count in effective_counts.items():
+                    size_key = next((key for key in next_remaining if int(round(float(key))) == size_int), None)
+                    if size_key is None:
+                        continue
+                    next_remaining[size_key] = max(next_remaining[size_key] - count * rack_columns_count, 0)
 
-        return best_score, best_assignments
+                try:
+                    child_score, child_assignments = _search(index + 1, tuple(sorted((float(size), int(value)) for size, value in next_remaining.items())))
+                except Stage6RackSearchTimeout:
+                    raise
+                candidate_score = child_score
+                if best_score is None or candidate_score > best_score:
+                    best_score = candidate_score
+                    best_assignments = {column_key: list(profile) for column_key in columns}
+                    best_assignments.update(child_assignments)
 
-    try:
-        _, assignments = _search(0, tuple(sorted((float(size), int(count)) for size, count in required.items())))
-    except Stage6RackSearchTimeout:
-        _LAST_STAGE6_TIMEOUTS["rack_search"] = True
+            if best_score is None or best_assignments is None:
+                fallback_profile = list(profile_pool[0]) if profile_pool else [float(sizes[0])]
+                return _remaining_objective(remaining), {column_key: list(fallback_profile) for column_key in columns}
+
+            return best_score, best_assignments
+
+        try:
+            _, assignments = _search(0, tuple(sorted((float(size), int(count)) for size, count in required.items())))
+        except Stage6RackSearchTimeout:
+            last_timeout = True
+            _LAST_STAGE6_TIMEOUTS["rack_search"] = True
+            continue
+
+        _LAST_STAGE6_TIMEOUTS["rack_search"] = False
         _LAST_STAGE6_STEP_TIMINGS["rack_search"] = time.perf_counter() - rack_search_start
+        for column_key in rack_columns:
+            assignments.setdefault(column_key, [])
+        last_assignments = assignments
+        if assignments and any(columns for columns in assignments.values()):
+            return assignments
+
+    if last_timeout:
         return {column_key: [] for column_key in rack_columns}
-
-    _LAST_STAGE6_STEP_TIMINGS["rack_search"] = time.perf_counter() - rack_search_start
-    _LAST_STAGE6_TIMEOUTS["rack_search"] = False
-
-    for column_key in rack_columns:
-        assignments.setdefault(column_key, [])
-
-    return assignments
+    if last_assignments is not None:
+        for column_key in rack_columns:
+            last_assignments.setdefault(column_key, [])
+        return last_assignments
+    return {column_key: [] for column_key in rack_columns}
 
 
 def _slot_distribution_signature(column_assignments: dict[str, list[float]]) -> str:
@@ -2599,15 +2622,14 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
         if len(config_slot_sizes) >= FAST_FAIL_PROFILE_PROBE_FAMILY_SIZE:
             required_map = {float(size): int(count) for size, count in base_exact_counts.items()}
             probe_deadline = config_start_time + max(FAST_FAIL_PROFILE_PROBE_SECONDS + 5.0, 20.0)
-            if not _quick_profile_feasibility_probe(
+            probe_result = _quick_profile_feasibility_probe(
                 config_slot_sizes,
                 required_counts=required_map,
                 timeout_seconds=FAST_FAIL_PROFILE_PROBE_SECONDS,
                 config_deadline=min(probe_deadline, _LAST_STAGE6_CONFIG_DEADLINE) if _LAST_STAGE6_CONFIG_DEADLINE is not None else probe_deadline,
-            ):
-                print(f"[Stage 6] config {config_id}: early rejection after fast profile probe; no legal exact-fill path remains for this family")
-                candidate_layout_rows.append(_timeout_summary_row(config_id, layout_id, config_start_time, config_time_limit_seconds, base_exact_counts))
-                continue
+            )
+            if not probe_result:
+                print(f"[Stage 6] config {config_id}: quick probe found no immediate legal profile path; continuing with full wider search under the larger time budget")
         column_assignments = _build_deficit_coverage_layout(
             rack_columns=layout_columns,
             required_counts={float(size): int(count) for size, count in base_exact_counts.items()},
