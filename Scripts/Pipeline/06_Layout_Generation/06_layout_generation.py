@@ -722,12 +722,15 @@ def _normalize_slot_family(candidate_slot_sizes: SlotSizeSequence) -> tuple[floa
 def _profile_generation_policy(candidate_slot_sizes: SlotSizeSequence) -> tuple[int, int, int, int]:
     """Return the runtime-safe generation window for the active slot family.
 
-    Larger families need a wider legal profile pool and a wider shortlist so the rack search does not
-    starve itself on a tiny subset of exact-fill candidates. This keeps the pool family-aware while
-    still preventing the broad combinatorial explosion that would otherwise happen for 8+ slot values.
+    Coarse 3-slot families are the main failure mode in Stage 6: they are structurally legal, but a
+    narrow exact-fill shortlist can starve the rack search before the wider family mix is explored.
+    Those families therefore get a wider shortlist ceiling than a generic 4-slot family even though
+    they should still stay far below the 8+ slot explosion path.
     """
     configured_sizes = sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
     family_size = len(configured_sizes)
+    if family_size <= 3:
+        return 18, 2, 32, 20
     if family_size <= 4:
         return 14, 2, 28, 12
     if family_size <= 6:
@@ -746,6 +749,67 @@ def _normalize_required_counts(required_counts: dict[float, int] | Sequence[tupl
     else:
         items = required_counts
     return tuple(sorted((float(size), int(count)) for size, count in items if int(count) > 0))
+
+
+def _profile_remaining_deficit(
+    profile: Sequence[float],
+    required_counts: dict[float, int] | None,
+) -> dict[float, int]:
+    """Return the remaining slot-size requirement after accounting for the profile."""
+    if not profile or not required_counts:
+        return {}
+    effective_counts = _effective_requirement_counts(profile, list(required_counts.keys()))
+    remaining: dict[float, int] = {}
+    for size, count in sorted(required_counts.items(), key=lambda item: int(round(float(item[0]))), reverse=True):
+        size_key = int(round(float(size)))
+        if int(count) <= 0:
+            continue
+        covered = effective_counts.get(size_key, 0)
+        shortage = max(int(count) - covered, 0)
+        if shortage > 0:
+            remaining[float(size)] = shortage
+    return remaining
+
+
+def _profile_quota_score(
+    profile: Sequence[float],
+    required_counts: dict[float, int] | None,
+) -> tuple[int, int, int, int]:
+    """Rank a profile by how much it reduces the remaining exact-count shortage."""
+    if not required_counts:
+        return (1, 0, 0, 1)
+    effective = _effective_requirement_counts(profile, list(required_counts.keys()))
+    satisfied = 0
+    removed = 0
+    shortage = 0
+    for size, count in sorted(required_counts.items(), key=lambda item: int(round(float(item[0]))), reverse=True):
+        size_key = int(round(float(size)))
+        need = int(count)
+        have = effective.get(size_key, 0)
+        if have >= need:
+            satisfied += 1
+        removed += min(have, need)
+        shortage += max(need - have, 0)
+    exact_fill_bonus = 1 if _profile_is_feasible_exact_fill(profile, list(required_counts.keys())) else 0
+    return (satisfied, removed, -shortage, exact_fill_bonus)
+
+
+def _profile_is_dominated(
+    candidate: Sequence[float],
+    existing_profiles: Sequence[Sequence[float]],
+    required_counts: dict[float, int] | None,
+) -> bool:
+    """Return True when a profile is strictly worse than an already-kept profile on the remaining quota."""
+    if not required_counts or not existing_profiles:
+        return False
+    candidate_score = _profile_quota_score(candidate, required_counts)
+    for previous in existing_profiles:
+        previous_score = _profile_quota_score(previous, required_counts)
+        if previous_score >= candidate_score:
+            # A profile that does not improve the shortage vector or exact-fill usefulness is dominated.
+            if _profile_remaining_deficit(previous, required_counts) == _profile_remaining_deficit(candidate, required_counts):
+                return True
+    return False
 
 
 def _quick_profile_feasibility_probe(
@@ -812,7 +876,7 @@ def _generate_feasible_rack_profiles_cached(
     # slot that can still support a valid exact-fill completion, and rebuilds the profile from that
     # reduced prefix. This keeps the search aligned with the intended dominant-order logic while still
     # enforcing exact-fill legality and quota-based stopping.
-    max_lower_rows = max(2, min(8, len(configured_sizes)))
+    max_lower_rows = 8 if len(configured_sizes) <= 3 else max(2, min(8, len(configured_sizes)))
 
     def _build_candidate_from_prefix(prefix: tuple[int, ...]) -> tuple[float, ...] | None:
         if not prefix:
@@ -834,6 +898,16 @@ def _generate_feasible_rack_profiles_cached(
         return candidate
 
     generated_order: list[tuple[float, ...]] = []
+    explored: set[tuple[int, ...]] = set()
+
+    def _family_search_cap() -> int:
+        if len(configured_sizes) <= 3:
+            return 24
+        if len(configured_sizes) <= 4:
+            return 18
+        if len(configured_sizes) <= 6:
+            return 14
+        return 10
 
     def _dominant_next_prefixes(prefix: tuple[int, ...]) -> list[tuple[int, ...]]:
         if not prefix:
@@ -843,40 +917,79 @@ def _generate_feasible_rack_profiles_cached(
             lower_values = [size for size in configured_sizes if size < prefix[index]]
             if not lower_values:
                 continue
-            next_prefix = list(prefix)
-            next_prefix[index] = int(round(float(lower_values[0])))
-            ordered = tuple(sorted(next_prefix, reverse=True))
-            if len(ordered) <= max_lower_rows and ordered not in next_prefixes:
-                next_prefixes.append(ordered)
+            for lower_value in sorted(lower_values, reverse=True):
+                next_prefix = list(prefix)
+                next_prefix[index] = int(round(float(lower_value)))
+                ordered = tuple(sorted(next_prefix, reverse=True))
+                if len(ordered) <= max_lower_rows and ordered not in next_prefixes:
+                    next_prefixes.append(ordered)
+
+        coarse_family = len(configured_sizes) <= 3
+        if coarse_family and len(prefix) < max_lower_rows:
+            repeated_prefix = tuple(sorted(prefix + (int(round(float(prefix[0]))),), reverse=True))
+            if len(repeated_prefix) <= max_lower_rows and repeated_prefix not in next_prefixes:
+                next_prefixes.append(repeated_prefix)
 
         if len(prefix) < max_lower_rows:
-            next_lower = max((size for size in configured_sizes if size < prefix[0]), default=None)
-            if next_lower is not None:
+            for next_lower in sorted((size for size in configured_sizes if size < prefix[0]), reverse=True):
                 extended = tuple(sorted(prefix + (int(round(float(next_lower))),), reverse=True))
                 if len(extended) <= max_lower_rows and extended not in next_prefixes:
                     next_prefixes.append(extended)
 
         return next_prefixes
 
-    queue: list[tuple[int, ...]] = [tuple([int(round(float(configured_sizes[0])))]),]
-    explored: set[tuple[int, ...]] = set()
-    while queue:
-        prefix = queue.pop(0)
-        if prefix in explored:
-            continue
-        explored.add(prefix)
+    if len(configured_sizes) <= 3:
+        def _enumerate_coarse_prefixes(prefix: tuple[int, ...]) -> None:
+            if prefix in explored:
+                return
+            explored.add(prefix)
 
-        candidate = _build_candidate_from_prefix(prefix)
-        if candidate is not None and candidate not in seen:
-            seen.add(candidate)
-            generated_order.append(candidate)
+            candidate = _build_candidate_from_prefix(prefix)
+            if candidate is not None and candidate not in seen:
+                if not required_map:
+                    seen.add(candidate)
+                    generated_order.append(candidate)
+                else:
+                    effective_counts = _effective_requirement_counts(candidate, tuple(required_map.keys()))
+                    if any(effective_counts.get(int(round(float(size))), 0) > 0 for size in required_map):
+                        seen.add(candidate)
+                        generated_order.append(candidate)
 
-        if len(prefix) >= max_lower_rows:
-            continue
+            if len(prefix) >= max_lower_rows:
+                return
 
-        for next_prefix in _dominant_next_prefixes(prefix):
-            if next_prefix not in explored and next_prefix not in queue:
-                queue.append(next_prefix)
+            for next_value in configured_sizes:
+                next_prefix = tuple(sorted(prefix + (int(round(float(next_value))),), reverse=True))
+                if len(next_prefix) > max_lower_rows:
+                    continue
+                _enumerate_coarse_prefixes(next_prefix)
+
+        _enumerate_coarse_prefixes(tuple([int(round(float(configured_sizes[0])))]))
+    else:
+        queue: list[tuple[int, ...]] = [tuple([int(round(float(configured_sizes[0])))]),]
+        while queue:
+            prefix = queue.pop(0)
+            if prefix in explored:
+                continue
+            explored.add(prefix)
+
+            candidate = _build_candidate_from_prefix(prefix)
+            if candidate is not None and candidate not in seen:
+                if not required_map:
+                    seen.add(candidate)
+                    generated_order.append(candidate)
+                else:
+                    effective_counts = _effective_requirement_counts(candidate, tuple(required_map.keys()))
+                    if any(effective_counts.get(int(round(float(size))), 0) > 0 for size in required_map):
+                        seen.add(candidate)
+                        generated_order.append(candidate)
+
+            if len(prefix) >= max_lower_rows or len(prefix) >= _family_search_cap():
+                continue
+
+            for next_prefix in _dominant_next_prefixes(prefix):
+                if next_prefix not in explored and next_prefix not in queue:
+                    queue.append(next_prefix)
 
     ordered_profiles = sorted(
         set(generated_order),
@@ -942,7 +1055,10 @@ def _choose_profile_shortlist(
     ]
     ranked = sorted(
         profiles,
-        key=lambda profile: _profile_requirement_priority(list(profile), required_counts),
+        key=lambda profile: (
+            _profile_quota_score(list(profile), required_counts),
+            _profile_requirement_priority(list(profile), required_counts),
+        ),
         reverse=True,
     )
 
@@ -1366,10 +1482,13 @@ def _build_deficit_coverage_layout(
         return {column_key: [] for column_key in rack_columns}
     _LAST_STAGE6_TIMEOUTS["profile_generation"] = False
 
-    # Keep the rack search on a family-aware shortlist. Larger slot families need a wider candidate
-    # pool to avoid starving the recursion on a single dominant profile pattern while still keeping the
-    # search compact enough that the runtime stays controlled.
+    # Keep the rack search on a family-aware shortlist. Coarse 3-slot families are often rejected not
+    # because they are structurally impossible, but because the shortlist is cut too aggressively before
+    # the rack search has a chance to explore the wider exact-fill mix that actually satisfies the
+    # minimum counts. This widening is intentionally bounded by the same overall time budgets.
     family_policy_cap = _profile_generation_policy(list(required_counts.keys()))[3]
+    if len(required_counts) <= 3:
+        family_policy_cap = max(family_policy_cap, 32)
     shortlist_limit = max(4, min(len(profiles), family_policy_cap)) if profiles else 0
     profiles = _choose_profile_shortlist(profiles, required, limit=shortlist_limit)
     _LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
@@ -1382,11 +1501,15 @@ def _build_deficit_coverage_layout(
     rack_order = sorted(rack_to_columns)
 
     sizes = sorted(required, key=lambda size: int(round(float(size))))
-    base_limit = max(4, min(len(profiles), _profile_generation_policy(list(required_counts.keys()))[3])) if profiles else 0
+    base_policy_cap = _profile_generation_policy(list(required_counts.keys()))[3]
+    if len(required_counts) <= 3:
+        base_policy_cap = max(base_policy_cap, 24)
+    base_limit = max(4, min(len(profiles), base_policy_cap)) if profiles else 0
     widening_limits = []
     if profiles:
         widening_limits.append(max(4, min(len(profiles), base_limit)))
-        for target in (12, 16, 20, 28, 40):
+        coarse_targets = (12, 16, 20, 28, 36, 48) if len(required_counts) <= 3 else (12, 16, 20, 28, 40)
+        for target in coarse_targets:
             candidate_limit = min(len(profiles), max(base_limit, target))
             if candidate_limit > 0 and candidate_limit not in widening_limits:
                 widening_limits.append(candidate_limit)
@@ -1415,7 +1538,10 @@ def _build_deficit_coverage_layout(
             return (satisfied, -total_shortage, int(-distribution_gap * 1000.0))
 
         def _candidate_profiles_for_remaining(remaining: dict[float, int]) -> list[list[float]]:
-            shortlist = _choose_profile_shortlist(profile_pool, remaining, limit=min(max(4, min(8, len(profile_pool))), len(profile_pool)))
+            profile_cap = min(max(4, min(8, len(profile_pool))), len(profile_pool))
+            if len(remaining) <= 3:
+                profile_cap = min(max(8, min(16, len(profile_pool))), len(profile_pool))
+            shortlist = _choose_profile_shortlist(profile_pool, remaining, limit=profile_cap)
             ordered = sorted(
                 shortlist,
                 key=lambda profile: _profile_requirement_priority(list(profile), remaining),
@@ -1430,7 +1556,7 @@ def _build_deficit_coverage_layout(
                     continue
                 seen_signatures.add(signature)
                 deduped.append(list(profile))
-                if len(deduped) >= min(max(4, min(8, len(profile_pool))), len(profile_pool)):
+                if len(deduped) >= profile_cap:
                     break
             return deduped
 
