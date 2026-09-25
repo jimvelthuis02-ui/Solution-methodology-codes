@@ -17,7 +17,7 @@ STAGE2_OUTPUT_DIR = OUTPUT_ROOT / "02_Scenario_Generation"
 STAGE3_OUTPUT_DIR = OUTPUT_ROOT / "03_Slot_Size_Generation"
 STAGE4_OUTPUT_DIR = OUTPUT_ROOT / "04_Candidate_Configuration"
 STAGE5_OUTPUT_DIR = OUTPUT_ROOT / "05_Capacity_Determination"
-STAGE6_OUTPUT_DIR = OUTPUT_ROOT / "06_Layout_Generation"
+STAGE6_OUTPUT_DIR = Path(os.environ.get("PIPELINE_STAGE6_OUTPUT_DIR", OUTPUT_ROOT / "06_Layout_Generation"))
 STAGE7_OUTPUT_DIR = OUTPUT_ROOT / "07_Robustness_Evaluation"
 STAGE8_OUTPUT_DIR = OUTPUT_ROOT / "08_Final_Selection"
 
