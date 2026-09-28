@@ -795,7 +795,24 @@ def _quick_profile_feasibility_probe(
     return bool(profiles)
 
 
-@lru_cache(maxsize=32)
+def _profile_quota_signature(
+    profile: Sequence[float],
+    available_slot_sizes: SlotSizeSequence = None,
+) -> tuple[tuple[int, int], ...]:
+    """Canonicalize a profile by the effective quota counts it contributes.
+
+    The Stage 6 generator should keep one representative per quota-signature so repeated exact-fill
+    variants do not crowd the legal pool. This is a canonicalization step, not a second generation
+    policy. The profile-space remains broad enough for feasible exact-fill layouts, while the search
+    stays focused on the remaining quota deficit.
+    """
+    normalized_sizes = tuple(
+        sorted({int(round(float(size))) for size in (available_slot_sizes or []) if float(size) > 0.0})
+    )
+    counts = _effective_requirement_counts(profile, normalized_sizes)
+    return tuple(sorted((int(size), int(count)) for size, count in counts.items()))
+
+
 def _generate_feasible_rack_profiles_cached(
     candidate_slot_sizes: tuple[float, ...],
     timeout_seconds: float | None = None,
@@ -819,14 +836,28 @@ def _generate_feasible_rack_profiles_cached(
     required_map = {float(size): int(count) for size, count in (required_counts or ())}
     deadline = None if timeout_seconds is None else time.perf_counter() + float(timeout_seconds)
     seen: set[tuple[float, ...]] = set()
-    accepted_profiles: list[tuple[float, ...]] = []
+    seen_quota_signatures: set[tuple[tuple[int, int], ...]] = set()
+    generated_order: list[tuple[float, ...]] = []
     # Generate the legal exact-fill space by enumerating a bounded lower-stack search over the current
     # configured family. This is the core fix for persistent hard configs: valid profiles such as
     # (239, 239, 114, 114) and (174, 124, 124, 84, 84, 84) arise from repeated dominant values, not only
     # a single pass through lower-value alternatives. We keep the search bounded, but we do not reject
     # profiles merely because they are longer than the raw family count.
-    max_lower_rows = max(2, min(10, len(configured_sizes) * 4 + 2))
-    generated_order: list[tuple[float, ...]] = []
+    max_lower_rows = max(2, min(18, len(configured_sizes) * 4 + 2))
+
+    def _add_candidate(lower_tuple: tuple[float, ...], residual_value: float) -> None:
+        nonlocal generated_order
+        candidate = tuple(sorted([*lower_tuple, float(residual_value)], reverse=True))
+        if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
+            return
+        if candidate in seen:
+            return
+        seen.add(candidate)
+        quota_signature = _profile_quota_signature(candidate, configured_sizes)
+        if quota_signature in seen_quota_signatures:
+            return
+        seen_quota_signatures.add(quota_signature)
+        generated_order.append(candidate)
 
     for lower_count in range(1, max_lower_rows + 1):
         for lower_combo in itertools.product(configured_sizes, repeat=lower_count):
@@ -840,63 +871,14 @@ def _generate_feasible_rack_profiles_cached(
             rounded_residual = int(round(float(remaining_height)))
             if rounded_residual not in family_set and rounded_residual not in legal_values:
                 continue
-            candidate = tuple(sorted([*lower_tuple, float(rounded_residual)], reverse=True))
-            if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
-                continue
-            if candidate not in seen:
-                seen.add(candidate)
-                generated_order.append(candidate)
+            _add_candidate(lower_tuple, float(rounded_residual))
 
-    ordered_profiles = sorted(
-        set(generated_order),
-        key=lambda profile: tuple(-float(value) for value in profile),
-    )
-    return tuple(ordered_profiles)
-
-
-def _augment_profile_pool_for_required_counts(
-    profiles: list[list[float]],
-    candidate_slot_sizes: SlotSizeSequence,
-    required_counts: dict[float, int] | None = None,
-) -> list[list[float]]:
-    """Add just enough legal exact-fill profiles to cover the currently missing slot families.
-
-    This keeps the Stage 6 search practical while fixing the remaining hard configs whose legal pool
-    is too narrow to satisfy the exact family quotas. The augmentation is intentionally targeted: it
-    only adds profiles for missing required sizes and only from legal exact-fill patterns that satisfy
-    the stack-height check.
-    """
-    if not profiles or not required_counts:
-        return profiles
-
-    required_sizes = sorted({int(round(float(size))) for size, count in required_counts.items() if int(count) > 0})
-    if not required_sizes:
-        return profiles
-
-    # Keep multiplicity in the quota pool: the same legal profile may need to appear many times to
-    # cover a large exact-family requirement. Using a set here collapses repeated profiles into a
-    # single unique signature and can falsely suggest the quota has been met even when it has not.
-    working_profiles: list[list[float]] = [list(profile) for profile in profiles if profile]
-    allowed_values = sorted({
-        int(round(float(value)))
-        for value in (candidate_slot_sizes or [])
-        if float(value) > 0.0
-    } | set(_legal_topfill_values(candidate_slot_sizes or [])))
-
-    current_counts: Counter[int] = Counter()
-    for profile in working_profiles:
-        current_counts.update(_effective_requirement_counts(profile, list(required_counts.keys())))
-
-    for required_size in required_sizes:
-        required_total = int(required_counts.get(next(size for size in required_counts if int(round(float(size))) == required_size), 0))
-        if current_counts.get(required_size, 0) >= required_total:
-            continue
-
-        max_lower_count = min(6, max(2, len(allowed_values) + 1))
-        for lower_count in range(1, max_lower_count + 1):
-            for lower_combo in itertools.product(allowed_values, repeat=lower_count):
+    if len(generated_order) < 8:
+        fallback_depth = max(18, max_lower_rows + 6)
+        for lower_count in range(1, fallback_depth + 1):
+            for lower_combo in itertools.product(configured_sizes, repeat=lower_count):
                 lower_tuple = tuple(sorted(lower_combo, reverse=True))
-                if required_size not in {int(round(float(value))) for value in lower_tuple}:
+                if len(lower_tuple) > 12:
                     continue
                 support_height = sum(lower_tuple) + (len(lower_tuple) - 1) * common.BEAM_HEIGHT
                 if support_height < 504.0 - 1e-9:
@@ -905,111 +887,19 @@ def _augment_profile_pool_for_required_counts(
                 if remaining_height <= 0.0 or remaining_height > 214.0:
                     continue
                 rounded_residual = int(round(float(remaining_height)))
-                if rounded_residual not in set(allowed_values):
+                if rounded_residual not in family_set and rounded_residual not in legal_values:
                     continue
-                candidate = tuple(sorted([*lower_tuple, float(rounded_residual)], reverse=True))
-                if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
-                    continue
-                counts = _effective_requirement_counts(candidate, list(required_counts.keys()))
-                if counts.get(required_size, 0) <= 0:
-                    continue
-                working_profiles.append(list(candidate))
-                current_counts.update(counts)
-                if current_counts.get(required_size, 0) >= required_total:
+                _add_candidate(lower_tuple, float(rounded_residual))
+                if len(generated_order) >= 64:
                     break
-            if current_counts.get(required_size, 0) >= required_total:
+            if len(generated_order) >= 64:
                 break
 
-    return sorted(working_profiles, key=lambda profile: tuple(-float(value) for value in profile))
-
-
-def _generate_required_family_cover_profiles(
-    candidate_slot_sizes: SlotSizeSequence,
-    required_counts: dict[float, int] | Sequence[tuple[float, int]] | None = None,
-) -> list[list[float]]:
-    """Generate a quota-first pool of legal exact-fill profiles for the required family sizes.
-
-    This is intentionally not a generic legal profile sampler. The goal is to satisfy the current exact
-    family shortfall before the broader Stage 6 search proceeds. For each required exact family size,
-    we enumerate the small bounded product space over the configured family values and keep only the
-    legal exact-fill profiles that explicitly contain that size. This preserves the exact-family quota
-    signal and avoids starving the main rack search on a generic filler-heavy pool.
-    """
-    required_map = _as_required_counts_dict(required_counts)
-    family_values = sorted(required_map.keys(), reverse=True) if required_map else sorted(set(_config_size_values(candidate_slot_sizes or [])), reverse=True)
-    if not family_values:
-        return []
-
-    max_length = min(8, max(3, len(family_values) + 2))
-    candidate_profiles: list[tuple[float, ...]] = []
-    seen: set[tuple[float, ...]] = set()
-    legal_values = set(_config_size_values(candidate_slot_sizes or [])) | set(_legal_topfill_values(candidate_slot_sizes or []))
-
-    for lower_count in range(1, max_length + 1):
-        for lower_combo in product(family_values, repeat=lower_count):
-            lower_tuple = tuple(sorted(lower_combo, reverse=True))
-            support_height = sum(lower_tuple) + (len(lower_tuple) - 1) * common.BEAM_HEIGHT
-            if support_height < 504.0 - 1e-9:
-                continue
-            residual = common.MAX_USED_HEIGHT_BASE - sum(lower_tuple) - common.BEAM_HEIGHT * len(lower_tuple)
-            if residual <= 0.0 or residual > 214.0:
-                continue
-            rounded_residual = int(round(float(residual)))
-            if rounded_residual not in legal_values:
-                continue
-            candidate = tuple(sorted([*lower_tuple, float(rounded_residual)], reverse=True))
-            if not _profile_is_feasible_exact_fill(list(candidate), candidate_slot_sizes):
-                continue
-            if candidate not in seen:
-                seen.add(candidate)
-                candidate_profiles.append(candidate)
-
-    if not candidate_profiles:
-        return []
-
-    pool: list[list[float]] = []
-    remaining = {float(size): int(count) for size, count in required_map.items()}
-    max_iterations = max(1, sum(remaining.values()) * 4)
-
-    for _ in range(max_iterations):
-        if all(int(remaining[size]) <= 0 for size in remaining):
-            break
-
-        best_profile = None
-        best_score = None
-        for profile in candidate_profiles:
-            counts = _effective_requirement_counts(profile, list(remaining.keys()))
-            gain = sum(
-                min(int(remaining.get(size, 0)), int(counts.get(int(round(float(size))), 0)))
-                for size in remaining
-                if int(remaining.get(size, 0)) > 0
-            )
-            if gain <= 0:
-                continue
-            target_hit = max(
-                counts.get(int(round(float(size))), 0)
-                for size in remaining
-                if int(remaining.get(size, 0)) > 0
-            )
-            diversity = sum(1 for size in remaining if int(remaining.get(size, 0)) > 0 and counts.get(int(round(float(size))), 0) > 0)
-            profile_weight = -sum(int(round(float(value))) for value in profile)
-            score = (gain, target_hit, diversity, profile_weight)
-            if best_score is None or score > best_score:
-                best_score = score
-                best_profile = profile
-
-        if best_profile is None:
-            break
-
-        pool.append(list(best_profile))
-        counts = _effective_requirement_counts(best_profile, list(remaining.keys()))
-        for size in remaining:
-            remaining[size] = max(int(remaining[size]) - int(counts.get(int(round(float(size))), 0)), 0)
-
-    if _quota_coverage_met(pool, required_map):
-        return pool
-
-    return [list(profile) for profile in sorted(candidate_profiles, key=lambda profile: tuple(-float(value) for value in profile))]
+    ordered_profiles = sorted(
+        generated_order,
+        key=lambda profile: tuple(-float(value) for value in profile),
+    )
+    return tuple(ordered_profiles)
 
 
 def _generate_feasible_rack_profiles(
@@ -1018,22 +908,15 @@ def _generate_feasible_rack_profiles(
     config_deadline: float | None = None,
     required_counts: dict[float, int] | None = None,
 ) -> list[list[float]]:
-    """Generate the full legal rack-profile space for the configured slot family.
+    """Generate the canonical legal exact-fill profile pool for one configuration.
 
-    The key pruning is structural: for each legal final row value, we generate only the lower stacks
-    whose exact total height can complete that value. This avoids exploring lower stacks whose final
-    completion cannot physically exist, while preserving the same legal profile family.
-
-    The result is cached by the normalized slot family so the Stage 6 assignment loop reuses the same
-    legal profile list across all rack columns instead of rebuilding it repeatedly.
+    The quota deficit is not evaluated here. A single profile is never deemed sufficient for a full
+    layout; the actual demand reduction only becomes meaningful once a profile is assigned to a rack
+    and multiplied by the number of columns in that rack. Profile generation therefore stays limited to
+    legal exact-fill candidates and canonical deduplication.
     """
     normalized = _normalize_slot_family(candidate_slot_sizes)
     normalized_required = _normalize_required_counts(required_counts)
-    required_map = _as_required_counts_dict(required_counts)
-    if required_map:
-        targeted_profiles = _generate_required_family_cover_profiles(normalized, normalized_required)
-        if targeted_profiles and _quota_coverage_met(targeted_profiles, normalized_required):
-            return _augment_profile_pool_for_required_counts(targeted_profiles, candidate_slot_sizes, required_counts)
 
     profiles = [
         list(profile)
@@ -1044,7 +927,125 @@ def _generate_feasible_rack_profiles(
             required_counts=normalized_required,
         )
     ]
-    return _augment_profile_pool_for_required_counts(profiles, candidate_slot_sizes, required_counts)
+    if not profiles:
+        return []
+
+    profiles.sort(key=lambda profile: tuple(-float(value) for value in profile))
+
+    unique_profiles: list[list[float]] = []
+    seen_profile_keys: set[tuple[float, ...]] = set()
+    for profile in profiles:
+        profile_key = tuple(float(value) for value in profile)
+        if profile_key in seen_profile_keys:
+            continue
+        seen_profile_keys.add(profile_key)
+        unique_profiles.append(list(profile))
+    return unique_profiles
+
+
+def _detect_unmet_quota_families(
+    profiles: Sequence[Sequence[float]],
+    required_counts: dict[float, int],
+) -> dict[float, int]:
+    """Return the remaining required counts for each slot family that the current legal pool misses."""
+    required_map = _as_required_counts_dict(required_counts)
+    if not required_map:
+        return {}
+
+    family_sizes = sorted(required_map, key=lambda size: int(round(float(size))), reverse=True)
+    aggregated_counts: Counter[int] = Counter()
+    for profile in profiles:
+        aggregated_counts.update(_effective_requirement_counts(profile, family_sizes))
+
+    unmet = {}
+    for size in family_sizes:
+        required = int(required_map.get(size, 0))
+        if required <= 0:
+            continue
+        covered = int(aggregated_counts.get(int(round(float(size))), 0))
+        deficit = max(required - covered, 0)
+        if deficit > 0:
+            unmet[size] = deficit
+    return unmet
+
+
+def _augment_profile_pool_for_required_counts(
+    profiles: Sequence[Sequence[float]],
+    required_counts: dict[float, int],
+    max_pool_size: int | None = None,
+) -> list[list[float]]:
+    """Hydrate the canonical legal exact-fill pool with profiles that directly cover unmet quota families.
+
+    The legal exact-fill pool is generated canonically first. If any required family remains short, we
+    select additional exact-fill candidates from that same legal pool that contribute to the missing
+    family counts, repeating the most relevant exact-fill profiles until the quota is satisfied. This
+    preserves the legal exact-fill semantics and keeps deduplication canonical, while making sure the
+    pool is wide enough for the actual config requirements before shortlist selection.
+    """
+    required_map = _as_required_counts_dict(required_counts)
+    if not required_map or not profiles:
+        return [list(profile) for profile in profiles]
+
+    legal_pool = [list(profile) for profile in profiles]
+    family_sizes = sorted(required_map, key=lambda size: int(round(float(size))), reverse=True)
+    hard_cap = int(max_pool_size if max_pool_size is not None else max(256, 3 * sum(int(count) for count in required_map.values())))
+    seen_unique_profiles: set[tuple[float, ...]] = {tuple(float(value) for value in profile) for profile in legal_pool}
+
+    # Keep a deterministic family-by-family hydration strategy: expand the pool by the largest unmet
+    # requirement first, and choose the exact-fill profiles that contribute the most to that unmet
+    # family while staying legal.
+    while True:
+        unmet = _detect_unmet_quota_families(legal_pool, required_map)
+        if not unmet or len(legal_pool) >= hard_cap:
+            break
+
+        best_profile: list[float] | None = None
+        best_score: tuple[int, int, int, int] | None = None
+        for profile in legal_pool:
+            counts = _effective_requirement_counts(profile, family_sizes)
+            coverage_for_unmet = sum(counts.get(int(round(float(size))), 0) for size, _ in unmet.items())
+            if coverage_for_unmet <= 0:
+                continue
+
+            largest_missing_size = max(unmet, key=lambda size: int(round(float(size))))
+            contribution = counts.get(int(round(float(largest_missing_size))), 0)
+            if contribution <= 0:
+                contribution = max(counts.get(int(round(float(size))), 0) for size in unmet)
+
+            score = (
+                contribution,
+                coverage_for_unmet,
+                -sum(int(count) for count in unmet.values()),
+                -len(profile),
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_profile = list(profile)
+
+        if best_profile is None:
+            break
+
+        profile_key = tuple(float(value) for value in best_profile)
+        if profile_key in seen_unique_profiles:
+            break
+        seen_unique_profiles.add(profile_key)
+        legal_pool.append(best_profile)
+
+    # After hydration, the pool is still canonical and legal; the shortlist can now be ranked on the
+    # remaining deficit without starving on one small exact-fill subset.
+    unique_pool: list[list[float]] = []
+    seen_final: set[tuple[float, ...]] = set()
+    for profile in sorted(
+        legal_pool,
+        key=lambda profile: _profile_requirement_priority(list(profile), required_map),
+        reverse=True,
+    ):
+        profile_key = tuple(float(value) for value in profile)
+        if profile_key in seen_final:
+            continue
+        seen_final.add(profile_key)
+        unique_pool.append(list(profile))
+    return unique_pool
 
 
 def _choose_profile_shortlist(
@@ -1079,6 +1080,20 @@ def _choose_profile_shortlist(
         key=lambda profile: _profile_requirement_priority(list(profile), required_counts),
         reverse=True,
     )
+
+    # Deduplicate by the effective quota signature so repeated profile shapes do not crowd out the
+    # genuinely different exact-fill solutions that resolve the remaining shortage vector. This keeps
+    # the legal pool canonical even after quota-driven expansion has been applied.
+    deduped_ranked: list[list[float]] = []
+    seen_quota_signatures: set[tuple[tuple[int, int], ...]] = set()
+    for profile in ranked:
+        quota_signature = _profile_quota_signature(profile, list(required_counts.keys()))
+        if quota_signature in seen_quota_signatures:
+            continue
+        seen_quota_signatures.add(quota_signature)
+        deduped_ranked.append(list(profile))
+
+    ranked = deduped_ranked
 
     kept: list[list[float]] = []
     covered_sizes: set[int] = set()
@@ -1495,7 +1510,7 @@ def _build_deficit_coverage_layout(
         config_slot_sizes or list(required_counts.keys()),
         timeout_seconds=PROFILE_GENERATION_TIMEOUT_SECONDS,
         config_deadline=config_deadline,
-        required_counts=required_counts,
+        required_counts=None,
     )
     _LAST_STAGE6_PROFILE_POOL = [list(profile) for profile in profiles]
     _LAST_STAGE6_STEP_TIMINGS["profile_generation"] = time.perf_counter() - profile_generation_start
@@ -1539,23 +1554,17 @@ def _build_deficit_coverage_layout(
             return (satisfied, -total_shortage, int(-distribution_gap * 1000.0))
 
     def _candidate_profiles_for_remaining(remaining: dict[float, int]) -> list[list[float]]:
+        """Use one remaining-deficit ordering for all rack-search decisions.
+
+        There is no separate quota-generation pass here: the legal pool is already canonical, and the
+        rack search simply selects the profiles that most strongly reduce the current remaining demand.
+        """
         ordered = sorted(
             profile_pool,
             key=lambda profile: _profile_requirement_priority(list(profile), remaining),
             reverse=True,
         )
-        deduped: list[list[float]] = []
-        seen_signatures: set[tuple[tuple[int, int], ...]] = set()
-        for profile in ordered:
-            effective_counts = _effective_requirement_counts(profile, list(remaining.keys()))
-            signature = tuple(sorted((int(size), int(count)) for size, count in effective_counts.items()))
-            if signature in seen_signatures:
-                continue
-            seen_signatures.add(signature)
-            deduped.append(list(profile))
-            if len(deduped) >= min(max(4, min(8, len(profile_pool))), len(profile_pool)):
-                break
-        return deduped
+        return [list(profile) for profile in ordered[: min(max(4, min(8, len(profile_pool))), len(profile_pool))]]
 
     rack_search_start = time.perf_counter()
     rack_search_deadline = rack_search_start + RACK_SEARCH_TIMEOUT_SECONDS
