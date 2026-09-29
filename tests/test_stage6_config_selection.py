@@ -4,11 +4,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGE6_PATH = ROOT / "Scripts" / "Pipeline" / "06_Layout_Generation" / "06_layout_generation.py"
+STAGE8_PATH = ROOT / "Scripts" / "Pipeline" / "08_Final_Selection" / "08_final_selection.py"
 
 spec = importlib.util.spec_from_file_location("stage6", STAGE6_PATH)
 mod = importlib.util.module_from_spec(spec)
 sys.modules["stage6"] = mod
 spec.loader.exec_module(mod)
+
+stage8_spec = importlib.util.spec_from_file_location("stage8", STAGE8_PATH)
+stage8 = importlib.util.module_from_spec(stage8_spec)
+sys.modules["stage8"] = stage8
+stage8_spec.loader.exec_module(stage8)
 
 
 def _row(config_id: str, slot_sizes: str) -> dict[str, str]:
@@ -218,7 +224,38 @@ def test_profile_generator_targets_required_family_pool_for_hard_families():
     targeted_pool = mod._generate_required_family_cover_profiles([89, 119, 164, 189, 239], required_counts)
 
     assert targeted_pool
+
+
+def test_stage8_keeps_feasible_stage6_layouts_even_when_stage7_robustness_fails():
+    rows = [
+        {"Config_ID": "CFG_001", "Layout_Feasible": "YES", "Scenario_Pass_Count": "0", "Scenario_Total_Count": "1", "Robustness": "0.000000"},
+        {"Config_ID": "CFG_002", "Layout_Feasible": "YES", "Scenario_Pass_Count": "1", "Scenario_Total_Count": "1", "Robustness": "1.000000"},
+        {"Config_ID": "CFG_003", "Layout_Feasible": "NO", "Scenario_Pass_Count": "1", "Scenario_Total_Count": "1", "Robustness": "1.000000"},
+    ]
+
+    selected = stage8._feasible_stage6_layouts_for_stage8(rows)
+
+    assert [row["Config_ID"] for row in selected] == ["CFG_001", "CFG_002"]
     assert mod._quota_coverage_met(targeted_pool, required_counts)
+
+
+def test_stage6_csv_cleanup_preserves_timeout_columns():
+    fieldnames = [
+        "Config_ID",
+        "Profile_Generation_Timeout",
+        "Rack_Search_Timeout",
+        "Layout_Feasible",
+    ]
+    rows = [
+        {"Config_ID": "CFG_001", "Profile_Generation_Timeout": "NO", "Rack_Search_Timeout": "NO", "Layout_Feasible": "YES"},
+        {"Config_ID": "CFG_002", "Profile_Generation_Timeout": "NO", "Rack_Search_Timeout": "NO", "Layout_Feasible": "NO"},
+    ]
+
+    cleaned_fields, cleaned_rows = mod.common._deduplicate_output_columns(fieldnames, rows, preserve_fields={"Profile_Generation_Timeout", "Rack_Search_Timeout"})
+
+    assert cleaned_fields == ["Config_ID", "Profile_Generation_Timeout", "Rack_Search_Timeout", "Layout_Feasible"]
+    assert all("Profile_Generation_Timeout" in row for row in cleaned_rows)
+    assert all("Rack_Search_Timeout" in row for row in cleaned_rows)
 
 
 def test_profile_generator_meets_quota_coverage_for_3_family_exact_case():

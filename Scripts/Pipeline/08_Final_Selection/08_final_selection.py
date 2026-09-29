@@ -81,6 +81,14 @@ def _is_robustness_passing(row: dict[str, str]) -> bool:
     return pass_count >= total_count and robustness_value > 0.0
 
 
+def _feasible_stage6_layouts_for_stage8(layout_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Keep all feasible Stage 6 layouts eligible for Stage 8 ranking even if Stage 7 robustness is weak."""
+    return [
+        row for row in layout_rows
+        if str(row.get("Layout_Feasible", "")).strip().upper() == "YES"
+    ]
+
+
 def _final_column_fieldnames(rows: list[dict[str, str]]) -> list[str]:
     base = [
         "Config_ID",
@@ -390,22 +398,29 @@ def _beam_change_rows_by_segment(
 
 def build_final_selection() -> list[dict[str, str]]:
     """Build a full all-candidate metric table with per-metric ranks for weighted-sum analysis."""
-    robustness_rows = [row for row in _robustness_rows() if _is_robustness_passing(row)]
     layouts = _layout_map()
+    stage6_feasible_rows = _feasible_stage6_layouts_for_stage8(list(layouts.values()))
+    robustness_by_config = {
+        str(row.get("Config_ID", "")).strip(): row
+        for row in _robustness_rows()
+        if str(row.get("Config_ID", "")).strip()
+    }
+
     additional_fill_added_height = _additional_fill_added_height_by_layout()
     source_slot_sizes = _source_slot_sizes_by_layout(layouts)
     additional_fill_extra_slot_size_variants = _additional_fill_extra_slot_size_variants_by_layout(source_slot_sizes)
     additional_fill_extra_slot_sizes = _additional_fill_extra_slot_sizes_by_layout(source_slot_sizes)
 
     joined_rows: list[dict[str, str]] = []
-    # Join Stage 6 layout metadata with Stage 7 robustness metrics.
-    for row in robustness_rows:
+    # Join Stage 6 layout metadata with Stage 7 robustness metrics when available,
+    # but do not reject feasible layouts just because Stage 7 robustness is weak.
+    for row in stage6_feasible_rows:
         config_id = str(row.get("Config_ID", "")).strip()
         if not config_id:
             continue
         layout = layouts.get(config_id, {})
         merged = dict(layout)
-        merged.update(row)
+        merged.update(robustness_by_config.get(config_id, {}))
         merged["Unique_Slot_Sizes_Count"] = str(_count_unique_slot_sizes(layout))
         merged["Implementation_Effort_Total"] = str(
             common._to_int_default(merged.get("Beam_Relocations_Total"), 0)

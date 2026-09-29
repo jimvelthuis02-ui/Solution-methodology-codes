@@ -902,6 +902,59 @@ def _generate_feasible_rack_profiles_cached(
     return tuple(ordered_profiles)
 
 
+def _generate_all_canonical_exact_fill_profiles(
+    candidate_slot_sizes: SlotSizeSequence,
+    timeout_seconds: float | None = None,
+    config_deadline: float | None = None,
+) -> list[list[float]]:
+    """Enumerate distinct legal exact-fill profiles with the topfill kept in its physical top row."""
+    family = sorted(set(_config_size_values(candidate_slot_sizes or [])))
+    if not family:
+        return []
+
+    deadlines = [deadline for deadline in (config_deadline,) if deadline is not None]
+    if timeout_seconds is not None:
+        deadlines.append(time.perf_counter() + float(timeout_seconds))
+    deadline = min(deadlines) if deadlines else None
+    legal_topfills = _legal_topfill_values(family)
+    max_lower_rows = max(
+        1,
+        min(
+            18,
+            int(common.MAX_USED_HEIGHT_BASE // (min(family) + common.BEAM_HEIGHT)),
+        ),
+    )
+    profiles: set[tuple[float, ...]] = set()
+    candidate_checks = 0
+
+    for lower_count in range(1, max_lower_rows + 1):
+        for lower_combo in itertools.combinations_with_replacement(family, lower_count):
+            candidate_checks += 1
+            if candidate_checks % 128 == 0 and deadline is not None and time.perf_counter() >= deadline:
+                raise Stage6ProfileGenerationTimeout("exact-fill profile enumeration timed out")
+
+            lower_stack = tuple(sorted(lower_combo, reverse=True))
+            support_height = sum(lower_stack) + (len(lower_stack) - 1) * common.BEAM_HEIGHT
+            if support_height < 504.0 - 1e-9:
+                continue
+
+            topfill = common.MAX_USED_HEIGHT_BASE - sum(lower_stack) - common.BEAM_HEIGHT * len(lower_stack)
+            if topfill <= 0.0 or topfill > 214.0:
+                continue
+            rounded_topfill = int(round(topfill))
+            if rounded_topfill not in family and rounded_topfill not in legal_topfills:
+                continue
+
+            profile = (*lower_stack, float(rounded_topfill))
+            if _profile_is_feasible_exact_fill(profile, family):
+                profiles.add(profile)
+
+    return [
+        list(profile)
+        for profile in sorted(profiles, key=lambda values: tuple(-float(value) for value in values))
+    ]
+
+
 def _generate_feasible_rack_profiles(
     candidate_slot_sizes: SlotSizeSequence,
     timeout_seconds: float | None = None,
@@ -917,6 +970,13 @@ def _generate_feasible_rack_profiles(
     """
     normalized = _normalize_slot_family(candidate_slot_sizes)
     normalized_required = _normalize_required_counts(required_counts)
+
+    if 3 <= len(_config_size_values(normalized)) <= 10:
+        return _generate_all_canonical_exact_fill_profiles(
+            normalized,
+            timeout_seconds=timeout_seconds,
+            config_deadline=config_deadline,
+        )
 
     profiles = [
         list(profile)
@@ -941,6 +1001,204 @@ def _generate_feasible_rack_profiles(
         seen_profile_keys.add(profile_key)
         unique_profiles.append(list(profile))
     return unique_profiles
+
+
+def _search_all_profiles_by_rack(
+    rack_columns: list[str],
+    required_counts: dict[float, int],
+    slot_sizes: SlotSizeSequence,
+    profiles: list[list[float]],
+    config_deadline: float | None = None,
+) -> dict[str, list[float]]:
+    """Search every distinct legal profile effect, applying it once per column in its rack."""
+    rack_to_columns: dict[str, list[str]] = defaultdict(list)
+    for column_key in rack_columns:
+        rack_to_columns[_rack_from_column_key(column_key)].append(column_key)
+    rack_order = sorted(rack_to_columns)
+    ordered_sizes = sorted((float(size) for size in required_counts), reverse=True)
+    initial_remaining = tuple(sorted((float(size), int(count)) for size, count in required_counts.items()))
+
+    profile_options: list[tuple[list[float], tuple[int, ...]]] = []
+    seen_effects: set[tuple[int, ...]] = set()
+    for profile in profiles:
+        effective_counts = _effective_requirement_counts(profile, slot_sizes)
+        effect = tuple(int(effective_counts.get(int(size), 0)) for size in ordered_sizes)
+        if effect in seen_effects:
+            continue
+        seen_effects.add(effect)
+        profile_options.append((list(profile), effect))
+    profile_options.sort(key=lambda option: tuple(-count for count in option[1]))
+    if not profile_options:
+        return {}
+
+    def _objective(remaining: dict[float, int]) -> tuple[int, int, int]:
+        satisfied = sum(1 for size in ordered_sizes if remaining.get(size, 0) <= 0)
+        shortage = sum(max(int(remaining.get(size, 0)), 0) for size in ordered_sizes)
+        total_shortage = sum(max(int(value), 0) for value in remaining.values())
+        distribution_gap = sum(
+            abs(float(max(int(remaining.get(size, 0)), 0)) / float(total_shortage))
+            for size in ordered_sizes
+            if remaining.get(size, 0) > 0 and total_shortage > 0
+        )
+        return satisfied, -shortage, int(-distribution_gap * 1000.0)
+
+    @lru_cache(maxsize=100_000)
+    def _search(
+        rack_index: int,
+        remaining_key: tuple[tuple[float, int], ...],
+    ) -> tuple[tuple[int, int, int], tuple[int, ...]]:
+        if config_deadline is not None and time.perf_counter() >= config_deadline:
+            raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
+        remaining = {float(size): int(count) for size, count in remaining_key}
+        if rack_index >= len(rack_order):
+            return _objective(remaining), ()
+        if all(value <= 0 for value in remaining.values()):
+            return _objective(remaining), tuple(0 for _ in rack_order[rack_index:])
+
+        rack_width = len(rack_to_columns[rack_order[rack_index]])
+        best_score: tuple[int, int, int] | None = None
+        best_choices: tuple[int, ...] | None = None
+        for profile_index, (_, effect) in enumerate(profile_options):
+            next_remaining = dict(remaining)
+            for size_index, size in enumerate(ordered_sizes):
+                next_remaining[size] = max(
+                    int(next_remaining.get(size, 0)) - int(effect[size_index]) * rack_width,
+                    0,
+                )
+            if next_remaining == remaining:
+                continue
+
+            child_score, child_choices = _search(
+                rack_index + 1,
+                tuple(sorted((float(size), int(count)) for size, count in next_remaining.items())),
+            )
+            if best_score is None or child_score > best_score:
+                best_score = child_score
+                best_choices = (profile_index, *child_choices)
+
+        if best_score is None or best_choices is None:
+            return _objective(remaining), tuple(0 for _ in rack_order[rack_index:])
+        return best_score, best_choices
+
+    _, selected_profiles = _search(0, initial_remaining)
+    assignments: dict[str, list[float]] = {}
+    for rack_index, profile_index in enumerate(selected_profiles):
+        rack = rack_order[rack_index]
+        profile = profile_options[profile_index][0]
+        for column_key in sorted(rack_to_columns[rack]):
+            assignments[column_key] = list(profile)
+    return assignments
+
+
+def _search_profiles_by_rack_beam(
+    rack_columns: list[str],
+    required_counts: dict[float, int],
+    slot_sizes: SlotSizeSequence,
+    profiles: list[list[float]],
+    config_deadline: float | None = None,
+    beam_width: int = 128,
+) -> dict[str, list[float]]:
+    """Search a bounded set of rack-level quota states for larger profile families."""
+    rack_to_columns: dict[str, list[str]] = defaultdict(list)
+    for column_key in rack_columns:
+        rack_to_columns[_rack_from_column_key(column_key)].append(column_key)
+    rack_order = sorted(rack_to_columns)
+    ordered_sizes = sorted((float(size) for size in required_counts), reverse=True)
+
+    profile_options: list[tuple[list[float], tuple[int, ...]]] = []
+    seen_effects: set[tuple[int, ...]] = set()
+    for profile in profiles:
+        effective_counts = _effective_requirement_counts(profile, slot_sizes)
+        effect = tuple(int(effective_counts.get(int(size), 0)) for size in ordered_sizes)
+        if effect in seen_effects:
+            continue
+        seen_effects.add(effect)
+        profile_options.append((list(profile), effect))
+    if not profile_options:
+        return {}
+
+    smallest_profile_index = min(
+        range(len(profile_options)),
+        key=lambda index: (len(profile_options[index][0]), profile_options[index][0]),
+    )
+    required_vector = tuple(int(required_counts[size]) for size in ordered_sizes)
+    initial_state = (required_vector, ())
+    beam = [initial_state]
+
+    def _state_score(remaining: tuple[int, ...]) -> tuple[int, int, tuple[int, ...]]:
+        satisfied = sum(value <= 0 for value in remaining)
+        shortage = sum(max(value, 0) for value in remaining)
+        return satisfied, -shortage, tuple(-max(value, 0) for value in remaining)
+
+    def _build_assignments(profile_choices: tuple[int, ...]) -> dict[str, list[float]]:
+        assignments: dict[str, list[float]] = {}
+        for rack_index, rack in enumerate(rack_order):
+            if rack_index < len(profile_choices):
+                profile_index = profile_choices[rack_index]
+            else:
+                profile_index = smallest_profile_index
+            profile = profile_options[profile_index][0]
+            for column_key in sorted(rack_to_columns[rack]):
+                assignments[column_key] = list(profile)
+        return assignments
+
+    transition_count = 0
+    for rack_index, rack in enumerate(rack_order):
+        if config_deadline is not None and time.perf_counter() >= config_deadline:
+            raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
+        rack_width = len(rack_to_columns[rack])
+        next_states: dict[tuple[int, ...], tuple[int, ...]] = {}
+
+        for remaining, choices in beam:
+            for profile_index, (_, effect) in enumerate(profile_options):
+                transition_count += 1
+                if transition_count % 2048 == 0 and config_deadline is not None and time.perf_counter() >= config_deadline:
+                    raise Stage6RackSearchTimeout("rack search exceeded the combined config timeout")
+
+                next_remaining = tuple(
+                    max(remaining[size_index] - effect[size_index] * rack_width, 0)
+                    for size_index in range(len(ordered_sizes))
+                )
+                if next_remaining == remaining:
+                    continue
+
+                next_choices = (*choices, profile_index)
+                previous_choices = next_states.get(next_remaining)
+                if previous_choices is None or len(next_choices) < len(previous_choices):
+                    next_states[next_remaining] = next_choices
+
+        if not next_states:
+            return _build_assignments(beam[0][1])
+
+        complete_states = [
+            (remaining, choices)
+            for remaining, choices in next_states.items()
+            if all(value <= 0 for value in remaining)
+        ]
+        if complete_states:
+            _, choices = max(
+                complete_states,
+                key=lambda state: (
+                    -sum(
+                        len(profile_options[profile_index][0])
+                        * len(rack_to_columns[rack_order[index]])
+                        for index, profile_index in enumerate(state[1])
+                    ),
+                    tuple(-value for value in state[1]),
+                ),
+            )
+            return _build_assignments(choices)
+
+        best_states = sorted(
+            next_states.items(),
+            key=lambda state: _state_score(state[0]),
+            reverse=True,
+        )[: max(int(beam_width), 1)]
+        beam = [(remaining, choices) for remaining, choices in best_states]
+
+    best_remaining, best_choices = max(beam, key=lambda state: _state_score(state[0]))
+    _ = best_remaining
+    return _build_assignments(best_choices)
 
 
 def _detect_unmet_quota_families(
@@ -1501,6 +1759,8 @@ def _build_deficit_coverage_layout(
     per-rack selection loop from repeatedly favoring the same profile family and under-serving the rare
     124/234 requirements.
     """
+    global _LAST_STAGE6_PROFILE_POOL
+
     if not rack_columns:
         return {}
 
@@ -1520,6 +1780,75 @@ def _build_deficit_coverage_layout(
             return {column_key: [] for column_key in rack_columns}
         return {column_key: [] for column_key in rack_columns}
     _LAST_STAGE6_TIMEOUTS["profile_generation"] = False
+
+    profile_family_size = len(_config_size_values(config_slot_sizes or list(required)))
+    if 3 <= profile_family_size <= 10:
+        all_profile_search_start = time.perf_counter()
+        try:
+            if profile_family_size <= 4:
+                all_profile_assignments = _search_all_profiles_by_rack(
+                    rack_columns,
+                    required,
+                    config_slot_sizes,
+                    profiles,
+                    config_deadline=config_deadline,
+                )
+            else:
+                all_profile_assignments = {}
+                for beam_width in (128, 512, 1024):
+                    candidate_assignments = _search_profiles_by_rack_beam(
+                        rack_columns,
+                        required,
+                        config_slot_sizes,
+                        profiles,
+                        config_deadline=config_deadline,
+                        beam_width=beam_width,
+                    )
+                    candidate_assigned_total = max(
+                        sum(len(slots) for slots in candidate_assignments.values())
+                        - common._fixed_layout_location_total(),
+                        0,
+                    )
+                    candidate_is_feasible = (
+                        candidate_assigned_total >= common._explicit_occupied_target_total()
+                        and candidate_assigned_total >= sum(required.values())
+                        and _layout_assignments_are_feasible(
+                            candidate_assignments,
+                            list(candidate_assignments),
+                            float(min(required, default=0.0)),
+                            config_slot_sizes,
+                            minimum_required_counts=required,
+                            enforce_minimum_total_locations=True,
+                        )
+                    )
+                    all_profile_assignments = candidate_assignments
+                    if candidate_is_feasible:
+                        break
+        except Stage6RackSearchTimeout:
+            _LAST_STAGE6_TIMEOUTS["rack_search"] = True
+        else:
+            assigned_total = max(
+                sum(len(slots) for slots in all_profile_assignments.values())
+                - common._fixed_layout_location_total(),
+                0,
+            )
+            all_profile_is_feasible = (
+                assigned_total >= common._explicit_occupied_target_total()
+                and assigned_total >= sum(required.values())
+                and _layout_assignments_are_feasible(
+                    all_profile_assignments,
+                    list(all_profile_assignments),
+                    float(min(required, default=0.0)),
+                    config_slot_sizes,
+                    minimum_required_counts=required,
+                    enforce_minimum_total_locations=True,
+                )
+            )
+            if all_profile_is_feasible:
+                _LAST_STAGE6_TIMEOUTS["rack_search"] = False
+                _LAST_STAGE6_STEP_TIMINGS["rack_search"] = time.perf_counter() - all_profile_search_start
+                _LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
+                return all_profile_assignments
 
     # Keep the rack search on a family-aware shortlist. Larger slot families need a wider candidate
     # pool to avoid starving the recursion on a single dominant profile pattern while still keeping the
@@ -3305,6 +3634,8 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     )
 
     preserve_metric_fields = {
+        "Profile_Generation_Timeout",
+        "Rack_Search_Timeout",
         "Beam_Relocations_Total",
         "Initial_Beams_Total",
         "Required_Beams_Total",
