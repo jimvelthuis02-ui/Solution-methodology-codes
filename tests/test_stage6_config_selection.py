@@ -257,6 +257,42 @@ def test_profile_effectively_covers_required_family_for_topfills():
     assert mod._profile_effectively_covers_required_size(profile, 154, required_counts) is False
 
 
+def test_rack_profile_distribution_maps_topfills_to_configured_sizes():
+    capacity_rows_by_config = {
+        "CFG_003": [
+            {"Representative_Slot_Size": "69"},
+            {"Representative_Slot_Size": "124"},
+            {"Representative_Slot_Size": "239"},
+        ],
+        "CFG_004": [
+            {"Representative_Slot_Size": "74"},
+            {"Representative_Slot_Size": "124"},
+            {"Representative_Slot_Size": "189"},
+            {"Representative_Slot_Size": "239"},
+        ],
+    }
+    location_rows = [
+        {
+            "Rack": "I",
+            "Column": "00",
+            "Row": f"{row_index:02d}",
+            "Assigned_Slot_Size_cm": str(slot_size),
+            "Usable_Location": "YES",
+        }
+        for row_index, slot_size in enumerate([239, 124, 124, 124, 79], start=1)
+    ]
+
+    rack_rows = mod._rack_profile_rows_for_config(
+        "LAY_TEST",
+        "CFG_003",
+        location_rows,
+        capacity_rows_by_config,
+    )
+
+    assert rack_rows[0]["Slot_Size_Distribution"] == "69:1|124:3|239:1"
+    assert rack_rows[0]["Rack_Profile_Order"] == "239,124,124,124,79"
+
+
 def test_choose_profile_shortlist_preserves_rare_high_size_profiles_for_cfg067():
     profiles = [
         [39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39],

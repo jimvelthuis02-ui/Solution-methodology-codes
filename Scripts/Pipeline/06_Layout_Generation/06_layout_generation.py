@@ -3346,6 +3346,22 @@ def _rack_profile_rows_from_location_rows(
     return rack_summary_rows
 
 
+def _rack_profile_rows_for_config(
+    layout_id: str,
+    config_id: str,
+    location_rows: list[dict[str, str]],
+    capacity_rows_by_config: dict[str, list[dict[str, str]]],
+) -> list[dict[str, str]]:
+    """Build rack summaries with the slot family belonging to this config only."""
+    config_slot_sizes = _slot_sizes_from_capacity(capacity_rows_by_config.get(config_id, []))
+    return _rack_profile_rows_from_location_rows(
+        layout_id,
+        config_id,
+        location_rows,
+        config_slot_sizes,
+    )
+
+
 def _pre_robust_sort_key(summary_row: dict[str, str]) -> tuple[int, int, int, float, int, int]:
     feasible_penalty = 0 if str(summary_row.get("Layout_Feasible", "")).strip().upper() == "YES" else 1
     additional_beams = common._to_int_default(summary_row.get("Additional_Beams_Required"), 0)
@@ -3802,11 +3818,11 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
                 # candidate assignment, not only the subset that passes the final boolean filter.
                 candidate_layout_column_rows_all.extend(column_rows)
                 candidate_layout_location_rows_all.extend(location_rows)
-                rack_rows = _rack_profile_rows_from_location_rows(
+                rack_rows = _rack_profile_rows_for_config(
                     str(summary.get("Layout_ID", "")),
                     config_id,
                     location_rows,
-                    config_slot_sizes,
+                    capacity_rows,
                 )
                 candidate_layout_rack_rows_all.extend(rack_rows)
                 if config_id in selected_config_ids:

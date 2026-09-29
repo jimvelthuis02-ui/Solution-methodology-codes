@@ -125,6 +125,38 @@ def _to_int(value: object | None, default: int = 0) -> int:
         return default
 
 
+def _configuration_groups_from_environment() -> tuple[set[str] | None, set[str] | None, set[int] | None]:
+    """Read optional Streamlit/pipeline restrictions for method, scenario, and K."""
+    methods_raw = os.environ.get("PIPELINE_CONFIG_METHODS", "").strip()
+    scenarios_raw = os.environ.get("PIPELINE_CONFIG_SCENARIOS", "").strip()
+    k_values_raw = os.environ.get("PIPELINE_CONFIG_K_VALUES", "").strip()
+
+    methods = {value.strip().lower() for value in methods_raw.split(",") if value.strip()} or None
+    scenarios = {value.strip().lower() for value in scenarios_raw.split(",") if value.strip()} or None
+    k_values = {
+        _to_int(value, -1)
+        for value in k_values_raw.split(",")
+        if value.strip() and _to_int(value, -1) > 0
+    } or None
+    return methods, scenarios, k_values
+
+
+def _filter_configuration_groups(
+    grouped_items: list[tuple[tuple[str, str, str], list[dict[str, str]]]],
+    methods: set[str] | None = None,
+    scenarios: set[str] | None = None,
+    k_values: set[int] | None = None,
+) -> list[tuple[tuple[str, str, str], list[dict[str, str]]]]:
+    """Keep only selected method/scenario/K groups; unset dimensions remain unrestricted."""
+    return [
+        item
+        for item in grouped_items
+        if (methods is None or item[0][0].strip().lower() in methods)
+        and (scenarios is None or item[0][1].strip().lower() in scenarios)
+        and (k_values is None or _to_int(item[0][2], -1) in k_values)
+    ]
+
+
 def build_candidate_configuration() -> Path:
     """Build Stage 4 candidate configurations from all Stage 3 summaries."""
     stage3_rows = _read_stage3_rows()
@@ -144,6 +176,10 @@ def build_candidate_configuration() -> Path:
             item[0][1],
             _to_int(item[0][2]),
         ),
+    )
+    grouped_items = _filter_configuration_groups(
+        grouped_items,
+        *_configuration_groups_from_environment(),
     )
 
     output_rows: list[dict[str, str]] = []
