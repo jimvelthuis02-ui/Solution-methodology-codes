@@ -225,7 +225,7 @@ def _write_weighted_sum_ranking(candidate_rows: list[dict[str, str]]) -> None:
     }
     scored_rows: list[dict[str, str]] = []
     for row in candidate_rows:
-        scored = {"Config_ID": str(row.get("Config_ID", ""))}
+        scored = {"Config_ID": str(row.get("Config_ID", "")), "Robustness": str(row.get("Robustness", ""))}
         score = 0.0
         for metric, direction in WSM_METRIC_SPECS:
             value = common._to_float(row.get(metric)) or 0.0
@@ -242,7 +242,7 @@ def _write_weighted_sum_ranking(candidate_rows: list[dict[str, str]]) -> None:
     for rank, row in enumerate(scored_rows, start=1):
         row["Weighted_Sum_Rank"] = str(rank)
 
-    fields = ["Weighted_Sum_Rank", "Config_ID"]
+    fields = ["Weighted_Sum_Rank", "Config_ID", "Robustness"]
     for metric, _direction in WSM_METRIC_SPECS:
         fields.extend([f"{metric}_Raw", f"{metric}_Normalized", f"{metric}_Weighted"])
     fields.append("Weighted_Sum_Score")
@@ -482,6 +482,7 @@ def build_final_selection() -> list[dict[str, str]]:
                 "Additional_Fill_Extra_Slot_Sizes": common._encode_excel_text(
                     str(additional_fill_extra_slot_sizes.get(str(row.get("Config_ID", "")).strip(), ""))
                 ),
+                "Robustness": f"{common._to_float(row.get('Robustness')) or 0.0:.6f}",
             }
         )
 
@@ -543,6 +544,7 @@ def build_final_selection() -> list[dict[str, str]]:
             "Additional_Fill_Height_Total_cm",
             "Additional_Fill_Extra_Slot_Size_Variants",
             "Additional_Fill_Extra_Slot_Sizes",
+            "Robustness",
         ],
         candidate_rows,
     )

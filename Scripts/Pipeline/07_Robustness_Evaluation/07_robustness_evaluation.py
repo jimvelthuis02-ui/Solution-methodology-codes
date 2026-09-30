@@ -86,10 +86,6 @@ def _parse_slot_distribution(value: str) -> dict[int, int]:
     return dict(counts)
 
 
-def _available_at_or_above(exact_counts: dict[int, int], threshold_size: int) -> int:
-    return sum(count for size, count in exact_counts.items() if size >= threshold_size)
-
-
 def _parse_layout_slot_counts(layout: dict[str, str]) -> dict[int, int]:
     """Parse the layout slot-size distribution from either the direct distribution field or the source sizes."""
     distribution_fields = [
@@ -196,37 +192,9 @@ def _normalize_distribution_to_target(distribution: dict[int, int], target_total
     return {size: count for size, count in floored.items() if count > 0}
 
 
-def _at_or_below_count(distribution: dict[int, int], threshold: int) -> int:
-    return sum(count for size, count in distribution.items() if size <= threshold)
-
-
-def _scenario_coverage_ratio(layout_slot_counts: dict[int, int], scenario_rows: list[dict[str, str]], scenario_column: str) -> float:
-    """Compare scenario demand against layout capacity using cumulative slot-size buckets.
-
-    For each threshold slot size, count how many scenario item heights fall at or below that slot size
-    and how many layout slots are available at or below that same threshold. This is the robustness view
-    the user wants to see: scenario demand is bucketed by item-height, and the layout is bucketed by its
-    slot sizes.
-    """
-    scenario_counts = _scenario_item_height_distribution(scenario_rows, scenario_column)
-    if not scenario_counts:
-        return 1.0
-
-    thresholds = sorted(set(scenario_counts.keys()) | set(layout_slot_counts.keys()))
-    if not thresholds:
-        return 1.0
-
-    ratios: list[float] = []
-    for threshold in thresholds:
-        demand_at_or_below = sum(count for size, count in scenario_counts.items() if size <= threshold)
-        if demand_at_or_below <= 0:
-            continue
-        available_at_or_below = _at_or_below_count(layout_slot_counts, threshold)
-        ratios.append(min(available_at_or_below / demand_at_or_below, 1.0))
-
-    if not ratios:
-        return 1.0
-    return sum(ratios) / len(ratios)
+def _at_or_above_count(distribution: dict[int, int], threshold: int) -> int:
+    """Slots/items with size >= threshold: a slot can always hold an item shorter than itself."""
+    return sum(count for size, count in distribution.items() if size >= threshold)
 
 
 def _scenario_requirements_by_config() -> dict[tuple[str, str], dict[int, int]]:
@@ -295,17 +263,20 @@ def build_robustness_evaluation() -> list[dict[str, str]]:
                 scenario_pass_count += 1
                 continue
 
+            # Check overflow feasibility from the largest slot size down: an item can be placed in its
+            # best-fit slot size or any larger one, so a full smaller slot size doesn't block assignment
+            # as long as enough locations exist at or above that item's height somewhere in the layout.
             threshold_values = sorted(set(scenario_counts.keys()) | set(layout_slot_counts.keys()))
             scenario_pass = True
             threshold_ratios: list[float] = []
             for threshold in threshold_values:
-                demand_at_or_below = sum(count for size, count in scenario_counts.items() if size <= threshold)
-                available_at_or_below = _at_or_below_count(layout_slot_counts, threshold)
-                if demand_at_or_below > 0:
-                    threshold_ratios.append(min(available_at_or_below / demand_at_or_below, 1.0))
-                if demand_at_or_below > available_at_or_below:
+                demand_at_or_above = sum(count for size, count in scenario_counts.items() if size >= threshold)
+                available_at_or_above = _at_or_above_count(layout_slot_counts, threshold)
+                if demand_at_or_above > 0:
+                    threshold_ratios.append(min(available_at_or_above / demand_at_or_above, 1.0))
+                if demand_at_or_above > available_at_or_above:
                     scenario_pass = False
-                    scenario_failures.append(f"{scenario_column}:{threshold}:{demand_at_or_below}>{available_at_or_below}")
+                    scenario_failures.append(f"{scenario_column}:{threshold}:{demand_at_or_above}>{available_at_or_above}")
 
             coverage_ratio = sum(threshold_ratios) / len(threshold_ratios) if threshold_ratios else 1.0
             scenario_coverage_ratios.append(coverage_ratio)
