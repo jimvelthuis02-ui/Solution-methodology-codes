@@ -35,26 +35,32 @@
    'Sizing\\Solution-methodology-codes\\build\\run_ordered_pipeline\\localpycs\\pyimod04_pywin32.pyc',
    'PYMODULE'),
   ('pyiboot01_bootstrap',
-   '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim '
-   'Velthuis Warehouse Slot '
-   'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
    'PYSOURCE'),
   ('pyi_rth_inspect',
-   '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim '
-   'Velthuis Warehouse Slot '
-   'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
    'PYSOURCE'),
   ('pyi_rth_pkgutil',
-   '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim '
-   'Velthuis Warehouse Slot '
-   'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'PYSOURCE'),
+  ('pyi_rth_multiprocessing',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
+   'PYSOURCE'),
+  ('pyi_rth__tkinter',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth__tkinter.py',
+   'PYSOURCE'),
+  ('pyi_rth_setuptools',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_setuptools.py',
+   'PYSOURCE'),
+  ('pyi_rth_mplconfig',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_mplconfig.py',
    'PYSOURCE'),
   ('run_ordered_pipeline',
    '\\\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis '
    'Warehouse Slot '
    'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\run_ordered_pipeline.py',
    'PYSOURCE')],
- 'python314.dll',
+ 'python312.dll',
  True,
  False,
  False,

@@ -1,11 +1,17 @@
 import csv
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
 import run_ordered_pipeline as common
 
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = common.ROOT
 INPUT_FILE = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
 OUTPUT_DIR = ROOT / "Output" / "03_Slot_Size_Generation"
 MERGED_SUMMARY_FILE = OUTPUT_DIR / "Stage3_Slot_Size_Configuration_Summary_All.csv"

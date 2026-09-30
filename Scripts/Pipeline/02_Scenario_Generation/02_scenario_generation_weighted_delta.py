@@ -1,8 +1,15 @@
 import csv
+import sys
 from pathlib import Path
 
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
 
-ROOT = Path(__file__).resolve().parents[3]
+import run_ordered_pipeline as common
+
+
+ROOT = common.ROOT
 INPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
 OUTPUT_FILE = ROOT / "Output" / "02_Scenario_Generation" / "02_Item_Height_Scenarios_Delta_Weighted.csv"
 

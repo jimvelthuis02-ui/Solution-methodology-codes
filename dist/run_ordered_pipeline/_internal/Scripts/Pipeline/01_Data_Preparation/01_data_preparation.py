@@ -1,16 +1,11 @@
 import csv
+import os
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 from openpyxl import load_workbook
-
-
-ROOT = Path(__file__).resolve().parents[3]
-INPUT_DIR = ROOT / "Input files" / "Locations"
-PREPARED_OUTPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
-BEAM_OUTPUT_DIR = ROOT / "Output" / "01_Data_Preparation"
-CURRENT_SPACE_UTILIZATION_FILE = BEAM_OUTPUT_DIR / "Current_Layout_Space_Utilization.csv"
 
 BEAM_HEIGHT_CM = 16.0
 ROW_ORDER_PATTERN = re.compile(r"^(\d+)([A-Za-z]?)$")
@@ -35,6 +30,47 @@ DISABLED_BEAM_POINTS: set[tuple[str, int, str]] = {
 BEAM_ALIASES: dict[tuple[str, int, str], tuple[str, int, str]] = {
     ("K", 7, "02"): ("K", 7, "2b"),
 }
+
+
+def _resolve_project_root() -> Path:
+    """Find the repository root in both source-tree and bundled execution modes."""
+    env_root = os.environ.get("PIPELINE_PROJECT_ROOT")
+    if env_root:
+        candidate = Path(env_root).expanduser().resolve()
+        if candidate.exists():
+            return candidate
+
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([
+            exe_dir,
+            exe_dir / "_internal",
+            exe_dir.parent,
+            Path.cwd(),
+        ])
+    else:
+        candidates.extend([
+            Path.cwd(),
+            Path(__file__).resolve().parents[3],
+            Path(__file__).resolve().parents[2],
+            Path(__file__).resolve().parents[1],
+        ])
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        if (candidate / "Input files").exists() or (candidate / "Scripts" / "Pipeline").exists():
+            return candidate.resolve()
+
+    return Path(__file__).resolve().parents[3]
+
+
+ROOT = _resolve_project_root()
+INPUT_DIR = Path(os.environ.get("PIPELINE_INPUT_DIR", ROOT / "Input files")).expanduser().resolve() / "Locations"
+PREPARED_OUTPUT_FILE = ROOT / "Output" / "01_Data_Preparation" / "Location_Details_Prepared.csv"
+BEAM_OUTPUT_DIR = ROOT / "Output" / "01_Data_Preparation"
+CURRENT_SPACE_UTILIZATION_FILE = BEAM_OUTPUT_DIR / "Current_Layout_Space_Utilization.csv"
 
 
 def _to_float_optional(value: object | None) -> float | None:

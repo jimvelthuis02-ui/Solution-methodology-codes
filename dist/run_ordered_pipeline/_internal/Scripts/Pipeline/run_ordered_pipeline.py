@@ -5,13 +5,49 @@ import re
 import runpy
 import shutil
 import stat
+import sys
 import time
 from functools import lru_cache
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = ROOT / "Output"
+
+def _resolve_project_root() -> Path:
+    """Find the repository root in both source-tree and PyInstaller execution modes."""
+    env_root = os.environ.get("PIPELINE_PROJECT_ROOT")
+    if env_root:
+        candidate = Path(env_root).expanduser().resolve()
+        if candidate.exists():
+            return candidate
+
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([
+            exe_dir,
+            exe_dir / "_internal",
+            exe_dir.parent,
+            Path.cwd(),
+        ])
+    else:
+        candidates.extend([
+            Path.cwd(),
+            Path(__file__).resolve().parents[2],
+            Path(__file__).resolve().parents[1],
+            Path(__file__).resolve().parent,
+        ])
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        if (candidate / "Input files").exists() or (candidate / "Scripts" / "Pipeline").exists():
+            return candidate.resolve()
+
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT = _resolve_project_root()
+OUTPUT_ROOT = Path(os.environ.get("PIPELINE_OUTPUT_DIR", ROOT / "Output")).expanduser().resolve()
 STAGE1_OUTPUT_DIR = OUTPUT_ROOT / "01_Data_Preparation"
 STAGE2_OUTPUT_DIR = OUTPUT_ROOT / "02_Scenario_Generation"
 STAGE3_OUTPUT_DIR = OUTPUT_ROOT / "03_Slot_Size_Generation"
@@ -1163,7 +1199,23 @@ def _build_occupied_location_count_scenarios(_scenario_rows: list[dict[str, str]
     }
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    # PyInstaller can place the generated app at either the bundle root or the
+    # sibling _internal folder, depending on the build layout and the copied
+    # project files. Probe the actual runtime locations so we resolve the right
+    # stage-script directory instead of assuming a single fixed tree.
+    bundle_root = Path(sys.executable).resolve().parent
+    script_candidates = [
+        bundle_root / "_internal" / "Scripts" / "Pipeline",
+        bundle_root / "_internal" / "Pipeline",
+        bundle_root / "Scripts" / "Pipeline",
+        bundle_root / "Pipeline",
+        Path(__file__).resolve().parent,
+    ]
+    SCRIPT_DIR = next((candidate for candidate in script_candidates if candidate.exists()), script_candidates[0])
+else:
+    SCRIPT_DIR = Path(__file__).resolve().parent
+
 ORDERED_SCRIPTS = [
     "01_Data_Preparation/01_data_preparation.py",
     "02_Scenario_Generation/02_scenario_generation_weighted_delta.py",

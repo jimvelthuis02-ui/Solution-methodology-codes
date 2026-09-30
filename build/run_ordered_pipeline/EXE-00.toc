@@ -3,9 +3,7 @@
  True,
  False,
  True,
- '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis '
- 'Warehouse Slot '
- 'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\bootloader\\images\\icon-console.ico',
+ 'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\bootloader\\images\\icon-console.ico',
  None,
  False,
  False,
@@ -60,19 +58,25 @@
    'Sizing\\Solution-methodology-codes\\build\\run_ordered_pipeline\\localpycs\\pyimod04_pywin32.pyc',
    'PYMODULE'),
   ('pyiboot01_bootstrap',
-   '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim '
-   'Velthuis Warehouse Slot '
-   'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
    'PYSOURCE'),
   ('pyi_rth_inspect',
-   '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim '
-   'Velthuis Warehouse Slot '
-   'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
    'PYSOURCE'),
   ('pyi_rth_pkgutil',
-   '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim '
-   'Velthuis Warehouse Slot '
-   'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'PYSOURCE'),
+  ('pyi_rth_multiprocessing',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
+   'PYSOURCE'),
+  ('pyi_rth__tkinter',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth__tkinter.py',
+   'PYSOURCE'),
+  ('pyi_rth_setuptools',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_setuptools.py',
+   'PYSOURCE'),
+  ('pyi_rth_mplconfig',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_mplconfig.py',
    'PYSOURCE'),
   ('run_ordered_pipeline',
    '\\\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis '
@@ -82,10 +86,8 @@
  [],
  False,
  False,
- 1790770259,
+ 1790777661,
  [('run.exe',
-   '\\\\?\\UNC\\aln-fs01\\groups\\SCM\\Projects\\Stage\\Afstuderen Jim '
-   'Velthuis Warehouse Slot '
-   'Sizing\\Solution-methodology-codes\\.venv\\Lib\\site-packages\\PyInstaller\\bootloader\\Windows-64bit-intel\\run.exe',
+   'C:\\Users\\velthj\\venvs\\warehouse-slot-sizing-py312\\Lib\\site-packages\\PyInstaller\\bootloader\\Windows-64bit-intel\\run.exe',
    'EXECUTABLE')],
- 'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\python314.dll')
+ 'C:\\Users\\velthj\\AppData\\Local\\Programs\\Python\\Python312\\python312.dll')
