@@ -1,0 +1,25 @@
+Config_ID,Layout_Feasible,Reason,Assigned_Locations_Total,Required_Locations_Total,Capacity_Margin,Space_Left,Required_Beams_Total,Required_Grids_Total,Additional_Beams_Required,Additional_Grids_Required,Robustness,Scenario_Pass_Count,Scenario_Total_Count,Failure_Reasons
+CFG_002,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_012,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_022,NO,Stage 6 layout feasibility failed,856,926,-70,0.000,204,642,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_032,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_042,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_043,NO,Stage 6 layout feasibility failed,922,926,-4,0.000,225,708,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_052,NO,Stage 6 layout feasibility failed,856,926,-70,0.000,204,642,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_053,NO,Stage 6 layout feasibility failed,938,926,12,0.000,230,724,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_062,NO,Stage 6 layout feasibility failed,856,926,-70,0.000,204,642,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_072,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_082,NO,Stage 6 layout feasibility failed,856,926,-70,0.000,204,642,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_092,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_102,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_103,NO,Stage 6 layout feasibility failed,922,926,-4,0.000,225,708,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_112,NO,Stage 6 layout feasibility failed,856,926,-70,0.000,204,642,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_113,NO,Stage 6 layout feasibility failed,910,926,-16,0.000,221,696,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_122,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_132,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_142,NO,Stage 6 layout feasibility failed,1498,926,572,0.000,408,1284,103,335,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_152,NO,Stage 6 layout feasibility failed,0,926,-926,161356.000,0,0,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_162,NO,Stage 6 layout feasibility failed,856,926,-70,0.000,204,642,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_163,NO,Stage 6 layout feasibility failed,916,926,-10,0.000,223,702,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_172,NO,Stage 6 layout feasibility failed,856,926,-70,0.000,204,642,0,0,0.000000,0,6,Stage 6 layout feasibility failed
+CFG_173,NO,Stage 6 layout feasibility failed,904,926,-22,0.000,219,690,0,0,0.000000,0,6,Stage 6 layout feasibility failed

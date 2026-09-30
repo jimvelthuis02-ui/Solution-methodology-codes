@@ -1,0 +1,280 @@
+([('Input files\\Example profile generation cfg 003.xlsx',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input files\\Example profile '
+   'generation cfg 003.xlsx',
+   'DATA'),
+  ('Input files\\Explanation\\Explanation Solution Methodology and '
+   'Approach.docx',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input files\\Explanation\\Explanation '
+   'Solution Methodology and Approach.docx',
+   'DATA'),
+  ('Input files\\Locations\\Location details.xlsx',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input files\\Locations\\Location '
+   'details.xlsx',
+   'DATA'),
+  ('Input files\\Locations\\Most frequently picked items heights 24-9 good.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input files\\Locations\\Most '
+   'frequently picked items heights 24-9 good.csv',
+   'DATA'),
+  ('Input files\\Locations\\SKU_Location_Detail.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input '
+   'files\\Locations\\SKU_Location_Detail.csv',
+   'DATA'),
+  ('Input files\\SKU\\Merged_Warehouse_SKUs_Aggregated.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input '
+   'files\\SKU\\Merged_Warehouse_SKUs_Aggregated.csv',
+   'DATA'),
+  ('Input files\\SKU\\Merged_Warehouse_SKUs_Full.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input '
+   'files\\SKU\\Merged_Warehouse_SKUs_Full.csv',
+   'DATA'),
+  ('Input files\\SKU\\SKU_Analysis_File.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input '
+   'files\\SKU\\SKU_Analysis_File.csv',
+   'DATA'),
+  ('Input files\\WSM_Weights.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Input files\\WSM_Weights.csv',
+   'DATA'),
+  ('Output\\01_Data_Preparation\\Beam_Height_Coordinates.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\01_Data_Preparation\\Beam_Height_Coordinates.csv',
+   'DATA'),
+  ('Output\\01_Data_Preparation\\Current_Layout_Space_Utilization.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\01_Data_Preparation\\Current_Layout_Space_Utilization.csv',
+   'DATA'),
+  ('Output\\01_Data_Preparation\\Location_Beam_Map.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\01_Data_Preparation\\Location_Beam_Map.csv',
+   'DATA'),
+  ('Output\\01_Data_Preparation\\Location_Details_Prepared.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\01_Data_Preparation\\Location_Details_Prepared.csv',
+   'DATA'),
+  ('Output\\02_Scenario_Generation\\02_Item_Height_Scenarios_Delta_Weighted.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\02_Scenario_Generation\\02_Item_Height_Scenarios_Delta_Weighted.csv',
+   'DATA'),
+  ('Output\\03_Slot_Size_Generation\\Stage3_Slot_Size_Configuration_Summary_All.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\03_Slot_Size_Generation\\Stage3_Slot_Size_Configuration_Summary_All.csv',
+   'DATA'),
+  ('Output\\04_Candidate_Configuration\\Candidate_Configurations.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\04_Candidate_Configuration\\Candidate_Configurations.csv',
+   'DATA'),
+  ('Output\\05_Capacity_Determination\\Capacity_Determination_Summary.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\05_Capacity_Determination\\Capacity_Determination_Summary.csv',
+   'DATA'),
+  ('Output\\05_Capacity_Determination\\Constraint_Location_Counts_By_Slot_Size.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\05_Capacity_Determination\\Constraint_Location_Counts_By_Slot_Size.csv',
+   'DATA'),
+  ('Output\\06_Layout_Generation\\Candidate_Layout_By_Location.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\06_Layout_Generation\\Candidate_Layout_By_Location.csv',
+   'DATA'),
+  ('Output\\06_Layout_Generation\\Candidate_Layout_By_Rack.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\06_Layout_Generation\\Candidate_Layout_By_Rack.csv',
+   'DATA'),
+  ('Output\\06_Layout_Generation\\Candidate_Layout_By_Rack_Column.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\06_Layout_Generation\\Candidate_Layout_By_Rack_Column.csv',
+   'DATA'),
+  ('Output\\06_Layout_Generation\\Candidate_Layout_Feasibility_Report.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\06_Layout_Generation\\Candidate_Layout_Feasibility_Report.csv',
+   'DATA'),
+  ('Output\\06_Layout_Generation\\Candidate_Layout_Summary.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\06_Layout_Generation\\Candidate_Layout_Summary.csv',
+   'DATA'),
+  ('Output\\06_Layout_Generation\\Empty_Locations_By_Slot_Size.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\06_Layout_Generation\\Empty_Locations_By_Slot_Size.csv',
+   'DATA'),
+  ('Output\\06_Layout_Generation\\Generated_Profiles_By_Config.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\06_Layout_Generation\\Generated_Profiles_By_Config.csv',
+   'DATA'),
+  ('Output\\07_Robustness_Evaluation\\Candidate_Layout_Robustness_Details.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\07_Robustness_Evaluation\\Candidate_Layout_Robustness_Details.csv',
+   'DATA'),
+  ('Output\\07_Robustness_Evaluation\\Candidate_Layout_Robustness_Summary.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\07_Robustness_Evaluation\\Candidate_Layout_Robustness_Summary.csv',
+   'DATA'),
+  ('Output\\07_Robustness_Evaluation\\Non_Feasible_Layouts.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\07_Robustness_Evaluation\\Non_Feasible_Layouts.csv',
+   'DATA'),
+  ('Output\\07_Robustness_Evaluation\\Non_Robust_Layouts.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\07_Robustness_Evaluation\\Non_Robust_Layouts.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Candidate_Layout_Metric_Ranking.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Candidate_Layout_Metric_Ranking.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Figures\\02_weighted_contributions.png',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Figures\\02_weighted_contributions.png',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Figures\\06_heuristic_comparison.png',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Figures\\06_heuristic_comparison.png',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Figures\\08_original_vs_proposed_1.png',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Figures\\08_original_vs_proposed_1.png',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Figures\\09_original_vs_proposed_2.png',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Figures\\09_original_vs_proposed_2.png',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Figures\\Figure_Index.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Figures\\Figure_Index.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Figures\\Weighted_Contribution_By_Unique_Score.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Figures\\Weighted_Contribution_By_Unique_Score.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Final_Layout_By_Location.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Final_Layout_By_Location.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Final_Layout_By_Rack.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Final_Layout_By_Rack.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Final_Layout_By_Rack_Column.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Final_Layout_By_Rack_Column.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Final_Layout_By_Segment.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Final_Layout_By_Segment.csv',
+   'DATA'),
+  ('Output\\08_Final_Selection\\Weighted_Sum_Method_Ranking.csv',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Output\\08_Final_Selection\\Weighted_Sum_Method_Ranking.csv',
+   'DATA'),
+  ('Scripts\\Pipeline\\01_Data_Preparation\\01_data_preparation.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\01_Data_Preparation\\01_data_preparation.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\02_Scenario_Generation\\02_scenario_generation_weighted_delta.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\02_Scenario_Generation\\02_scenario_generation_weighted_delta.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\03_Slot_Size_Generation\\03_slot_size_generation_main.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\03_Slot_Size_Generation\\03_slot_size_generation_main.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\04_Candidate_Configuration\\04_candidate_configuration.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\04_Candidate_Configuration\\04_candidate_configuration.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\05_Capacity_Determination\\05_capacity_determination.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\05_Capacity_Determination\\05_capacity_determination.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\06_Layout_Generation\\06_layout_generation.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\06_Layout_Generation\\06_layout_generation.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\06_Layout_Generation\\__pycache__\\06_layout_generation.cpython-314.pyc',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\06_Layout_Generation\\__pycache__\\06_layout_generation.cpython-314.pyc',
+   'DATA'),
+  ('Scripts\\Pipeline\\07_Robustness_Evaluation\\07_robustness_evaluation.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\07_Robustness_Evaluation\\07_robustness_evaluation.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\08_Final_Selection\\08_final_selection.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\08_Final_Selection\\08_final_selection.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\08_Final_Selection\\08_final_selection_figures.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\08_Final_Selection\\08_final_selection_figures.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\08_Final_Selection\\__pycache__\\08_final_selection.cpython-314.pyc',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\08_Final_Selection\\__pycache__\\08_final_selection.cpython-314.pyc',
+   'DATA'),
+  ('Scripts\\Pipeline\\08_Final_Selection\\__pycache__\\08_final_selection_figures.cpython-314.pyc',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\08_Final_Selection\\__pycache__\\08_final_selection_figures.cpython-314.pyc',
+   'DATA'),
+  ('Scripts\\Pipeline\\Streamlit_App.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\Streamlit_App.py',
+   'DATA'),
+  ('Scripts\\Pipeline\\__pycache__\\run_ordered_pipeline.cpython-314.pyc',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\__pycache__\\run_ordered_pipeline.cpython-314.pyc',
+   'DATA'),
+  ('Scripts\\Pipeline\\run_ordered_pipeline.py',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\Scripts\\Pipeline\\run_ordered_pipeline.py',
+   'DATA'),
+  ('VCRUNTIME140.dll',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\VCRUNTIME140.dll',
+   'BINARY'),
+  ('_bz2.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\_bz2.pyd',
+   'EXTENSION'),
+  ('_decimal.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\_decimal.pyd',
+   'EXTENSION'),
+  ('_hashlib.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\_hashlib.pyd',
+   'EXTENSION'),
+  ('_lzma.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\_lzma.pyd',
+   'EXTENSION'),
+  ('_socket.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\_socket.pyd',
+   'EXTENSION'),
+  ('_ssl.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\_ssl.pyd',
+   'EXTENSION'),
+  ('_zstd.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\_zstd.pyd',
+   'EXTENSION'),
+  ('base_library.zip',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\build\\run_ordered_pipeline\\base_library.zip',
+   'DATA'),
+  ('libcrypto-3-x64.dll',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\libcrypto-3-x64.dll',
+   'BINARY'),
+  ('libssl-3-x64.dll',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\libssl-3-x64.dll',
+   'BINARY'),
+  ('python314.dll',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\python314.dll',
+   'BINARY'),
+  ('run_ordered_pipeline.exe',
+   'G:\\SCM\\Projects\\Stage\\Afstuderen Jim Velthuis Warehouse Slot '
+   'Sizing\\Solution-methodology-codes\\build\\run_ordered_pipeline\\run_ordered_pipeline.exe',
+   'EXECUTABLE'),
+  ('select.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\select.pyd',
+   'EXTENSION'),
+  ('unicodedata.pyd',
+   'C:\\Users\\velthj\\AppData\\Roaming\\uv\\python\\cpython-3.14-windows-x86_64-none\\DLLs\\unicodedata.pyd',
+   'EXTENSION')],)

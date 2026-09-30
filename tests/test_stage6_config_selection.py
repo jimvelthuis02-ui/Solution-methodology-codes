@@ -170,6 +170,62 @@ def test_layout_slot_distribution_uses_actual_assigned_slot_values():
     assert rack_rows[0]["Rack_Profile_Order"] == "239,189,124,69,69"
 
 
+def test_slot_distribution_rolls_topfills_into_lower_configured_family():
+    rows = [
+        {"Rack": "A", "Column": "1", "Row": "1", "Assigned_Slot_Size_cm": "239", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "1", "Row": "2", "Assigned_Slot_Size_cm": "124", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "1", "Row": "3", "Assigned_Slot_Size_cm": "104", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "1", "Row": "4", "Assigned_Slot_Size_cm": "104", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "1", "Row": "5", "Assigned_Slot_Size_cm": "79", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "2", "Row": "1", "Assigned_Slot_Size_cm": "69", "Usable_Location": "YES"},
+    ]
+
+    distribution, cumulative = mod._slot_signatures_from_location_rows(rows, [69, 124, 239])
+    assert distribution == "69:4|124:1|239:1"
+    assert cumulative == "69:6|124:2|239:1"
+
+    empty_rows = mod._empty_locations_rows_by_slot_size(
+        [{
+            "Config_ID": "CFG_003",
+            "Source_Slot_Sizes": "=\"69,124,239\"",
+            "Minimum_Required_Counts": "69:2|124:1|239:1",
+            "Layout_Slot_Size_Distribution": "69:4|124:1|239:1",
+        }],
+        "Baseline",
+    )
+    assert empty_rows == [
+        {"Method": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "69", "Occupied": "2", "Total_Locations_In_Layout": "4", "Empty": "2"},
+        {"Method": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "124", "Occupied": "1", "Total_Locations_In_Layout": "1", "Empty": "0"},
+        {"Method": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "239", "Occupied": "1", "Total_Locations_In_Layout": "1", "Empty": "0"},
+    ]
+
+
+def test_rack_profile_order_keeps_raw_sequence_while_distribution_uses_family_mapping():
+    rows = [
+        {"Rack": "A", "Column": "1", "Row": "1", "Assigned_Slot_Size_cm": "239", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "1", "Row": "2", "Assigned_Slot_Size_cm": "239", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "1", "Row": "3", "Assigned_Slot_Size_cm": "124", "Usable_Location": "YES"},
+        {"Rack": "A", "Column": "1", "Row": "4", "Assigned_Slot_Size_cm": "104", "Usable_Location": "YES"},
+    ]
+
+    rack_rows = mod._rack_profile_rows_from_location_rows("LAY_001", "CFG_003", rows, [69, 124, 239])
+    assert rack_rows[0]["Slot_Size_Distribution"] == "69:1|124:1|239:2"
+    assert rack_rows[0]["Rack_Profile_Order"] == "239,239,124,104"
+
+    summary = mod._effective_slot_distribution_counts({239: 2, 124: 1, 104: 1}, [69, 124, 239])
+    assert summary == {69: 1, 124: 1, 239: 2}
+
+
+def test_config_export_uses_each_config_slot_family_without_reusing_last_family():
+    capacity_rows = {
+        "CFG_003": [{"Representative_Slot_Size": "69"}, {"Representative_Slot_Size": "124"}, {"Representative_Slot_Size": "239"}],
+        "CFG_006": [{"Representative_Slot_Size": "34"}, {"Representative_Slot_Size": "69"}, {"Representative_Slot_Size": "99"}, {"Representative_Slot_Size": "124"}, {"Representative_Slot_Size": "189"}, {"Representative_Slot_Size": "239"}],
+    }
+
+    assert mod._slot_sizes_for_config_id(capacity_rows, "CFG_003") == [69.0, 124.0, 239.0]
+    assert mod._slot_sizes_for_config_id(capacity_rows, "CFG_006") == [34.0, 69.0, 99.0, 124.0, 189.0, 239.0]
+
+
 def test_build_deficit_coverage_layout_uses_profile_shortlist(monkeypatch):
     generated_profiles = [
         [69, 124],
@@ -232,6 +288,8 @@ def test_stage8_keeps_feasible_stage6_layouts_even_when_stage7_robustness_fails(
         {"Config_ID": "CFG_002", "Layout_Feasible": "YES", "Scenario_Pass_Count": "1", "Scenario_Total_Count": "1", "Robustness": "1.000000"},
         {"Config_ID": "CFG_003", "Layout_Feasible": "NO", "Scenario_Pass_Count": "1", "Scenario_Total_Count": "1", "Robustness": "1.000000"},
     ]
+    required_counts = {89.0: 42, 119.0: 31, 164.0: 29, 189.0: 18, 239.0: 14}
+    targeted_pool = mod._generate_required_family_cover_profiles([89, 119, 164, 189, 239], required_counts)
 
     selected = stage8._feasible_stage6_layouts_for_stage8(rows)
 

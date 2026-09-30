@@ -1,0 +1,60 @@
+Config_ID,Layout_Feasible,Reason,Assigned_Locations_Total,Required_Locations_Total,Capacity_Margin,Space_Left,Required_Beams_Total,Required_Grids_Total,Additional_Beams_Required,Additional_Grids_Required,Robustness,Scenario_Pass_Count,Scenario_Total_Count,Failure_Reasons
+CFG_003,YES,,1076,926,150,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_004,YES,,1098,926,172,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_005,YES,,1218,926,292,0.000,,,14,55,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_006,YES,,1226,926,300,0.000,,,16,63,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_013,YES,,1054,926,128,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_014,YES,,1076,926,150,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_015,YES,,1152,926,226,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_016,YES,,1180,926,254,0.000,,,2,17,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_019,YES,,1224,926,298,0.000,,,16,61,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_023,YES,,966,926,40,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_024,YES,,1032,926,106,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_025,YES,,1098,926,172,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_033,YES,,944,926,18,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_038,YES,,1136,926,210,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_040,YES,,1152,926,226,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_063,YES,,1054,926,128,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_064,YES,,1120,926,194,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_065,YES,,1212,926,286,0.000,,,12,49,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_066,YES,,1226,926,300,0.000,,,16,63,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_067,YES,,1244,926,318,0.000,,,22,81,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_068,YES,,1248,926,322,0.000,,,23,85,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_069,YES,,1254,926,328,0.000,,,25,91,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_070,YES,,1260,926,334,0.000,,,27,97,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_073,YES,,1032,926,106,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_074,YES,,1076,926,150,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_075,YES,,1136,926,210,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_076,YES,,1162,926,236,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_077,YES,,1184,926,258,0.000,,,3,21,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_083,YES,,1010,926,84,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_085,YES,,1098,926,172,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_090,YES,,1200,926,274,0.000,,,8,37,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_093,YES,,966,926,40,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_123,YES,,1054,926,128,0.000,,,0,0,0.333333,2,6,scenario failed: Scenario_3_Item_Height; scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_124,YES,,1142,926,216,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_125,YES,,1212,926,286,0.000,,,12,49,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_126,YES,,1226,926,300,0.000,,,16,63,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_127,YES,,1216,926,290,0.000,,,13,53,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_128,YES,,1254,926,328,0.000,,,25,91,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_129,YES,,1260,926,334,0.000,,,27,97,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_130,YES,,1336,926,410,0.000,,,51,173,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_133,YES,,1032,926,106,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_134,YES,,1054,926,128,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_135,YES,,1146,926,220,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_136,YES,,1146,926,220,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_137,YES,,1200,926,274,0.000,,,8,37,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_138,YES,,1200,926,274,0.000,,,8,37,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_139,YES,,1194,926,268,0.000,,,6,31,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_140,YES,,1216,926,290,0.000,,,13,53,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_143,YES,,1010,926,84,0.000,,,0,0,0.500000,3,6,scenario failed: Scenario_4_Item_Height; scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_144,YES,,1032,926,106,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_145,YES,,1102,926,176,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_146,YES,,1140,926,214,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_147,YES,,1156,926,230,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_148,YES,,1140,926,214,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_149,YES,,1156,926,230,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_150,YES,,1200,926,274,0.000,,,8,37,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_153,YES,,966,926,40,0.000,,,0,0,0.666667,4,6,scenario failed: Scenario_5_Item_Height; scenario failed: Scenario_6_Item_Height
+CFG_156,YES,,1108,926,182,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height
+CFG_157,YES,,1124,926,198,0.000,,,0,0,0.833333,5,6,scenario failed: Scenario_6_Item_Height

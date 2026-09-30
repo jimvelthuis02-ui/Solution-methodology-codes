@@ -1,0 +1,4 @@
+Figure,Purpose,Source
+02_weighted_contributions.png,Weighted contributions for every unique score; n shows configurations sharing a score,Weighted_Sum_Method_Ranking.csv; Weighted_Contribution_By_Unique_Score.csv
+08_original_vs_proposed_1.png,"Original value, proposed-layout distribution, and count better than original",Candidate_Layout_Metric_Ranking.csv; Stage 1 baseline
+09_original_vs_proposed_2.png,"Original value, proposed-layout distribution, and count better than original",Candidate_Layout_Metric_Ranking.csv; Stage 1 baseline

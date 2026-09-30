@@ -1,0 +1,163 @@
+Layout_ID,Config_ID,Layout_Feasible,Layout_Feasibility_Reason,Profile_Generation_Timeout,Rack_Search_Timeout,Required_Locations_Total,Total_Locations,Capacity_Margin
+LAY_001,CFG_002,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_002,CFG_003,YES,Feasible,NO,NO,926,1076,150
+LAY_003,CFG_004,YES,Feasible,NO,NO,926,1098,172
+LAY_004,CFG_005,YES,Feasible,NO,NO,926,1218,292
+LAY_005,CFG_006,YES,Feasible,NO,NO,926,1226,300
+LAY_006,CFG_007,YES,Feasible,NO,NO,926,1230,304
+LAY_007,CFG_008,YES,Feasible,NO,NO,926,1262,336
+LAY_008,CFG_009,YES,Feasible,NO,NO,926,1270,344
+LAY_009,CFG_010,YES,Feasible,NO,NO,926,1272,346
+LAY_010,CFG_012,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_011,CFG_013,YES,Feasible,NO,NO,926,1054,128
+LAY_012,CFG_014,YES,Feasible,NO,NO,926,1076,150
+LAY_013,CFG_015,YES,Feasible,NO,NO,926,1152,226
+LAY_014,CFG_016,YES,Feasible,NO,NO,926,1180,254
+LAY_015,CFG_017,YES,Feasible,NO,NO,926,1212,286
+LAY_016,CFG_018,YES,Feasible,NO,NO,926,1238,312
+LAY_017,CFG_019,YES,Feasible,NO,NO,926,1224,298
+LAY_018,CFG_020,YES,Feasible,NO,NO,926,1224,298
+LAY_019,CFG_022,NO,Assigned locations (856) are below the required total (926); Capacity margin is negative (-70),NO,NO,926,856,-70
+LAY_020,CFG_023,YES,Feasible,NO,NO,926,966,40
+LAY_021,CFG_024,YES,Feasible,NO,NO,926,1032,106
+LAY_022,CFG_025,YES,Feasible,NO,NO,926,1098,172
+LAY_023,CFG_026,YES,Feasible,NO,NO,926,1118,192
+LAY_024,CFG_027,YES,Feasible,NO,NO,926,1134,208
+LAY_025,CFG_028,YES,Feasible,NO,NO,926,1162,236
+LAY_026,CFG_029,YES,Feasible,NO,NO,926,1158,232
+LAY_027,CFG_030,YES,Feasible,NO,NO,926,1162,236
+LAY_028,CFG_032,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_029,CFG_033,YES,Feasible,NO,NO,926,944,18
+LAY_030,CFG_034,YES,Feasible,NO,NO,926,1010,84
+LAY_031,CFG_035,YES,Feasible,NO,NO,926,1092,166
+LAY_032,CFG_036,YES,Feasible,NO,NO,926,1114,188
+LAY_033,CFG_037,YES,Feasible,NO,NO,926,1136,210
+LAY_034,CFG_038,YES,Feasible,NO,NO,926,1136,210
+LAY_035,CFG_039,YES,Feasible,NO,NO,926,1124,198
+LAY_036,CFG_040,YES,Feasible,NO,NO,926,1152,226
+LAY_037,CFG_042,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_038,CFG_043,NO,Assigned locations (922) are below the required total (926); Capacity margin is negative (-4),NO,NO,926,922,-4
+LAY_039,CFG_044,YES,Feasible,NO,NO,926,1010,84
+LAY_040,CFG_045,YES,Feasible,NO,NO,926,1076,150
+LAY_041,CFG_046,YES,Feasible,NO,NO,926,1054,128
+LAY_042,CFG_047,YES,Feasible,NO,NO,926,1054,128
+LAY_043,CFG_048,YES,Feasible,NO,NO,926,1070,144
+LAY_044,CFG_049,YES,Feasible,NO,NO,926,1076,150
+LAY_045,CFG_050,YES,Feasible,NO,NO,926,1086,160
+LAY_046,CFG_052,NO,Assigned locations (856) are below the required total (926); Capacity margin is negative (-70),NO,NO,926,856,-70
+LAY_047,CFG_053,NO,Exact minimum family counts are not satisfied across the completed layout,NO,NO,926,938,12
+LAY_048,CFG_054,YES,Feasible,NO,NO,926,1010,84
+LAY_049,CFG_055,YES,Feasible,NO,NO,926,1026,100
+LAY_050,CFG_056,YES,Feasible,NO,NO,926,1042,116
+LAY_051,CFG_057,YES,Feasible,NO,NO,926,1032,106
+LAY_052,CFG_058,YES,Feasible,NO,NO,926,1048,122
+LAY_053,CFG_059,YES,Feasible,NO,NO,926,1048,122
+LAY_054,CFG_060,YES,Feasible,NO,NO,926,1064,138
+LAY_055,CFG_062,NO,Assigned locations (856) are below the required total (926); Capacity margin is negative (-70),NO,NO,926,856,-70
+LAY_056,CFG_063,YES,Feasible,NO,NO,926,1054,128
+LAY_057,CFG_064,YES,Feasible,NO,NO,926,1120,194
+LAY_058,CFG_065,YES,Feasible,NO,NO,926,1212,286
+LAY_059,CFG_066,YES,Feasible,NO,NO,926,1226,300
+LAY_060,CFG_067,YES,Feasible,NO,NO,926,1244,318
+LAY_061,CFG_068,YES,Feasible,NO,NO,926,1248,322
+LAY_062,CFG_069,YES,Feasible,NO,NO,926,1254,328
+LAY_063,CFG_070,YES,Feasible,NO,NO,926,1260,334
+LAY_064,CFG_072,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_065,CFG_073,YES,Feasible,NO,NO,926,1032,106
+LAY_066,CFG_074,YES,Feasible,NO,NO,926,1076,150
+LAY_067,CFG_075,YES,Feasible,NO,NO,926,1136,210
+LAY_068,CFG_076,YES,Feasible,NO,NO,926,1162,236
+LAY_069,CFG_077,YES,Feasible,NO,NO,926,1184,258
+LAY_070,CFG_078,YES,Feasible,NO,NO,926,1222,296
+LAY_071,CFG_079,YES,Feasible,NO,NO,926,1200,274
+LAY_072,CFG_080,YES,Feasible,NO,NO,926,1216,290
+LAY_073,CFG_082,NO,Assigned locations (856) are below the required total (926); Capacity margin is negative (-70),NO,NO,926,856,-70
+LAY_074,CFG_083,YES,Feasible,NO,NO,926,1010,84
+LAY_075,CFG_084,YES,Feasible,NO,NO,926,1054,128
+LAY_076,CFG_085,YES,Feasible,NO,NO,926,1098,172
+LAY_077,CFG_086,YES,Feasible,NO,NO,926,1108,182
+LAY_078,CFG_087,YES,Feasible,NO,NO,926,1140,214
+LAY_079,CFG_088,YES,Feasible,NO,NO,926,1168,242
+LAY_080,CFG_089,YES,Feasible,NO,NO,926,1162,236
+LAY_081,CFG_090,YES,Feasible,NO,NO,926,1200,274
+LAY_082,CFG_092,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_083,CFG_093,YES,Feasible,NO,NO,926,966,40
+LAY_084,CFG_094,YES,Feasible,NO,NO,926,1010,84
+LAY_085,CFG_095,YES,Feasible,NO,NO,926,1080,154
+LAY_086,CFG_096,YES,Feasible,NO,NO,926,1096,170
+LAY_087,CFG_097,YES,Feasible,NO,NO,926,1096,170
+LAY_088,CFG_098,YES,Feasible,NO,NO,926,1124,198
+LAY_089,CFG_099,YES,Feasible,NO,NO,926,1124,198
+LAY_090,CFG_100,YES,Feasible,NO,NO,926,1140,214
+LAY_091,CFG_102,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_092,CFG_103,NO,Assigned locations (922) are below the required total (926); Capacity margin is negative (-4),NO,NO,926,922,-4
+LAY_093,CFG_104,YES,Feasible,NO,NO,926,988,62
+LAY_094,CFG_105,YES,Feasible,NO,NO,926,1014,88
+LAY_095,CFG_106,YES,Feasible,NO,NO,926,1064,138
+LAY_096,CFG_107,YES,Feasible,NO,NO,926,1080,154
+LAY_097,CFG_108,YES,Feasible,NO,NO,926,1080,154
+LAY_098,CFG_109,YES,Feasible,NO,NO,926,1102,176
+LAY_099,CFG_110,YES,Feasible,NO,NO,926,1080,154
+LAY_100,CFG_112,NO,Assigned locations (856) are below the required total (926); Capacity margin is negative (-70),NO,NO,926,856,-70
+LAY_101,CFG_113,NO,Assigned locations (910) are below the required total (926); Capacity margin is negative (-16),NO,NO,926,910,-16
+LAY_102,CFG_114,YES,Feasible,NO,NO,926,966,40
+LAY_103,CFG_115,YES,Feasible,NO,NO,926,1042,116
+LAY_104,CFG_116,YES,Feasible,NO,NO,926,1042,116
+LAY_105,CFG_117,YES,Feasible,NO,NO,926,1042,116
+LAY_106,CFG_118,YES,Feasible,NO,NO,926,1080,154
+LAY_107,CFG_119,YES,Feasible,NO,NO,926,1080,154
+LAY_108,CFG_120,YES,Feasible,NO,NO,926,1086,160
+LAY_109,CFG_122,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_110,CFG_123,YES,Feasible,NO,NO,926,1054,128
+LAY_111,CFG_124,YES,Feasible,NO,NO,926,1142,216
+LAY_112,CFG_125,YES,Feasible,NO,NO,926,1212,286
+LAY_113,CFG_126,YES,Feasible,NO,NO,926,1226,300
+LAY_114,CFG_127,YES,Feasible,NO,NO,926,1216,290
+LAY_115,CFG_128,YES,Feasible,NO,NO,926,1254,328
+LAY_116,CFG_129,YES,Feasible,NO,NO,926,1260,334
+LAY_117,CFG_130,YES,Feasible,NO,NO,926,1336,410
+LAY_118,CFG_132,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_119,CFG_133,YES,Feasible,NO,NO,926,1032,106
+LAY_120,CFG_134,YES,Feasible,NO,NO,926,1054,128
+LAY_121,CFG_135,YES,Feasible,NO,NO,926,1146,220
+LAY_122,CFG_136,YES,Feasible,NO,NO,926,1146,220
+LAY_123,CFG_137,YES,Feasible,NO,NO,926,1200,274
+LAY_124,CFG_138,YES,Feasible,NO,NO,926,1200,274
+LAY_125,CFG_139,YES,Feasible,NO,NO,926,1194,268
+LAY_126,CFG_140,YES,Feasible,NO,NO,926,1216,290
+LAY_127,CFG_142,NO,Exact minimum family counts are not satisfied across the completed layout,NO,NO,926,1498,572
+LAY_128,CFG_143,YES,Feasible,NO,NO,926,1010,84
+LAY_129,CFG_144,YES,Feasible,NO,NO,926,1032,106
+LAY_130,CFG_145,YES,Feasible,NO,NO,926,1102,176
+LAY_131,CFG_146,YES,Feasible,NO,NO,926,1140,214
+LAY_132,CFG_147,YES,Feasible,NO,NO,926,1156,230
+LAY_133,CFG_148,YES,Feasible,NO,NO,926,1140,214
+LAY_134,CFG_149,YES,Feasible,NO,NO,926,1156,230
+LAY_135,CFG_150,YES,Feasible,NO,NO,926,1200,274
+LAY_136,CFG_152,NO,Assigned locations (0) are below the required total (926); Capacity margin is negative (-926),NO,NO,926,0,-926
+LAY_137,CFG_153,YES,Feasible,NO,NO,926,966,40
+LAY_138,CFG_154,YES,Feasible,NO,NO,926,1032,106
+LAY_139,CFG_155,YES,Feasible,NO,NO,926,1074,148
+LAY_140,CFG_156,YES,Feasible,NO,NO,926,1108,182
+LAY_141,CFG_157,YES,Feasible,NO,NO,926,1124,198
+LAY_142,CFG_158,YES,Feasible,NO,NO,926,1124,198
+LAY_143,CFG_159,YES,Feasible,NO,NO,926,1124,198
+LAY_144,CFG_160,YES,Feasible,NO,NO,926,1162,236
+LAY_145,CFG_162,NO,Assigned locations (856) are below the required total (926); Capacity margin is negative (-70),NO,NO,926,856,-70
+LAY_146,CFG_163,NO,Assigned locations (916) are below the required total (926); Capacity margin is negative (-10),NO,NO,926,916,-10
+LAY_147,CFG_164,YES,Feasible,NO,NO,926,988,62
+LAY_148,CFG_165,YES,Feasible,NO,NO,926,1058,132
+LAY_149,CFG_166,YES,Feasible,NO,NO,926,1080,154
+LAY_150,CFG_167,YES,Feasible,NO,NO,926,1064,138
+LAY_151,CFG_168,YES,Feasible,NO,NO,926,1080,154
+LAY_152,CFG_169,YES,Feasible,NO,NO,926,1080,154
+LAY_153,CFG_170,YES,Feasible,NO,NO,926,1102,176
+LAY_154,CFG_172,NO,Assigned locations (856) are below the required total (926); Capacity margin is negative (-70),NO,NO,926,856,-70
+LAY_155,CFG_173,NO,Assigned locations (904) are below the required total (926); Capacity margin is negative (-22),NO,NO,926,904,-22
+LAY_156,CFG_174,YES,Feasible,NO,NO,926,1010,84
+LAY_157,CFG_175,YES,Feasible,NO,NO,926,998,72
+LAY_158,CFG_176,YES,Feasible,NO,NO,926,1052,126
+LAY_159,CFG_177,YES,Feasible,NO,NO,926,1086,160
+LAY_160,CFG_178,YES,Feasible,NO,NO,926,1080,154
+LAY_161,CFG_179,YES,Feasible,NO,NO,926,1080,154
+LAY_162,CFG_180,YES,Feasible,NO,NO,926,1086,160
