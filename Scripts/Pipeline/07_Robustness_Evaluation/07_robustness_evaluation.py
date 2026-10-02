@@ -22,13 +22,6 @@ SCENARIO_INPUT_FILE = common.STAGE2_OUTPUT_DIR / "02_Item_Height_Scenarios_Delta
 # Stage 7 is now a proper scenario-based robustness pass. It evaluates the generated layout against
 # the item-height scenarios created in Stage 2, rather than treating the stage as a single fixed-count
 # capacity check. This makes the stage a true robustness assessment of the feasible layouts.
-OCCUPIED_LOCATION_SCENARIOS = {
-    "Scenario 1": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
-    "Scenario_1": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
-    "Base_Count": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
-}
-
-
 def _read_csv(path: Path) -> list[dict[str, str]]:
     # Keep CSV read behavior consistent with shared pipeline helpers.
     return common._read_csv(path)
@@ -70,20 +63,6 @@ def _write_exclusion_file(path: Path, rows: list[dict[str, str]]) -> None:
         "Failure_Reasons",
     ]
     _write_csv_preserve(path, fields, [{field: str(row.get(field, "")) for field in fields} for row in rows])
-
-
-def _parse_slot_distribution(value: str) -> dict[int, int]:
-    counts: dict[int, int] = defaultdict(int)
-    for token in str(value).split("|"):
-        text = token.strip()
-        if not text or ":" not in text:
-            continue
-        size_text, count_text = text.split(":", 1)
-        size = common._to_int_default(size_text, -1)
-        count = common._to_int_default(count_text, 0)
-        if size >= 0 and count > 0:
-            counts[size] += count
-    return dict(counts)
 
 
 def _parse_layout_slot_counts(layout: dict[str, str]) -> dict[int, int]:
@@ -132,17 +111,6 @@ def _scenario_columns() -> list[str]:
         for field_name in rows[0].keys()
         if field_name.lower().startswith("scenario_") and "item_height" in field_name.lower()
     ]
-
-
-def _scenario_required_size_counts(scenario_rows: list[dict[str, str]], scenario_column: str) -> dict[int, int]:
-    """Aggregate the scenario item-height values into a size-frequency table."""
-    counts: dict[int, int] = defaultdict(int)
-    for row in scenario_rows:
-        value = common._to_float(row.get(scenario_column))
-        if value is None:
-            continue
-        counts[int(round(value))] += 1
-    return dict(counts)
 
 
 def _scenario_item_height_distribution(scenario_rows: list[dict[str, str]], scenario_column: str) -> dict[int, int]:
@@ -195,21 +163,6 @@ def _normalize_distribution_to_target(distribution: dict[int, int], target_total
 def _at_or_above_count(distribution: dict[int, int], threshold: int) -> int:
     """Slots/items with size >= threshold: a slot can always hold an item shorter than itself."""
     return sum(count for size, count in distribution.items() if size >= threshold)
-
-
-def _scenario_requirements_by_config() -> dict[tuple[str, str], dict[int, int]]:
-    rows = _read_csv(CAPACITY_CONSTRAINT_FILE)
-    grouped: dict[tuple[str, str], dict[int, int]] = defaultdict(dict)
-    for row in rows:
-        config_id = str(row.get("Config_ID", "")).strip()
-        sku_scenario = str(row.get("SKU_Scenario", "")).strip()
-        size = common._to_int_default(row.get("Representative_Slot_Size"), -1)
-        required = common._to_int_default(row.get("Min_Required_Locations_At_Or_Above_Size"), 0)
-        if required <= 0:
-            required = common._to_int_default(row.get("Cumulative_Assigned_SKUs_At_Or_Above_Size"), 0)
-        if config_id and sku_scenario and size >= 0:
-            grouped[(config_id, sku_scenario)][size] = max(grouped[(config_id, sku_scenario)].get(size, 0), required)
-    return dict(grouped)
 
 
 def build_robustness_evaluation() -> list[dict[str, str]]:

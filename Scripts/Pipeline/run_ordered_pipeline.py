@@ -3,8 +3,6 @@ import math
 import os
 import re
 import runpy
-import shutil
-import stat
 import sys
 import time
 from functools import lru_cache
@@ -61,13 +59,6 @@ SLOT_SIZE_ROOT = STAGE3_OUTPUT_DIR
 
 METHODS = ("quantile_binning", "hierarchical_clustering", "kmeans_clustering")
 BASE_OCCUPIED_LOCATIONS_COUNT = 926
-OCCUPIED_LOCATION_SCENARIO_FACTORS = {
-    "Low_Count": 0.9,
-    "Base_Count": 1.0,
-    "High_Count": 1.1,
-}
-CANDIDATE_LAYOUT_STYLES = ("implementation",)
-
 COLUMN_MAX_HEIGHT = 770.0
 TOP_BEAM_HEIGHT = 16.0
 MAX_USED_HEIGHT_BASE = COLUMN_MAX_HEIGHT - TOP_BEAM_HEIGHT
@@ -75,6 +66,7 @@ MIN_BEAMS_PER_COLUMN = 3
 MIN_LOCATIONS_PER_COLUMN = 4
 BEAM_HEIGHT = 16.0
 BEAM_RELOCATION_TOLERANCE_CM = 0.0
+MAX_REPRESENTATIVE_SLOT_SIZE_CM = 239.0
 
 LOCATION_CODE_PATTERN = re.compile(r"^([A-Z])(\d{2})(\d{2})([A-Za-z]+)?$")
 BEAM_SPAN_PATTERN = re.compile(r"^([A-Z])\[(\d{2})-(\d{2})\]:([0-9]{1,2}[A-Za-z]?)$")
@@ -203,82 +195,11 @@ def _write_csv_clean(
         writer.writerows(cleaned_rows)
 
 
-def _safe_rmtree(path: Path | str, retries: int = 8, delay_seconds: float = 0.35) -> None:
-    """Retry directory removal on Windows when nested files or read-only flags delay cleanup."""
-    target = Path(path)
-    if not target.exists():
-        return
-
-    for attempt in range(1, retries + 1):
-        try:
-            for root, dirs, files in os.walk(target, topdown=False):
-                root_path = Path(root)
-                for name in files:
-                    file_path = root_path / name
-                    try:
-                        os.chmod(file_path, stat.S_IWRITE)
-                    except OSError:
-                        pass
-                    try:
-                        file_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                for name in dirs:
-                    dir_path = root_path / name
-                    try:
-                        os.chmod(dir_path, stat.S_IWRITE | stat.S_IREAD)
-                    except OSError:
-                        pass
-                    try:
-                        dir_path.rmdir()
-                    except OSError:
-                        pass
-                try:
-                    os.chmod(root_path, stat.S_IWRITE | stat.S_IREAD)
-                except OSError:
-                    pass
-                try:
-                    root_path.rmdir()
-                except OSError:
-                    pass
-
-            if not target.exists():
-                return
-            shutil.rmtree(target)
-            return
-        except (PermissionError, FileNotFoundError, OSError) as exc:
-            if attempt == retries:
-                raise
-            time.sleep(delay_seconds * attempt)
-
-
-def _slot_size_variable_name(slot_size: float) -> str:
-    # Canonical variable label used in capacity constraints.
-    return f"x_{int(round(slot_size))}"
-
-
-FIXED_LAYOUT_SLOT_COUNTS: dict[int, int] = {}
-MAX_REPRESENTATIVE_SLOT_SIZE_CM = 239.0
-
 
 def _ignore_layout_constraints() -> bool:
     """Respect the explicit override for legacy no-layout benchmarking."""
     raw = os.environ.get("PIPELINE_IGNORE_LAYOUT", "").strip().upper()
     return raw in {"1", "TRUE", "YES", "ON"}
-
-
-def _should_ignore_layout_for_layout_generation() -> bool:
-    """The default pipeline path includes the real layout-generation constraints."""
-    return _ignore_layout_constraints()
-
-
-def _cap_slot_size(value: float | int, maximum: float | int | None = None) -> float:
-    """Clamp generated slot sizes to the working maximum representative size."""
-    capped_max = float(MAX_REPRESENTATIVE_SLOT_SIZE_CM if maximum is None else maximum)
-    slot_value = float(value)
-    if slot_value <= 0.0:
-        return 0.0
-    return min(slot_value, capped_max)
 
 
 def _fixed_layout_location_total() -> int:
@@ -370,46 +291,6 @@ def _build_layout_columns(prepared_rows: list[dict[str, str]]) -> list[str]:
     return sorted(columns)
 
 
-def _layout_thresholds_by_rack(prepared_rows: list[dict[str, str]]) -> dict[str, tuple[int, float]]:
-    # Capture the physical height of the layout location per rack.
-    if _ignore_layout_constraints():
-        return {}
-
-    thresholds: dict[str, tuple[int, float]] = {}
-    for row in prepared_rows:
-        location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type != "layout":
-            continue
-
-        rack = str(row.get("Rack", "")).strip()
-        column = _to_int_default(row.get("Column"), 0)
-        height = _to_float(row.get("Location height"))
-        if rack and column > 0 and height is not None:
-            thresholds[rack] = (column, float(height))
-
-    return thresholds
-
-
-def _fixed_layout_slot_by_column(prepared_rows: list[dict[str, str]]) -> dict[str, float]:
-    # Preserve physical layout location height as fixed row content per column.
-    if _ignore_layout_constraints():
-        return {}
-
-    fixed_slots: dict[str, float] = {}
-    for row in prepared_rows:
-        location_type = str(row.get("Location Type", "")).strip().lower()
-        if location_type != "layout":
-            continue
-
-        rack = str(row.get("Rack", "")).strip()
-        column = str(row.get("Column", "")).strip()
-        height = _to_float(row.get("Location height"))
-        if rack and column and height is not None:
-            fixed_slots[f"{rack}{column}"] = float(height)
-
-    return fixed_slots
-
-
 def _build_generated_layout_location_rows(
     layout_id: str,
     config_id: str,
@@ -477,7 +358,6 @@ def _allocate_layout_by_column(
     target_exact_counts: dict[float, int],
     column_keys: list[str],
     style: str,
-    style_context: dict[str, object] | None = None,
 ) -> tuple[bool, dict[float, int], dict[str, float], dict[str, list[float]], str, dict[str, float]]:
     """Allocate exact slot-size demand using a feasibility-first profile generator."""
     if not target_exact_counts:
@@ -867,90 +747,6 @@ def _build_proposed_beam_units_from_layout_rows(
     return proposed_units, proposed_heights
 
 
-def _best_slot_order_for_targets(
-    slot_sizes: list[float],
-    target_heights: list[float],
-) -> list[float]:
-    # Order slots to maximize prefix-height matches against baseline beam heights.
-    if len(slot_sizes) <= 1 or not target_heights:
-        return list(slot_sizes)
-
-    rounded_slots = [int(round(value)) for value in slot_sizes]
-    unique_sizes = sorted(set(rounded_slots))
-    initial_counts = tuple(rounded_slots.count(size) for size in unique_sizes)
-    total_sum = sum(rounded_slots)
-
-    def _prefix_score(prefix_height: int) -> tuple[int, float]:
-        min_delta = min(abs(prefix_height - float(target)) for target in target_heights)
-        matched = 1 if min_delta <= BEAM_RELOCATION_TOLERANCE_CM else 0
-        return matched, min_delta
-
-    @lru_cache(maxsize=None)
-    def _solve(remaining_counts: tuple[int, ...]) -> tuple[int, float, tuple[int, ...]]:
-        remaining_total = sum(remaining_counts)
-        if remaining_total <= 0:
-            return 0, 0.0, ()
-
-        remaining_sum = sum(count * size for count, size in zip(remaining_counts, unique_sizes))
-        current_prefix = total_sum - remaining_sum
-
-        best_matches = -1
-        best_distance = float("inf")
-        best_sequence: tuple[int, ...] = ()
-
-        for idx, size in enumerate(unique_sizes):
-            count = remaining_counts[idx]
-            if count <= 0:
-                continue
-
-            next_counts = list(remaining_counts)
-            next_counts[idx] -= 1
-            next_counts_tuple = tuple(next_counts)
-
-            next_prefix = current_prefix + size
-            inc_match, inc_distance = _prefix_score(next_prefix)
-            sub_matches, sub_distance, sub_sequence = _solve(next_counts_tuple)
-
-            candidate_matches = inc_match + sub_matches
-            candidate_distance = inc_distance + sub_distance
-            candidate_sequence = (size,) + sub_sequence
-
-            if candidate_matches > best_matches:
-                best_matches = candidate_matches
-                best_distance = candidate_distance
-                best_sequence = candidate_sequence
-                continue
-
-            if candidate_matches == best_matches:
-                if candidate_distance < best_distance - 1e-9:
-                    best_distance = candidate_distance
-                    best_sequence = candidate_sequence
-                    continue
-                if abs(candidate_distance - best_distance) <= 1e-9 and candidate_sequence > best_sequence:
-                    best_sequence = candidate_sequence
-
-        return best_matches, best_distance, best_sequence
-
-    _matches, _distance, order = _solve(initial_counts)
-    return [float(value) for value in order] if order else list(slot_sizes)
-
-
-def _count_prefix_matches(slot_sequence: list[float], target_heights: list[float]) -> int:
-    """Return how many baseline beam bottoms are matched by cumulative slot heights."""
-    if not slot_sequence or not target_heights:
-        return 0
-
-    matched = 0
-    seen_targets: set[float] = set()
-    cumulative = 0.0
-    for slot_size in slot_sequence:
-        cumulative += float(slot_size)
-        for target in target_heights:
-            if abs(cumulative - float(target)) <= BEAM_RELOCATION_TOLERANCE_CM + 1e-9:
-                seen_targets.add(float(target))
-    return len(seen_targets)
-
-
 @lru_cache(maxsize=4096)
 def _exact_beam_height_sequences(
     slot_sizes: tuple[int, ...],
@@ -1047,18 +843,6 @@ def _constructive_beam_preservation_pass(
             optimized[column_key] = [float(value) for value in best_sequence[: len(optimized[column_key])]]
 
     return optimized
-
-
-def _optimize_column_slot_order_for_beam_preservation(
-    column_assignments: dict[str, list[float]],
-    segments: set[tuple[str, int, int]],
-    baseline_beam_heights: dict[str, float],
-) -> dict[str, list[float]]:
-    return _constructive_beam_preservation_pass(
-        column_assignments=column_assignments,
-        segments=segments,
-        baseline_beam_heights=baseline_beam_heights,
-    )
 
 
 def _beam_relocations(
@@ -1190,15 +974,6 @@ def _material_requirements(
     return required_beams, required_grids, additional_beams, additional_grids
 
 
-def _build_occupied_location_count_scenarios(_scenario_rows: list[dict[str, str]]) -> dict[str, int]:
-    # Shared low/base/high occupied-location demand assumptions used downstream.
-    base_count = BASE_OCCUPIED_LOCATIONS_COUNT
-    return {
-        name: int(round(base_count * factor))
-        for name, factor in OCCUPIED_LOCATION_SCENARIO_FACTORS.items()
-    }
-
-
 if getattr(sys, "frozen", False):
     # PyInstaller can place the generated app at either the bundle root or the
     # sibling _internal folder, depending on the build layout and the copied
@@ -1226,11 +1001,15 @@ ORDERED_SCRIPTS = [
     "07_Robustness_Evaluation/07_robustness_evaluation.py",
     "08_Final_Selection/08_final_selection.py",
 ]
-
-
-def _include_variant_scripts() -> bool:
-    # Variant comparison scripts are intentionally removed from the active pipeline.
-    return False
+SPACE_UTILIZATION_SCRIPT = "06_Layout_Generation_Space_Utilization/06_layout_generation_space_utilization.py"
+SPACE_UTILIZATION_STAGE7_SCRIPT = "07_Robustness_Evaluation_Space_Utilization/07_robustness_evaluation_space_utilization.py"
+SPACE_UTILIZATION_STAGE8_SCRIPT = "08_Final_Selection_Space_Utilization/08_final_selection_space_utilization.py"
+PICKING_EFFICIENCY_SCRIPT = "06_Layout_Generation_Picking_Efficiency/06_layout_generation_picking_efficiency.py"
+PICKING_EFFICIENCY_STAGE7_SCRIPT = "07_Robustness_Evaluation_Picking_Efficiency/07_robustness_evaluation_picking_efficiency.py"
+PICKING_EFFICIENCY_STAGE8_SCRIPT = "08_Final_Selection_Picking_Efficiency/08_final_selection_picking_efficiency.py"
+BEAM_PRESERVATION_SCRIPT = "06_Layout_Generation_Beam_Preservation/06_layout_generation_beam_preservation.py"
+BEAM_PRESERVATION_STAGE7_SCRIPT = "07_Robustness_Evaluation_Beam_Preservation/07_robustness_evaluation_beam_preservation.py"
+BEAM_PRESERVATION_STAGE8_SCRIPT = "08_Final_Selection_Beam_Preservation/08_final_selection_beam_preservation.py"
 
 
 def ordered_scripts() -> list[str]:
@@ -1251,10 +1030,37 @@ def _run_script(script_name: str) -> None:
     runpy.run_path(str(script_path), run_name="__main__")
 
 
+def _run_space_utilization_variant() -> bool:
+    requested = os.environ.get("PIPELINE_RUN_SPACE_UTILIZATION", "").strip().upper()
+    return requested in {"1", "TRUE", "YES", "ON"} or "--include-space-utilization" in sys.argv[1:]
+
+
+def _run_picking_efficiency_variant() -> bool:
+    requested = os.environ.get("PIPELINE_RUN_PICKING_EFFICIENCY", "").strip().upper()
+    return requested in {"1", "TRUE", "YES", "ON"} or "--include-picking-efficiency" in sys.argv[1:]
+
+
+def _run_beam_preservation_variant() -> bool:
+    requested = os.environ.get("PIPELINE_RUN_BEAM_PRESERVATION", "").strip().upper()
+    return requested in {"1", "TRUE", "YES", "ON"} or "--include-beam-preservation" in sys.argv[1:]
+
+
 def run_pipeline() -> None:
     """Run all pipeline stages in deterministic order."""
     for script_name in ordered_scripts():
         _run_script(script_name)
+        if script_name == "06_Layout_Generation/06_layout_generation.py" and _run_space_utilization_variant():
+            _run_script(SPACE_UTILIZATION_SCRIPT)
+            _run_script(SPACE_UTILIZATION_STAGE7_SCRIPT)
+            _run_script(SPACE_UTILIZATION_STAGE8_SCRIPT)
+        if script_name == "06_Layout_Generation/06_layout_generation.py" and _run_picking_efficiency_variant():
+            _run_script(PICKING_EFFICIENCY_SCRIPT)
+            _run_script(PICKING_EFFICIENCY_STAGE7_SCRIPT)
+            _run_script(PICKING_EFFICIENCY_STAGE8_SCRIPT)
+        if script_name == "06_Layout_Generation/06_layout_generation.py" and _run_beam_preservation_variant():
+            _run_script(BEAM_PRESERVATION_SCRIPT)
+            _run_script(BEAM_PRESERVATION_STAGE7_SCRIPT)
+            _run_script(BEAM_PRESERVATION_STAGE8_SCRIPT)
 
 
 if __name__ == "__main__":

@@ -70,17 +70,6 @@ def _robustness_rows() -> list[dict[str, str]]:
     return _read_csv(ROBUSTNESS_SUMMARY_FILE)
 
 
-def _is_robustness_passing(row: dict[str, str]) -> bool:
-    # Final selection should only include layouts that pass all evaluated
-    # robustness scenarios (currently Base_Count only).
-    pass_count = common._to_int_default(row.get("Scenario_Pass_Count"), 0)
-    total_count = common._to_int_default(row.get("Scenario_Total_Count"), 0)
-    robustness_value = common._to_float(row.get("Robustness")) or 0.0
-    if total_count <= 0:
-        return False
-    return pass_count >= total_count and robustness_value > 0.0
-
-
 def _feasible_stage6_layouts_for_stage8(layout_rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """Keep all feasible Stage 6 layouts eligible for Stage 8 ranking even if Stage 7 robustness is weak."""
     return [

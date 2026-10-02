@@ -32,7 +32,6 @@ class PipelineDesktopApp:
         self.current_stage = tk.StringVar(value="Idle")
         self.status_text = tk.StringVar(value="Waiting for input validation.")
         self.process: subprocess.Popen[str] | None = None
-        self._log_buffer: list[str] = []
 
         self._build_ui()
         self._validate_inputs()

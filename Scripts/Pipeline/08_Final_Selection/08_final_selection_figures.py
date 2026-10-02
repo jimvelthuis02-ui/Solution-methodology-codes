@@ -1,5 +1,4 @@
 import csv
-import math
 import os
 from collections import defaultdict
 from pathlib import Path
@@ -9,7 +8,6 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 if str(PIPELINE_ROOT) not in __import__("sys").path:
@@ -57,14 +55,6 @@ def _save(figure, path: Path) -> None:
 
 def _label(row: dict[str, str]) -> str:
     return str(row.get('Config_ID', ''))
-
-
-def _top_rows(rows: list[dict[str, str]], count: int = 12) -> list[dict[str, str]]:
-    return sorted(rows, key=lambda row: (_number(row, "Weighted_Sum_Rank", 10**9), _label(row)))[:count]
-
-
-def _initial_metrics() -> dict[str, float]:
-    return _status_metrics()["Initial"]
 
 
 def _status_metrics() -> dict[str, dict[str, float]]:
@@ -168,21 +158,6 @@ def _write_original_comparison(rows: list[dict[str, str]], output_dir: Path) -> 
     return entries
 
 
-def _write_ranking(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str]:
-    selected = _top_rows(rows)
-    selected.reverse()
-    labels = [_label(row) for row in selected]
-    scores = [_number(row, "Weighted_Sum_Score") for row in selected]
-    colors = ["#0f766e" if index == len(selected) - 1 else "#94a3b8" for index in range(len(selected))]
-    figure, axis = plt.subplots(figsize=(11, 7))
-    axis.barh(labels, scores, color=colors)
-    axis.set_title("Top weighted-sum configurations")
-    axis.set_xlabel("Weighted-sum score")
-    axis.grid(axis="x", alpha=0.25)
-    _save(figure, output_dir / "01_wsm_ranking.png")
-    return "01_wsm_ranking.png", "Top weighted-sum configurations", "Weighted_Sum_Method_Ranking.csv"
-
-
 def _write_contributions(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str]:
     by_score: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
@@ -224,87 +199,6 @@ def _write_contributions(rows: list[dict[str, str]], output_dir: Path) -> tuple[
                 }
             )
     return "02_weighted_contributions.png", "Weighted contributions for every unique score; n shows configurations sharing a score", "Weighted_Sum_Method_Ranking.csv; Weighted_Contribution_By_Unique_Score.csv"
-
-
-def _write_beam_grid_tradeoff(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str]:
-    figure, axis = plt.subplots(figsize=(10, 7))
-    for row in rows:
-        label = str(row.get("Config_ID", ""))
-        axis.scatter(_number(row, "Additional_Beams_Required_Raw"), _number(row, "Additional_Grids_Required_Raw"), label=label, alpha=0.65, s=32)
-    axis.set_title("Additional beam versus grid requirements")
-    axis.set_xlabel("Additional beams required")
-    axis.set_ylabel("Additional grids required")
-    axis.legend(fontsize=8)
-    axis.grid(alpha=0.25)
-    _save(figure, output_dir / "03_beam_grid_tradeoff.png")
-    return "03_beam_grid_tradeoff.png", "Material trade-off between additional beams and grids", "Weighted_Sum_Method_Ranking.csv"
-
-
-def _write_pareto(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str]:
-    points = [(_number(row, "Additional_Beams_Required_Raw"), _number(row, "Additional_Grids_Required_Raw"), row) for row in rows]
-    frontier = []
-    for x, y, row in points:
-        if not any(other_x <= x and other_y <= y and (other_x < x or other_y < y) for other_x, other_y, _ in points):
-            frontier.append((x, y, row))
-    frontier.sort(key=lambda point: (point[0], point[1]))
-    figure, axis = plt.subplots(figsize=(10, 7))
-    axis.scatter([point[0] for point in points], [point[1] for point in points], color="#cbd5e1", alpha=0.45, s=28, label="Other configurations")
-    axis.scatter([point[0] for point in frontier], [point[1] for point in frontier], color="#dc2626", s=42, label="Pareto-efficient")
-    if frontier:
-        axis.plot([point[0] for point in frontier], [point[1] for point in frontier], color="#dc2626", alpha=0.6)
-    axis.set_title("Pareto frontier: additional beams and grids")
-    axis.set_xlabel("Additional beams required")
-    axis.set_ylabel("Additional grids required")
-    axis.legend()
-    axis.grid(alpha=0.25)
-    _save(figure, output_dir / "04_pareto_beams_grids.png")
-    return "04_pareto_beams_grids.png", "Pareto-efficient material configurations", "Weighted_Sum_Method_Ranking.csv"
-
-
-def _write_normalized_heatmap(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str]:
-    selected = _top_rows(rows, 15)
-    values = [[_number(row, f"{metric}_Normalized") for metric, _ in METRICS] for row in selected]
-    figure, axis = plt.subplots(figsize=(15, 8))
-    cmap = LinearSegmentedColormap.from_list("wsm", ["#fee2e2", "#fef3c7", "#dcfce7"])
-    image = axis.imshow(values, aspect="auto", cmap=cmap, vmin=0, vmax=1)
-    axis.set_title("Normalized metric profile of top configurations")
-    axis.set_yticks(range(len(selected)), [_label(row) for row in selected], fontsize=8)
-    axis.set_xticks(range(len(METRICS)), [title for _, title in METRICS], rotation=45, ha="right")
-    figure.colorbar(image, ax=axis, label="Normalized score")
-    _save(figure, output_dir / "05_normalized_metric_heatmap.png")
-    return "05_normalized_metric_heatmap.png", "Normalized metric comparison for top configurations", "Weighted_Sum_Method_Ranking.csv"
-
-
-def _write_layout_heatmap(rows: list[dict[str, str]], output_dir: Path) -> tuple[str, str, str] | None:
-    if not rows:
-        return None
-    selected_id = min(rows, key=lambda row: _number(row, "Weighted_Sum_Rank", 10**9)).get("Config_ID", "")
-    locations_path = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
-    if not locations_path.exists():
-        locations_path = common.STAGE8_OUTPUT_DIR / "Final_Layout_By_Location.csv"
-    if not locations_path.exists():
-        return None
-    locations = [row for row in _read_csv(locations_path) if row.get("Config_ID") == selected_id]
-    racks = sorted({row.get("Rack", "") for row in locations})
-    matrix = [[math.nan for _ in range(22)] for _ in racks]
-    rack_index = {rack: index for index, rack in enumerate(racks)}
-    for row in locations:
-        try:
-            column = int(row.get("Column", ""))
-        except ValueError:
-            continue
-        if row.get("Usable_Location") == "YES":
-            matrix[rack_index[row.get("Rack", "")]][column] = float(row.get("Assigned_Slot_Size_cm") or 0)
-    figure, axis = plt.subplots(figsize=(13, 6))
-    image = axis.imshow(matrix, aspect="auto", cmap="viridis")
-    axis.set_title(f"Storage layout heatmap: {selected_id}")
-    axis.set_xlabel("Rack column")
-    axis.set_ylabel("Rack")
-    axis.set_xticks(range(22), [f"{value:02d}" for value in range(22)])
-    axis.set_yticks(range(len(racks)), racks)
-    figure.colorbar(image, ax=axis, label="Assigned slot size (cm)")
-    _save(figure, output_dir / "07_top_layout_heatmap.png")
-    return "07_top_layout_heatmap.png", f"Assigned slot sizes by rack and column for {selected_id}", str(locations_path.name)
 
 
 def generate_figures(ranking_file: Path, output_dir: Path) -> list[Path]:

@@ -23,7 +23,6 @@ INPUT_PREPARED = common.STAGE1_OUTPUT_DIR / "Location_Details_Prepared.csv"
 INPUT_LOCATION_BEAM_MAP = common.STAGE1_OUTPUT_DIR / "Location_Beam_Map.csv"
 INPUT_BEAM_HEIGHT_COORDS = common.STAGE1_OUTPUT_DIR / "Beam_Height_Coordinates.csv"
 LAYOUT_OUTPUT_DIR = Path(os.environ.get("PIPELINE_STAGE6_OUTPUT_DIR", common.STAGE6_OUTPUT_DIR))
-LAYOUT_DIAGNOSTICS_DIR = LAYOUT_OUTPUT_DIR
 # The pre-robust pass should keep every valid generated layout candidate rather
 # than artificially chopping the search space down to a fixed-size shortlist.
 PRE_ROBUST_LAYOUT_LIMIT = None
@@ -31,9 +30,6 @@ EXHAUSTIVE_SEARCH_CONFIG_LIMIT = 1000
 STAGE6_CONFIG_LIMIT = 180
 IMPLEMENTATION_STYLE = "implementation"
 STYLE_PRIORITY = (IMPLEMENTATION_STYLE,)
-EXHAUSTIVE_PROFILE_LIMIT = 2000
-EXHAUSTIVE_PROFILE_NO_IMPROVEMENT_STREAK = 200
-EXHAUSTIVE_PROFILE_MAX_SLOT_FAMILY_SIZE = 20
 # Stage 6 should evaluate all valid configurations with K >= 3; the earlier 3-slot smoke focus was
 # artificially restricting the search space and creating false negatives for larger valid families.
 STAGE6_CONFIG_SLOT_SIZE_FOCUS = None
@@ -43,9 +39,6 @@ DEFAULT_TARGET_CONFIGS = "CFG_001-CFG_180"
 # Larger slot families are assigned a stricter family-dominant stream and a much lower shortlist cap
 # so Stage 6 remains practical without throwing away the legal exact-fill semantics.
 PROFILE_CANDIDATE_LIMIT = 20
-PROFILE_CANDIDATE_GUARD_SIZE_COVERAGE = 2
-PROFILE_QUOTA_LIMIT = 2
-PROFILE_GENERATION_CAP_PER_CONFIG = 24
 PROFILE_GENERATION_TIMEOUT_SECONDS = 600.0
 RACK_SEARCH_TIMEOUT_SECONDS = 600.0
 FAST_FAIL_PROFILE_PROBE_SECONDS = 30.0
@@ -55,7 +48,6 @@ _LAST_STAGE6_TIMEOUTS: dict[str, bool] = {
     "rack_search": False,
 }
 _LAST_STAGE6_PROFILE_POOL: list[list[float]] = []
-_LAST_STAGE6_CONFIG_DEADLINE: float | None = None
 
 
 class Stage6ProfileGenerationTimeout(RuntimeError):
@@ -361,138 +353,6 @@ def _style_rank(style: str) -> int:
         return len(STYLE_PRIORITY)
 
 
-def _column_order_for_style(column_keys: list[str], used_by_column: dict[str, float], style: str) -> list[str]:
-    _ = style
-    return sorted(column_keys, key=lambda key: (-used_by_column.get(key, 0.0), key))
-
-
-def _residual_fill_target_profiles(
-    candidate_slot_sizes: list[float],
-    target_shares: dict[float, float],
-) -> list[dict[float, float]]:
-    """Build a small neighborhood around the base residual profile, so the
-    remaining height can be filled with nearby distribution shifts rather than
-    being rigidly tied to the original exact-count shares.
-    """
-    profiles: list[dict[float, float]] = []
-    base = {size: float(target_shares.get(size, 0.0)) for size in candidate_slot_sizes}
-    profiles.append(base)
-
-    for shift in (0.10, 0.20, 0.30):
-        for low_size, high_size in zip(candidate_slot_sizes[:-1], candidate_slot_sizes[1:]):
-            shifted = dict(base)
-            moved = max(shifted.get(low_size, 0.0) * shift, 0.0)
-            shifted[low_size] = max(shifted.get(low_size, 0.0) - moved, 0.0)
-            shifted[high_size] = shifted.get(high_size, 0.0) + moved
-            total = sum(shifted.values())
-            if total > 0.0:
-                shifted = {size: value / total for size, value in shifted.items()}
-            profiles.append(shifted)
-
-            shifted_reverse = dict(base)
-            moved_reverse = max(shifted_reverse.get(high_size, 0.0) * shift, 0.0)
-            shifted_reverse[high_size] = max(shifted_reverse.get(high_size, 0.0) - moved_reverse, 0.0)
-            shifted_reverse[low_size] = shifted_reverse.get(low_size, 0.0) + moved_reverse
-            total_reverse = sum(shifted_reverse.values())
-            if total_reverse > 0.0:
-                shifted_reverse = {size: value / total_reverse for size, value in shifted_reverse.items()}
-            profiles.append(shifted_reverse)
-
-    deduped: list[dict[float, float]] = []
-    seen: set[tuple[tuple[float, float], ...]] = set()
-    for profile in profiles:
-        key = tuple(sorted((float(size), float(value)) for size, value in profile.items()))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(profile)
-    return deduped
-
-
-def _fill_columns_for_profile(
-    column_assignments: dict[str, list[float]],
-    used_by_column: dict[str, float],
-    column_keys: list[str],
-    candidate_slot_sizes: list[float],
-    target_shares: dict[float, float],
-    style: str,
-    beam_preference: dict[str, int],
-) -> tuple[dict[str, list[float]], dict[str, float]]:
-    expanded_assignments: dict[str, list[float]] = {
-        column_key: list(column_assignments.get(column_key, []))
-        for column_key in column_keys
-    }
-    expanded_used: dict[str, float] = {
-        column_key: float(used_by_column.get(column_key, 0.0))
-        for column_key in column_keys
-    }
-
-    minimum_locations = max(int(common.MIN_LOCATIONS_PER_COLUMN), 1)
-    smallest_slot = min(candidate_slot_sizes)
-    for column_key in column_keys:
-        while len(expanded_assignments[column_key]) < minimum_locations:
-            current_count = len(expanded_assignments[column_key])
-            next_count = current_count + 1
-            allowed_after = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(next_count - 1, common.MIN_BEAMS_PER_COLUMN)
-            proposed_used = expanded_used[column_key] + smallest_slot
-            if proposed_used > allowed_after + 1e-9:
-                break
-            expanded_assignments[column_key].append(smallest_slot)
-            expanded_used[column_key] = proposed_used
-
-    added_counts: dict[float, int] = {slot_size: 0 for slot_size in candidate_slot_sizes}
-    while True:
-        placed = False
-        tried_slot_sizes: set[float] = set()
-        _ = beam_preference
-        expansion_columns = _column_order_for_style(column_keys, expanded_used, style)
-        while len(tried_slot_sizes) < len(candidate_slot_sizes):
-            remaining_sizes = [size for size in candidate_slot_sizes if size not in tried_slot_sizes]
-            total_added = sum(added_counts.values())
-            target_size = max(
-                remaining_sizes,
-                key=lambda size: (
-                    (target_shares.get(size, 0.0) * (total_added + 1)) - added_counts.get(size, 0),
-                    size,
-                ),
-            )
-
-            placed_target = False
-            for column_key in expansion_columns:
-                current_count = len(expanded_assignments[column_key])
-                next_count = current_count + 1
-                allowed_after = common.MAX_USED_HEIGHT_BASE - common.BEAM_HEIGHT * max(next_count - 1, common.MIN_BEAMS_PER_COLUMN)
-                proposed_used = expanded_used[column_key] + target_size
-                if proposed_used > allowed_after + 1e-9:
-                    continue
-
-                expanded_assignments[column_key].append(target_size)
-                expanded_used[column_key] = proposed_used
-                added_counts[target_size] = added_counts.get(target_size, 0) + 1
-                placed_target = True
-                placed = True
-                break
-
-            if placed_target:
-                break
-
-            tried_slot_sizes.add(target_size)
-
-        if not placed:
-            break
-
-    compact_assignments = {
-        column_key: slots
-        for column_key, slots in expanded_assignments.items()
-        if slots
-    }
-    compact_used = {
-        column_key: expanded_used[column_key]
-        for column_key in compact_assignments
-    }
-    return compact_assignments, compact_used
-
-
 def _profile_is_feasible_exact_fill(
     profile: Sequence[float],
     available_slot_sizes: SlotSizeSequence = None,
@@ -684,7 +544,6 @@ def _generate_feasible_rack_profiles_cached(
 
     family_set = set(configured_sizes)
     legal_values = set(_legal_topfill_values(candidate_slot_sizes or []))
-    max_size = int(round(common.MAX_REPRESENTATIVE_SLOT_SIZE_CM))
     required_map = {float(size): int(count) for size, count in (required_counts or ())}
     deadline = None if timeout_seconds is None else time.perf_counter() + float(timeout_seconds)
     seen: set[tuple[float, ...]] = set()
@@ -1053,74 +912,6 @@ def _search_profiles_by_rack_beam(
     return _build_assignments(best_choices)
 
 
-def _detect_unmet_quota_families(
-    profiles: Sequence[Sequence[float]],
-    required_counts: dict[float, int],
-) -> dict[float, int]:
-    """Return the remaining required counts for each slot family that the current legal pool misses."""
-    required_map = _as_required_counts_dict(required_counts)
-    if not required_map:
-        return {}
-
-    family_sizes = sorted(required_map, key=lambda size: int(round(float(size))), reverse=True)
-    aggregated_counts: Counter[int] = Counter()
-    for profile in profiles:
-        aggregated_counts.update(_effective_requirement_counts(profile, family_sizes))
-
-    unmet = {}
-    for size in family_sizes:
-        required = int(required_map.get(size, 0))
-        if required <= 0:
-            continue
-        covered = int(aggregated_counts.get(int(round(float(size))), 0))
-        deficit = max(required - covered, 0)
-        if deficit > 0:
-            unmet[size] = deficit
-    return unmet
-
-
-def _quota_coverage_met(
-    profiles: Sequence[Sequence[float]],
-    required_counts: dict[float, int] | None,
-) -> bool:
-    """Return True when the profile pool contains at least one representative for each required family."""
-    required_map = _as_required_counts_dict(required_counts)
-    if not required_map:
-        return True
-
-    aggregated_counts: Counter[int] = Counter()
-    for profile in profiles or []:
-        aggregated_counts.update(_effective_requirement_counts(profile, list(required_map.keys())))
-
-    for size in required_map:
-        if aggregated_counts.get(int(round(float(size))), 0) <= 0:
-            return False
-    return True
-
-
-def _generate_required_family_cover_profiles(
-    candidate_slot_sizes: SlotSizeSequence,
-    required_counts: dict[float, int] | None,
-) -> list[list[float]]:
-    """Generate a feasible profile pool that covers the required family quotas when possible."""
-    required_map = _as_required_counts_dict(required_counts)
-    if not required_map:
-        return []
-
-    profiles = _generate_feasible_rack_profiles(candidate_slot_sizes, required_counts=required_map)
-    if not profiles:
-        return []
-
-    if _quota_coverage_met(profiles, required_map):
-        return profiles
-
-    shortlist = _choose_profile_shortlist(profiles, required_map)
-    if _quota_coverage_met(shortlist, required_map):
-        return shortlist
-
-    return profiles[: max(1, min(len(profiles), 12))]
-
-
 def _choose_profile_shortlist(
     profiles: list[list[float]],
     required_counts: dict[float, int],
@@ -1358,7 +1149,6 @@ def _profile_requirement_priority(
         if int(remaining[size]) > 0
     ) else 0
 
-    full_height_bonus = 1 if _profile_is_feasible_exact_fill(profile) else 0
     distinct_coverage = sum(
         1
         for size in ordered_sizes
@@ -1736,14 +1526,6 @@ def _build_deficit_coverage_layout(
     last_assignments = assignments
     if assignments and any(columns for columns in assignments.values()):
         return assignments
-
-    if last_timeout:
-        return {column_key: [] for column_key in rack_columns}
-    if last_assignments is not None:
-        for column_key in rack_columns:
-            last_assignments.setdefault(column_key, [])
-        return last_assignments
-    return {column_key: [] for column_key in rack_columns}
 
     if last_timeout:
         return {column_key: [] for column_key in rack_columns}

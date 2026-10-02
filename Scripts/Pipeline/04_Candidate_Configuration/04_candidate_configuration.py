@@ -2,7 +2,7 @@ import csv
 from collections import defaultdict
 import sys
 from functools import lru_cache
-from itertools import combinations_with_replacement, permutations
+from itertools import combinations_with_replacement
 from pathlib import Path
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
