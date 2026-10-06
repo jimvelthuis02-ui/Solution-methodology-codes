@@ -63,10 +63,10 @@ def _parse_distribution(value: str) -> list[float]:
 
 
 def _distribution_value(config: dict[str, str]) -> str:
-    value = str(config.get("Relative Slot Size Distribution", "")).strip()
+    value = str(config.get("Relative_Slot_Size_Distribution", config.get("Relative Slot Size Distribution", ""))).strip()
     if value:
         return value
-    return str(config.get("Relative_Slot_Size_Distribution", ""))
+    return ""
 
 
 def _scenario_aware_slot_size_counts(config: dict[str, str]) -> dict[str, dict[float, int]]:
@@ -168,7 +168,7 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
         summary_rows.append(
             {
                 "Config_ID": config.get("Config_ID", ""),
-                "Method": config.get("Method", ""),
+                "Clustering_Method": config.get("Clustering_Method", config.get("Clustering Method", config.get("Method", ""))),
                 "Scenario": config.get("Scenario", ""),
                 "K": config.get("K", ""),
                 "SKU_Scenario": scenario_name,
@@ -183,7 +183,7 @@ def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, i
             count_rows.append(
                 {
                     "Config_ID": config.get("Config_ID", ""),
-                    "Method": config.get("Method", ""),
+                    "Clustering_Method": config.get("Clustering_Method", config.get("Clustering Method", config.get("Method", ""))),
                     "Scenario": config.get("Scenario", ""),
                     "K": config.get("K", ""),
                     "SKU_Scenario": scenario_name,
@@ -220,7 +220,7 @@ def build_capacity_determination() -> tuple[list[dict[str, str]], list[dict[str,
         SUMMARY_OUTPUT_FILE,
         [
             "Config_ID",
-            "Method",
+            "Clustering_Method",
             "Scenario",
             "K",
             "SKU_Scenario",
@@ -237,7 +237,7 @@ def build_capacity_determination() -> tuple[list[dict[str, str]], list[dict[str,
         COUNT_OUTPUT_FILE,
         [
             "Config_ID",
-            "Method",
+            "Clustering_Method",
             "Scenario",
             "K",
             "SKU_Scenario",

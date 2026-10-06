@@ -6,13 +6,21 @@ rack-profile assignment objective with maximum total slot space.
 
 import csv
 import importlib.util
+import os
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
+from heuristic_output_utils import suffix_output_tree
+
 BASELINE_SCRIPT = PIPELINE_ROOT / "06_Layout_Generation" / "06_layout_generation.py"
+MAX_REFINEMENT_SWAPS_PER_RACK = 3
 
 
 def _load_baseline_module() -> Any:
@@ -24,6 +32,97 @@ def _load_baseline_module() -> Any:
     return module
 
 
+def _cached_feasible_assignment(
+    stage6: Any,
+    config_id: str,
+    rack_columns: list[str],
+    required: dict[float, int],
+    slot_sizes: object,
+) -> dict[str, list[float]] | None:
+    output_dir = stage6.common.STAGE6_OUTPUT_DIR
+    summary_path = output_dir / "Candidate_Layout_Summary.csv"
+    locations_path = output_dir / "Candidate_Layout_By_Location.csv"
+    if not summary_path.exists() or not locations_path.exists():
+        return None
+
+    summaries = stage6._read_csv(summary_path)
+    matching = next(
+        (
+            row for row in summaries
+            if str(row.get("Config_ID", "")).strip() == config_id
+            and str(row.get("Layout_Feasible", "")).strip().upper() == "YES"
+        ),
+        None,
+    )
+    if matching is None:
+        return None
+
+    assignments: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    for row in stage6._read_csv(locations_path):
+        if str(row.get("Config_ID", "")).strip() != config_id:
+            continue
+        if str(row.get("Usable_Location", "YES")).strip().upper() == "NO":
+            continue
+        try:
+            row_index = int(str(row.get("Row", "0")).strip())
+            slot_size = float(str(row.get("Assigned_Slot_Size_cm", "")).strip())
+            column_index = str(row.get("Column", "")).strip()
+        except ValueError:
+            continue
+        rack = str(row.get("Rack", "")).strip()
+        if rack and column_index and slot_size > 0:
+            assignments[f"{rack}{int(column_index):02d}"].append((row_index, slot_size))
+
+    ordered_assignments = {
+        column: [size for _row, size in sorted(values)]
+        for column, values in assignments.items()
+        if values
+    }
+    if not ordered_assignments or not stage6._layout_assignments_are_feasible(
+        ordered_assignments,
+        list(ordered_assignments),
+        float(min(slot_sizes or required)),
+        slot_sizes,
+        minimum_required_counts=required,
+        enforce_minimum_total_locations=True,
+    ):
+        return None
+
+    return ordered_assignments
+
+
+def _cached_profiles(stage6: Any, config_id: str, slot_sizes: object) -> list[list[float]]:
+    profiles_path = stage6.common.STAGE6_OUTPUT_DIR / "Generated_Profiles_By_Config.csv"
+    if not profiles_path.exists():
+        return []
+    profiles: list[list[float]] = []
+    seen: set[tuple[float, ...]] = set()
+    for row in stage6._read_csv(profiles_path):
+        if str(row.get("Config_ID", "")).strip() != config_id:
+            continue
+        if str(row.get("Status", "GENERATED")).strip().upper() != "GENERATED":
+            continue
+        try:
+            profile = [float(value) for value in str(row.get("Profile_Values", "")).split(",") if value.strip()]
+        except ValueError:
+            continue
+        key = tuple(profile)
+        if key in seen or not stage6._profile_is_feasible_exact_fill(profile, slot_sizes):
+            continue
+        seen.add(key)
+        profiles.append(profile)
+    return profiles
+
+
+def _counted_space(stage6: Any, profile: list[float], slot_sizes: object) -> float:
+    # Results count a topfill as its slot-size family, so score space the same way.
+    total = 0.0
+    for value in profile:
+        family = stage6._effective_requirement_slot_size(value, profile, slot_sizes)
+        total += float(family if family is not None else value)
+    return total
+
+
 def _space_maximizing_assignment(
     rack_columns: list[str],
     required_counts: dict[float, int],
@@ -32,124 +131,97 @@ def _space_maximizing_assignment(
     config_id: str | None = None,
 ) -> dict[str, list[float]]:
     """Assign one legal profile per rack while maximizing total slot space."""
-    del config_id
     stage6 = _space_maximizing_assignment.stage6
     if not rack_columns:
         return {}
 
     required = {float(size): int(count) for size, count in required_counts.items()}
     generation_start = time.perf_counter()
-    profiles = stage6._generate_feasible_rack_profiles(
-        config_slot_sizes or list(required),
-        timeout_seconds=stage6.PROFILE_GENERATION_TIMEOUT_SECONDS,
-        config_deadline=config_deadline,
-        required_counts=None,
-    )
-    stage6._LAST_STAGE6_PROFILE_POOL = [list(profile) for profile in profiles]
-    stage6._LAST_STAGE6_STEP_TIMINGS["profile_generation"] = time.perf_counter() - generation_start
-    stage6._LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
-    stage6._LAST_STAGE6_STEP_TIMINGS["rack_search"] = 0.0
+    assignments = _cached_feasible_assignment(stage6, str(config_id or "").strip(), rack_columns, required, config_slot_sizes)
+    profiles = _cached_profiles(stage6, str(config_id or "").strip(), config_slot_sizes)
+    if assignments is None or not profiles:
+        assignments = _space_maximizing_assignment.baseline_builder(
+            rack_columns,
+            required,
+            config_slot_sizes,
+            config_deadline=config_deadline,
+            config_id=config_id,
+        )
+        profiles = [list(profile) for profile in stage6._LAST_STAGE6_PROFILE_POOL]
+    if not assignments or not profiles:
+        return assignments
 
-    if not profiles:
-        return {column_key: [] for column_key in rack_columns}
+    sizes = sorted(required)
+    best_profile_by_effect: dict[tuple[int, ...], tuple[list[float], float, dict[float, int]]] = {}
+    for profile in profiles:
+        raw_effect = stage6._effective_requirement_counts(profile, config_slot_sizes)
+        effect = tuple(int(raw_effect.get(int(size), 0)) for size in sizes)
+        effect_by_size = {size: int(raw_effect.get(int(size), 0)) for size in sizes}
+        profile_space = _counted_space(stage6, profile, config_slot_sizes)
+        previous = best_profile_by_effect.get(effect)
+        if previous is None or profile_space > previous[1]:
+            best_profile_by_effect[effect] = (list(profile), profile_space, effect_by_size)
+    profile_options = list(best_profile_by_effect.values())
 
     rack_to_columns: dict[str, list[str]] = defaultdict(list)
     for column_key in rack_columns:
         rack_to_columns[stage6._rack_from_column_key(column_key)].append(column_key)
     rack_order = sorted(rack_to_columns)
-    ordered_sizes = sorted(required, reverse=True)
+    assigned_counts = {size: 0 for size in sizes}
+    current_profiles: dict[str, list[float]] = {}
+    for rack in rack_order:
+        columns = rack_to_columns[rack]
+        profile = list(assignments[columns[0]]) if columns else []
+        current_profiles[rack] = profile
+        effect = stage6._effective_requirement_counts(profile, config_slot_sizes)
+        for size in sizes:
+            assigned_counts[size] += int(effect.get(int(size), 0)) * len(columns)
 
-    # Keep the highest-space representative when profiles have the same quota effect.
-    profile_options: list[tuple[list[float], tuple[int, ...], float]] = []
-    best_by_effect: dict[tuple[int, ...], tuple[list[float], float]] = {}
-    for profile in profiles:
-        effective_counts = stage6._effective_requirement_counts(profile, config_slot_sizes)
-        effect = tuple(int(effective_counts.get(int(size), 0)) for size in ordered_sizes)
-        slot_space = sum(float(value) for value in profile)
-        previous = best_by_effect.get(effect)
-        if previous is None or slot_space > previous[1]:
-            best_by_effect[effect] = (list(profile), slot_space)
-    for effect, (profile, slot_space) in best_by_effect.items():
-        profile_options.append((profile, effect, slot_space))
+    if any(assigned_counts[size] < required[size] for size in sizes):
+        stage6._LAST_STAGE6_STEP_TIMINGS["rack_search"] = time.perf_counter() - generation_start
+        return assignments
 
-    if not profile_options:
-        return {column_key: [] for column_key in rack_columns}
-
-    # State value: accumulated slot space and the selected profile indexes.
-    states: dict[tuple[int, ...], tuple[float, tuple[int, ...]]] = {
-        tuple(int(required[size]) for size in ordered_sizes): (0.0, ())
-    }
-    beam_limit = 20000
-
-    for rack_index, rack in enumerate(rack_order):
+    for _ in range(max(len(rack_order) * MAX_REFINEMENT_SWAPS_PER_RACK, 1)):
         if config_deadline is not None and time.perf_counter() >= config_deadline:
-            raise stage6.Stage6RackSearchTimeout("space-utilization rack search exceeded the config deadline")
-
-        rack_width = len(rack_to_columns[rack])
-        next_states: dict[tuple[int, ...], tuple[float, tuple[int, ...]]] = {}
-        for remaining, (space, choices) in states.items():
-            for profile_index, (_profile, effect, profile_space) in enumerate(profile_options):
-                next_remaining = tuple(
-                    max(remaining[index] - effect[index] * rack_width, 0)
-                    for index in range(len(ordered_sizes))
-                )
-                next_space = space + profile_space * rack_width
-                next_choices = (*choices, profile_index)
-                previous = next_states.get(next_remaining)
-                if previous is None or next_space > previous[0]:
-                    next_states[next_remaining] = (next_space, next_choices)
-
-        if not next_states:
+            break
+        best_swap: tuple[float, str, list[float], dict[int, int]] | None = None
+        for rack in rack_order:
+            width = len(rack_to_columns[rack])
+            current_profile = current_profiles[rack]
+            current_effect_raw = stage6._effective_requirement_counts(current_profile, config_slot_sizes)
+            current_effect = {size: int(current_effect_raw.get(int(size), 0)) for size in sizes}
+            current_space = _counted_space(stage6, current_profile, config_slot_sizes)
+            for candidate, candidate_space, candidate_effect in profile_options:
+                gain = (candidate_space - current_space) * width
+                if gain <= 1e-9:
+                    continue
+                if any(
+                    assigned_counts[size] + (candidate_effect[size] - current_effect[size]) * width < required[size]
+                    for size in sizes
+                ):
+                    continue
+                if best_swap is None or gain > best_swap[0]:
+                    best_swap = (gain, rack, candidate, candidate_effect)
+        if best_swap is None:
             break
 
-        # Keep all complete states when possible; otherwise retain the best quota/space states.
-        complete = [
-            (remaining, value)
-            for remaining, value in next_states.items()
-            if all(value_left <= 0 for value_left in remaining)
-        ]
-        candidates = complete if complete else list(next_states.items())
-        if len(candidates) > beam_limit:
-            candidates.sort(
-                key=lambda item: (
-                    sum(value_left <= 0 for value_left in item[0]),
-                    -sum(max(value_left, 0) for value_left in item[0]),
-                    item[1][0],
-                ),
-                reverse=True,
-            )
-            candidates = candidates[:beam_limit]
-        states = dict(candidates)
-
-    complete_states = [
-        (remaining, value)
-        for remaining, value in states.items()
-        if all(value_left <= 0 for value_left in remaining)
-    ]
-    if complete_states:
-        _remaining, (_space, choices) = max(complete_states, key=lambda item: item[1][0])
-    else:
-        _remaining, (_space, choices) = max(
-            states.items(),
-            key=lambda item: (
-                sum(value_left <= 0 for value_left in item[0]),
-                -sum(max(value_left, 0) for value_left in item[0]),
-                item[1][0],
-            ),
-        )
-
-    assignments: dict[str, list[float]] = {}
-    for rack_index, rack in enumerate(rack_order):
-        profile_index = choices[rack_index] if rack_index < len(choices) else 0
-        profile = profile_options[profile_index][0]
-        for column_key in sorted(rack_to_columns[rack]):
-            assignments[column_key] = list(profile)
+        _gain, rack, candidate, candidate_effect = best_swap
+        current_profile = current_profiles[rack]
+        current_raw = stage6._effective_requirement_counts(current_profile, config_slot_sizes)
+        current_effect = {size: int(current_raw.get(int(size), 0)) for size in sizes}
+        width = len(rack_to_columns[rack])
+        for size in sizes:
+            assigned_counts[size] += (candidate_effect[size] - current_effect[size]) * width
+        current_profiles[rack] = candidate
+        for column_key in rack_to_columns[rack]:
+            assignments[column_key] = list(candidate)
 
     stage6._LAST_STAGE6_STEP_TIMINGS["rack_search"] = time.perf_counter() - generation_start
     return assignments
 
 
 _space_maximizing_assignment.stage6 = None
+_space_maximizing_assignment.baseline_builder = None
 
 
 def _parse_size_counts(value: str) -> dict[int, int]:
@@ -206,16 +278,23 @@ def main() -> None:
     stage6 = _load_baseline_module()
     _space_maximizing_assignment.stage6 = stage6
 
-    output_dir = stage6.common.OUTPUT_ROOT / "06_Layout_Generation_Space_Utilization"
+    output_dir = Path(
+        os.environ.get(
+            "PIPELINE_SPACE_UTILIZATION_OUTPUT_DIR",
+            stage6.common.OUTPUT_ROOT / "06_Layout_Generation_Space_Utilization",
+        )
+    ).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     stage6.LAYOUT_OUTPUT_DIR = output_dir
     stage6.IMPLEMENTATION_STYLE = "space_utilization"
     stage6.STYLE_PRIORITY = ("space_utilization",)
+    _space_maximizing_assignment.baseline_builder = stage6._build_deficit_coverage_layout
     stage6._build_deficit_coverage_layout = _space_maximizing_assignment
 
     print(f"[Stage 6 Space] output directory: {output_dir}")
     layout_rows, column_rows, location_rows = stage6.build_layout_generation()
     _add_space_metrics(output_dir)
+    suffix_output_tree(output_dir, "SU")
     print(
         "[Stage 6 Space] complete. "
         f"Layouts: {len(layout_rows)}, columns: {len(column_rows)}, locations: {len(location_rows)}."

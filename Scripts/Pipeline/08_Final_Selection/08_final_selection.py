@@ -8,6 +8,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
+from combine_heuristic_outputs import combine_stage
 
 
 def _load_figures_module():
@@ -685,3 +686,4 @@ if __name__ == "__main__":
         "Decision-support candidate ranking complete. "
         f"Candidate rows: {len(candidate_rows)}."
     )
+    combine_stage(8)

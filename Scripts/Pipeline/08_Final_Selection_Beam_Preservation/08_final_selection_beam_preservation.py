@@ -9,6 +9,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
+from heuristic_output_utils import suffix_output_tree, suffixed_path
 
 BASELINE_SCRIPT = PIPELINE_ROOT / "08_Final_Selection" / "08_final_selection.py"
 VARIANT_STAGE6_OUTPUT_DIR = common.OUTPUT_ROOT / "06_Layout_Generation_Beam_Preservation"
@@ -35,7 +36,13 @@ def main() -> None:
         common.STAGE8_OUTPUT_DIR = VARIANT_STAGE8_OUTPUT_DIR
         VARIANT_STAGE8_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         stage8 = _load_baseline_module()
+        stage8.LAYOUT_SUMMARY_FILE = suffixed_path(VARIANT_STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv", "BP")
+        stage8.LAYOUT_BY_COLUMN_FILE = suffixed_path(VARIANT_STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack_Column.csv", "BP")
+        stage8.LAYOUT_BY_LOCATION_FILE = suffixed_path(VARIANT_STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Location.csv", "BP")
+        stage8.LAYOUT_BY_RACK_FILE = suffixed_path(VARIANT_STAGE6_OUTPUT_DIR / "Candidate_Layout_By_Rack.csv", "BP")
+        stage8.ROBUSTNESS_SUMMARY_FILE = suffixed_path(VARIANT_STAGE7_OUTPUT_DIR / "Candidate_Layout_Robustness_Summary.csv", "BP")
         rows = stage8.build_final_selection()
+        suffix_output_tree(VARIANT_STAGE8_OUTPUT_DIR, "BP")
     finally:
         common.STAGE6_OUTPUT_DIR = original_stage6_output_dir
         common.STAGE7_OUTPUT_DIR = original_stage7_output_dir

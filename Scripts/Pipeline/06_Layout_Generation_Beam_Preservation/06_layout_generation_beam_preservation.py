@@ -1,16 +1,46 @@
 """Stage 6 beam-preservation layout variant."""
 
 import csv
+import heapq
 import importlib.util
 import itertools
+import os
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
+from heuristic_output_utils import suffix_output_tree
+
 BASELINE_SCRIPT = PIPELINE_ROOT / "06_Layout_Generation" / "06_layout_generation.py"
 PROFILE_ORDERING_LIMIT = 10000
+MAX_SEARCH_STATES = 256
+MAX_PROFILE_OPTIONS = 256
+
+
+def _state_rank(
+    item: tuple[tuple[int, ...], tuple[tuple[int, int, int], tuple[int, ...]]],
+) -> tuple[object, ...]:
+    remaining, (score, _choices) = item
+    return (
+        sum(value <= 0 for value in remaining),
+        -sum(max(value, 0) for value in remaining),
+        tuple(-value for value in remaining),
+        score,
+    )
+
+
+def _prune_states(
+    states: dict[tuple[int, ...], tuple[tuple[int, int, int], tuple[int, ...]]],
+) -> dict[tuple[int, ...], tuple[tuple[int, int, int], tuple[int, ...]]]:
+    if len(states) <= MAX_SEARCH_STATES:
+        return states
+    return dict(heapq.nlargest(MAX_SEARCH_STATES, states.items(), key=_state_rank))
 
 
 def _load_baseline_module() -> Any:
@@ -55,11 +85,15 @@ def _ordered_profiles(slot_sizes: list[float], stage6: Any, deadline: float | No
     max_lower_rows = max(1, min(18, int(stage6.common.MAX_USED_HEIGHT_BASE // (min(family) + stage6.common.BEAM_HEIGHT))))
     profiles: list[list[float]] = []
     seen: set[tuple[int, ...]] = set()
+    combination_checks = 0
 
     for lower_count in range(1, max_lower_rows + 1):
         if deadline is not None and time.perf_counter() >= deadline:
             raise stage6.Stage6ProfileGenerationTimeout("beam profile generation exceeded the config deadline")
         for lower_combo in itertools.combinations_with_replacement(family, lower_count):
+            combination_checks += 1
+            if combination_checks % 256 == 0 and deadline is not None and time.perf_counter() >= deadline:
+                raise stage6.Stage6ProfileGenerationTimeout("beam profile generation exceeded the config deadline")
             lower_stack = tuple(sorted(lower_combo, reverse=True))
             support_height = sum(lower_stack) + (len(lower_stack) - 1) * stage6.common.BEAM_HEIGHT
             if support_height < 504.0 - 1e-9:
@@ -145,7 +179,6 @@ def _beam_assignment(
     config_deadline: float | None = None,
     config_id: str | None = None,
 ) -> dict[str, list[float]]:
-    del config_id
     stage6 = _beam_assignment.stage6
     if not rack_columns:
         return {}
@@ -157,7 +190,13 @@ def _beam_assignment(
     stage6._LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
     stage6._LAST_STAGE6_STEP_TIMINGS["rack_search"] = 0.0
     if not profiles:
-        return {column_key: [] for column_key in rack_columns}
+        return _beam_assignment.baseline_builder(
+            rack_columns,
+            required_counts,
+            config_slot_sizes,
+            config_deadline=config_deadline,
+            config_id=config_id,
+        )
 
     required = {float(size): int(count) for size, count in required_counts.items()}
     ordered_sizes = sorted(required, reverse=True)
@@ -176,10 +215,20 @@ def _beam_assignment(
             score = _beam_profile_score(profile, current_by_rack.get(rack, []), stage6)
             previous = best_options.get(effect)
             if previous is None or score > previous[1]:
-                best_options[effect] = (list(profile), score)
+                best_options[effect] = (profile, score)
+        ranked_options = sorted(
+            best_options.items(),
+            key=lambda item: (
+                sum(min(item[0][index], int(required[size])) > 0 for index, size in enumerate(ordered_sizes)),
+                sum(min(item[0][index], int(required[size])) for index, size in enumerate(ordered_sizes)),
+                sum(min(item[0][index], int(required[size])) * size for index, size in enumerate(ordered_sizes)),
+                item[1][1],
+            ),
+            reverse=True,
+        )[:MAX_PROFILE_OPTIONS]
         options_by_rack[rack] = [
             (profile, effect, score)
-            for effect, (profile, score) in best_options.items()
+            for effect, (profile, score) in ranked_options
         ]
 
     states: dict[tuple[int, ...], tuple[tuple[int, int, int], tuple[int, ...]]] = {
@@ -200,20 +249,11 @@ def _beam_assignment(
                 previous = next_states.get(next_remaining)
                 if previous is None or next_score > previous[0]:
                     next_states[next_remaining] = (next_score, (*choices, profile_index))
-        complete = [item for item in next_states.items() if all(value <= 0 for value in item[0])]
-        candidates = complete or list(next_states.items())
-        candidates.sort(
-            key=lambda item: (
-                sum(value <= 0 for value in item[0]),
-                -sum(max(value, 0) for value in item[0]),
-                item[1][0],
-            ),
-            reverse=True,
-        )
-        states = dict(candidates[:20000])
+                if len(next_states) > MAX_SEARCH_STATES * 2:
+                    next_states = _prune_states(next_states)
+        states = _prune_states(next_states)
 
-    complete = [item for item in states.items() if all(value <= 0 for value in item[0])]
-    chosen = max(complete or list(states.items()), key=lambda item: item[1][0])
+    chosen = max(states.items(), key=_state_rank)
     choices = chosen[1][1]
     assignments: dict[str, list[float]] = {}
     for rack_index, rack in enumerate(rack_order):
@@ -222,22 +262,45 @@ def _beam_assignment(
         for column_key in sorted(rack_to_columns[rack]):
             assignments[column_key] = list(profile)
     stage6._LAST_STAGE6_STEP_TIMINGS["rack_search"] = time.perf_counter() - generation_start
+    if not stage6._layout_assignments_are_feasible(
+        assignments,
+        list(assignments),
+        float(min(slot_sizes)),
+        slot_sizes,
+        minimum_required_counts=required,
+        enforce_minimum_total_locations=True,
+    ):
+        return _beam_assignment.baseline_builder(
+            rack_columns,
+            required,
+            config_slot_sizes,
+            config_deadline=config_deadline,
+            config_id=config_id,
+        )
     return assignments
 
 
 _beam_assignment.stage6 = None
+_beam_assignment.baseline_builder = None
 
 
 def main() -> None:
     stage6 = _load_baseline_module()
     _beam_assignment.stage6 = stage6
-    output_dir = stage6.common.OUTPUT_ROOT / "06_Layout_Generation_Beam_Preservation"
+    output_dir = Path(
+        os.environ.get(
+            "PIPELINE_BEAM_PRESERVATION_OUTPUT_DIR",
+            stage6.common.OUTPUT_ROOT / "06_Layout_Generation_Beam_Preservation",
+        )
+    ).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     stage6.LAYOUT_OUTPUT_DIR = output_dir
     stage6.IMPLEMENTATION_STYLE = "beam_preservation"
     stage6.STYLE_PRIORITY = ("beam_preservation",)
+    _beam_assignment.baseline_builder = stage6._build_deficit_coverage_layout
     stage6._build_deficit_coverage_layout = _beam_assignment
     layout_rows, column_rows, location_rows = stage6.build_layout_generation()
+    suffix_output_tree(output_dir, "BP")
     print(
         "[Stage 6 Beam] complete. "
         f"Layouts: {len(layout_rows)}, columns: {len(column_rows)}, locations: {len(location_rows)}."

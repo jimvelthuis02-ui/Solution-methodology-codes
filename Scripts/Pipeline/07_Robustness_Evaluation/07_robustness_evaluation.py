@@ -9,6 +9,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
+from combine_heuristic_outputs import combine_stage
 
 
 LAYOUT_SUMMARY_FILE = common.STAGE6_OUTPUT_DIR / "Candidate_Layout_Summary.csv"
@@ -402,3 +403,4 @@ if __name__ == "__main__":
         "Robustness evaluation complete. "
         f"Summary rows: {len(robustness_rows)}."
     )
+    combine_stage(7)

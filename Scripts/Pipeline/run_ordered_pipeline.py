@@ -1062,6 +1062,13 @@ def run_pipeline() -> None:
             _run_script(BEAM_PRESERVATION_STAGE7_SCRIPT)
             _run_script(BEAM_PRESERVATION_STAGE8_SCRIPT)
 
+    if _run_space_utilization_variant() or _run_picking_efficiency_variant() or _run_beam_preservation_variant():
+        from combine_heuristic_outputs import combine_stage
+
+        # Baseline stages combine before the heuristics finish, so refresh once everything has run.
+        for stage in (6, 7, 8):
+            combine_stage(stage)
+
 
 if __name__ == "__main__":
     # Pipeline entrypoint for full ordered execution.

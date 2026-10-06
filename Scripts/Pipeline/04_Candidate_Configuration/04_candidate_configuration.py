@@ -131,7 +131,7 @@ def build_candidate_configuration() -> Path:
     grouped: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
 
     for row in stage3_rows:
-        method = str(row.get("Method", "")).strip()
+        method = str(row.get("Clustering_Method", row.get("Clustering Method", row.get("Method", "")))).strip()
         scenario = str(row.get("Scenario", "")).strip()
         k = str(row.get("K", "")).strip()
         if method and scenario and k:
@@ -160,12 +160,12 @@ def build_candidate_configuration() -> Path:
         output_rows.append(
             {
                 "Config_ID": f"CFG_{index:03d}",
-                "Method": method,
+                "Clustering_Method": method,
                 "Scenario": scenario,
                 "K": k,
                 "Slot_Sizes": common._encode_excel_text(",".join(f"{size:.0f}" for size in slot_sizes)),
-                "Relative Slot Size Distribution": common._encode_excel_text(",".join(f"{value:.4f}" for value in distribution)),
-                "Source Sample": f"{method}|{scenario}|K={k}",
+                "Relative_Slot_Size_Distribution": common._encode_excel_text(",".join(f"{value:.4f}" for value in distribution)),
+                "Source_Sample": f"{method}|{scenario}|K={k}",
             }
         )
 
@@ -173,12 +173,12 @@ def build_candidate_configuration() -> Path:
         OUTPUT_FILE,
         [
             "Config_ID",
-            "Method",
+            "Clustering_Method",
             "Scenario",
             "K",
             "Slot_Sizes",
-            "Relative Slot Size Distribution",
-            "Source Sample",
+            "Relative_Slot_Size_Distribution",
+            "Source_Sample",
         ],
         output_rows,
     )

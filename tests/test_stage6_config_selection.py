@@ -194,9 +194,9 @@ def test_slot_distribution_rolls_topfills_into_lower_configured_family():
         "Baseline",
     )
     assert empty_rows == [
-        {"Method": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "69", "Occupied": "2", "Total_Locations_In_Layout": "4", "Empty": "2"},
-        {"Method": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "124", "Occupied": "1", "Total_Locations_In_Layout": "1", "Empty": "0"},
-        {"Method": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "239", "Occupied": "1", "Total_Locations_In_Layout": "1", "Empty": "0"},
+        {"Heuristic": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "69", "Occupied": "2", "Total_Locations_In_Layout": "4", "Empty": "2"},
+        {"Heuristic": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "124", "Occupied": "1", "Total_Locations_In_Layout": "1", "Empty": "0"},
+        {"Heuristic": "Baseline", "Config_ID": "CFG_003", "Slot_Size_cm": "239", "Occupied": "1", "Total_Locations_In_Layout": "1", "Empty": "0"},
     ]
 
 

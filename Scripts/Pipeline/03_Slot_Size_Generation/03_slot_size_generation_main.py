@@ -227,7 +227,7 @@ def _summary_rows_from_clusters(
         rows.append(
             {
                 "Scenario": scenario_label,
-                "Method": method_name,
+                "Clustering_Method": method_name,
                 "K": str(k),
                 "Cluster ID": str(cluster_id),
                 "Cluster Count": str(cluster_count),
@@ -270,7 +270,7 @@ def _generate_quantile_summary_rows(rows: list[dict[str, str]]) -> list[dict[str
                 merged_rows.append(
                     {
                         "Scenario": scenario_label,
-                        "Method": "quantile_binning",
+                        "Clustering_Method": "quantile_binning",
                         "K": str(k),
                         "Cluster ID": str(index + 1),
                         "Cluster Count": str(cluster_count),
@@ -347,7 +347,7 @@ def run_slot_size_generation() -> Path:
 
     fieldnames = [
         "Scenario",
-        "Method",
+        "Clustering_Method",
         "K",
         "Cluster ID",
         "Cluster Count",

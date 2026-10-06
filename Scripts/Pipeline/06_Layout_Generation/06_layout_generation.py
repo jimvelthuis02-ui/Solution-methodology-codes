@@ -15,6 +15,7 @@ if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
 
 import run_ordered_pipeline as common
+from combine_heuristic_outputs import combine_stage
 
 
 INPUT_CONFIG_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
@@ -1665,7 +1666,7 @@ def _empty_locations_rows_by_slot_size(
             empty_count = max(total_count - occupied_count, 0)
             rows.append(
                 {
-                    "Method": method_label,
+                    "Heuristic": method_label,
                     "Config_ID": config_id,
                     "Slot_Size_cm": str(size),
                     "Occupied": str(occupied_count),
@@ -2873,7 +2874,7 @@ def build_layout_generation() -> tuple[list[dict[str, str]], list[dict[str, str]
     _write_csv_clean_with_fallback(
         LAYOUT_OUTPUT_DIR / "Empty_Locations_By_Slot_Size.csv",
         [
-            "Method",
+            "Heuristic",
             "Config_ID",
             "Slot_Size_cm",
             "Occupied",
@@ -2894,3 +2895,4 @@ if __name__ == "__main__":
         "[Stage 6] complete. "
         f"Layouts: {len(layout_rows)}, columns: {len(column_rows)}, locations: {len(location_rows)}."
     )
+    combine_stage(6)
