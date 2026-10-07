@@ -169,16 +169,17 @@ def _beam_profile_score(profile: list[float], current_heights: list[float], stag
             available.pop(matching_index)
     relocations = max(len(proposed), len(current_heights)) - matches
     additions = max(len(proposed) - len(current_heights), 0)
-    return matches, -relocations, -additions
+    return -relocations, matches, -additions
 
 
-def _beam_assignment(
+def _beam_search_assignment(
     rack_columns: list[str],
     required_counts: dict[float, int],
     config_slot_sizes: object,
     config_deadline: float | None = None,
     config_id: str | None = None,
-) -> dict[str, list[float]]:
+) -> dict[str, list[float]] | None:
+    """Beam-aware rack search; returns None when it cannot produce its own feasible layout."""
     stage6 = _beam_assignment.stage6
     if not rack_columns:
         return {}
@@ -190,13 +191,7 @@ def _beam_assignment(
     stage6._LAST_STAGE6_STEP_TIMINGS["profile_shortlist"] = 0.0
     stage6._LAST_STAGE6_STEP_TIMINGS["rack_search"] = 0.0
     if not profiles:
-        return _beam_assignment.baseline_builder(
-            rack_columns,
-            required_counts,
-            config_slot_sizes,
-            config_deadline=config_deadline,
-            config_id=config_id,
-        )
+        return None
 
     required = {float(size): int(count) for size, count in required_counts.items()}
     ordered_sizes = sorted(required, reverse=True)
@@ -222,7 +217,7 @@ def _beam_assignment(
                 sum(min(item[0][index], int(required[size])) > 0 for index, size in enumerate(ordered_sizes)),
                 sum(min(item[0][index], int(required[size])) for index, size in enumerate(ordered_sizes)),
                 sum(min(item[0][index], int(required[size])) * size for index, size in enumerate(ordered_sizes)),
-                item[1][1],
+                item[1][1][0],
             ),
             reverse=True,
         )[:MAX_PROFILE_OPTIONS]
@@ -270,14 +265,82 @@ def _beam_assignment(
         minimum_required_counts=required,
         enforce_minimum_total_locations=True,
     ):
-        return _beam_assignment.baseline_builder(
-            rack_columns,
-            required,
-            config_slot_sizes,
-            config_deadline=config_deadline,
-            config_id=config_id,
-        )
+        return None
     return assignments
+
+
+_RELOCATION_CONTEXT: dict[str, Any] = {}
+
+
+def _relocation_total(assignments: dict[str, list[float]], config_id: str, stage6: Any) -> int:
+    """Beam relocations of a layout, computed exactly as the Stage 6 summary reports them."""
+    common = stage6.common
+    if not _RELOCATION_CONTEXT:
+        beam_map_rows = stage6._read_csv(stage6.INPUT_LOCATION_BEAM_MAP)
+        units, segments, unit_heights = common._build_current_beam_units_and_segments(
+            beam_map_rows,
+            stage6._read_csv(stage6.INPUT_PREPARED),
+            stage6._read_csv(stage6.INPUT_BEAM_HEIGHT_COORDS),
+        )
+        _RELOCATION_CONTEXT.update(
+            units=units,
+            segments=segments,
+            unit_heights=unit_heights,
+            units_by_column=common._beam_units_by_column(beam_map_rows),
+        )
+    context = _RELOCATION_CONTEXT
+    location_rows = common._build_generated_layout_location_rows(
+        "LAY_BEAM_EVAL",
+        config_id,
+        stage6.IMPLEMENTATION_STYLE,
+        assignments,
+        segments=context["segments"],
+        layout_thresholds_by_rack={},
+    )
+    proposed_units, proposed_heights = common._build_proposed_beam_units_from_layout_rows(location_rows, context["segments"])
+    total, _by_column, _removed, _added = common._beam_relocations(
+        context["units"],
+        proposed_units,
+        context["unit_heights"],
+        proposed_heights,
+        current_units_by_column=context["units_by_column"],
+        proposed_units_by_column=common._beam_units_by_column(location_rows),
+    )
+    return int(total)
+
+
+def _beam_assignment(
+    rack_columns: list[str],
+    required_counts: dict[float, int],
+    config_slot_sizes: object,
+    config_deadline: float | None = None,
+    config_id: str | None = None,
+) -> dict[str, list[float]]:
+    """Return the beam-aware layout only when it relocates fewer beams than the baseline layout."""
+    stage6 = _beam_assignment.stage6
+    baseline = _beam_assignment.baseline_builder(
+        rack_columns,
+        required_counts,
+        config_slot_sizes,
+        config_deadline=config_deadline,
+        config_id=config_id,
+    )
+    baseline_pool = [list(profile) for profile in stage6._LAST_STAGE6_PROFILE_POOL]
+    candidate = _beam_search_assignment(
+        rack_columns,
+        required_counts,
+        config_slot_sizes,
+        config_deadline=config_deadline,
+        config_id=config_id,
+    )
+    if not baseline or not candidate:
+        return candidate or baseline
+
+    label = str(config_id or "")
+    if _relocation_total(candidate, label, stage6) < _relocation_total(baseline, label, stage6):
+        return candidate
+    stage6._LAST_STAGE6_PROFILE_POOL = baseline_pool
+    return baseline
 
 
 _beam_assignment.stage6 = None
