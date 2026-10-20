@@ -1,0 +1,216 @@
+import csv
+from collections import defaultdict
+import sys
+from pathlib import Path
+
+PIPELINE_ROOT = Path(__file__).resolve().parent
+if str(PIPELINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_ROOT))
+
+import run_ordered_pipeline as common
+
+
+# Stage 5 input/output paths and scenario-column labels.
+INPUT_FILE = common.STAGE4_OUTPUT_DIR / "Candidate_Configurations.csv"
+SUMMARY_OUTPUT_FILE = common.STAGE5_OUTPUT_DIR / "Capacity_Determination_Summary.csv"
+SCENARIO_HEIGHT_INPUT_FILE = common.STAGE2_OUTPUT_DIR / "02_Item_Height_Scenarios_Delta_Weighted.csv"
+SCENARIO_HEIGHT_LABELS = common.SCENARIO_LABELS
+
+
+def _read_candidate_configurations() -> list[dict[str, str]]:
+    """Read all Stage 4 candidate configurations."""
+    if not INPUT_FILE.exists():
+        raise FileNotFoundError(f"Missing input file: {INPUT_FILE}")
+    with INPUT_FILE.open("r", newline="", encoding="utf-8-sig") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None:
+            raise ValueError("Candidate configuration CSV has no header row.")
+        return list(reader)
+
+
+def _parse_slot_sizes(value: str) -> list[float]:
+    """Parse the encoded comma-separated representative slot sizes."""
+    # Parse comma-separated representative slot sizes from Stage 4 output.
+    sizes: list[float] = []
+    raw = common._decode_excel_text(value)
+    for item in raw.split(","):
+        parsed = common._to_float(item)
+        if parsed is not None:
+            sizes.append(parsed)
+    return sizes
+
+
+def _parse_distribution(value: str) -> list[float]:
+    """Parse shares expressed as fractions or percentages into 0-to-1 values."""
+    # Parse distribution values in either percentage or fraction form to 0-1 scale.
+    distribution: list[float] = []
+    raw = common._decode_excel_text(value)
+    for item in raw.split(","):
+        text = str(item).strip()
+        if text.endswith("%"):
+            text = text[:-1].strip()
+            parsed = common._to_float(text)
+            distribution.append(0.0 if parsed is None else parsed / 100.0)
+        else:
+            parsed = common._to_float(text)
+            distribution.append(0.0 if parsed is None else parsed if parsed <= 1.0 else parsed / 100.0)
+    return distribution
+
+
+def _distribution_value(config: dict[str, str]) -> str:
+    """Return the configuration's distribution field, accepting legacy headers."""
+    value = str(config.get("Relative_Slot_Size_Distribution", config.get("Relative Slot Size Distribution", ""))).strip()
+    if value:
+        return value
+    return ""
+
+
+def _scenario_aware_slot_size_counts(config: dict[str, str]) -> dict[str, dict[float, int]]:
+    """Map each scenario's measured item heights to the configuration's representative slot sizes."""
+    rows = []
+    if SCENARIO_HEIGHT_INPUT_FILE.exists():
+        with SCENARIO_HEIGHT_INPUT_FILE.open("r", newline="", encoding="utf-8-sig") as source:
+            reader = csv.DictReader(source)
+            rows = list(reader)
+
+    if not rows:
+        return {}
+
+    slot_sizes = sorted({float(value) for value in _parse_slot_sizes(config.get("Slot_Sizes", ""))})
+    if not slot_sizes:
+        return {}
+
+    by_scenario: dict[str, dict[float, int]] = {
+        label: defaultdict(int) for label in SCENARIO_HEIGHT_LABELS.values()
+    }
+
+    for row in rows:
+        location = str(row.get("Location", "")).strip()
+        if not location:
+            continue
+        for scenario_column, scenario_label in SCENARIO_HEIGHT_LABELS.items():
+            item_height = common._to_float(row.get(scenario_column))
+            if item_height is None:
+                continue
+            slot_size = min(
+                (size for size in slot_sizes if size >= item_height),
+                default=max(slot_sizes),
+            )
+            by_scenario[scenario_label][slot_size] += 1
+
+    return {scenario_name: dict(counts) for scenario_name, counts in by_scenario.items() if counts}
+
+
+def _capacity_rows_for_config(config: dict[str, str], sku_scenarios: dict[str, int]) -> list[dict[str, str]]:
+    """Build exact capacity rows using only the scenario already assigned to the config.
+
+    Sensitivity analysis should be handled separately in a later stage; Stage 5 is
+    intended to reflect the scenario used to generate the configuration itself.
+    """
+    slot_sizes = _parse_slot_sizes(config.get("Slot_Sizes", ""))
+    distributions = _parse_distribution(_distribution_value(config))
+    if not slot_sizes or not distributions:
+        return []
+
+    scenario_aware_counts = _scenario_aware_slot_size_counts(config)
+    config_scenario = str(config.get("Scenario", "")).strip()
+    if config_scenario:
+        scenario_aware_counts = {
+            config_scenario: scenario_aware_counts.get(config_scenario, {})
+        }
+
+    summary_rows: list[dict[str, str]] = []
+
+    ordered_sizes = sorted(set(slot_sizes))
+    if scenario_aware_counts:
+        selected_scenario_counts = {
+            scenario_name: exact_required_by_size
+            for scenario_name, exact_required_by_size in scenario_aware_counts.items()
+            if scenario_name and exact_required_by_size
+        }
+        if not selected_scenario_counts:
+            scenario_aware_counts = {}
+        else:
+            scenario_aware_counts = selected_scenario_counts
+
+    # The raw percentages are the canonical demand split for the active configuration and are
+    # projected onto the shared 926 occupied-location target. The scenario-histogram branch is
+    # intentionally bypassed; it would use the 939 observed item-height rows instead.
+    active_scenarios = [config_scenario] if config_scenario else list(sku_scenarios.keys())
+    for scenario_name in active_scenarios:
+        sku_count = int(common.BASE_OCCUPIED_LOCATIONS_COUNT)
+        if scenario_name in sku_scenarios:
+            sku_count = int(sku_scenarios.get(scenario_name, sku_count))
+        sku_count = max(int(sku_count), 0)
+
+        # Allocate the active scenario SKU count across representative slot sizes.
+        allocated_counts = common._allocate_counts_from_percentages(sku_count, distributions)
+        cumulative_required_by_size: dict[float, int] = {}
+        running_required = 0
+        for index in range(len(slot_sizes) - 1, -1, -1):
+            running_required += allocated_counts[index]
+            cumulative_required_by_size[slot_sizes[index]] = running_required
+
+        # Convert cumulative at-or-above constraints to exact counts per slot size.
+        exact_required_by_size: dict[float, int] = {}
+        for index, slot_size in enumerate(ordered_sizes):
+            next_size = ordered_sizes[index + 1] if index + 1 < len(ordered_sizes) else None
+            next_required = cumulative_required_by_size.get(next_size, 0) if next_size is not None else 0
+            exact_required_by_size[slot_size] = max(cumulative_required_by_size.get(slot_size, 0) - next_required, 0)
+
+        exact_required_by_size = common._enforce_occupied_location_target(exact_required_by_size)
+        exact_total = sum(exact_required_by_size.values())
+        summary_rows.append(
+            {
+                "Config_ID": config.get("Config_ID", ""),
+                "Clustering_Method": config.get("Clustering_Method", config.get("Clustering Method", config.get("Method", ""))),
+                "Scenario": config.get("Scenario", ""),
+                "K": config.get("K", ""),
+                "SKU_Scenario": scenario_name,
+                "Required_Locations_Total": str(exact_total),
+                "Exact_Count_Distribution": "|".join(f"{int(size)}:{count}" for size, count in sorted(exact_required_by_size.items())),
+                "Relative_Slot_Size_Distribution": _distribution_value(config),
+            }
+        )
+
+    return summary_rows
+
+
+def build_capacity_determination() -> list[dict[str, str]]:
+    """Generate Stage 5 capacity outputs for all shortlisted configurations."""
+    configs = _read_candidate_configurations()
+    occupied_location_scenarios = {
+        "Scenario 1": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
+        "Base_Count": int(common.BASE_OCCUPIED_LOCATIONS_COUNT),
+    }
+
+    summary_rows: list[dict[str, str]] = []
+    for config in configs:
+        summary_rows.extend(_capacity_rows_for_config(config, occupied_location_scenarios))
+
+    # Write compact summary used by downstream comparison and ranking.
+    common._write_csv_clean(
+        SUMMARY_OUTPUT_FILE,
+        [
+            "Config_ID",
+            "Clustering_Method",
+            "Scenario",
+            "K",
+            "SKU_Scenario",
+            "Required_Locations_Total",
+            "Exact_Count_Distribution",
+            "Relative_Slot_Size_Distribution",
+        ],
+        summary_rows,
+    )
+
+    return summary_rows
+
+
+if __name__ == "__main__":
+    # Stage 5 entrypoint: derive capacity requirements from shortlisted candidates.
+    summary_rows = build_capacity_determination()
+    print(
+        "Capacity determination complete. "
+        f"Summary rows: {len(summary_rows)}."
+    )

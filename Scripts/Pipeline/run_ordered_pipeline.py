@@ -5,7 +5,6 @@ import re
 import runpy
 import sys
 import time
-from functools import lru_cache
 from collections import defaultdict
 from pathlib import Path
 
@@ -44,6 +43,7 @@ def _resolve_project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+# Shared output locations and stage-to-stage scenario metadata.
 ROOT = _resolve_project_root()
 OUTPUT_ROOT = Path(os.environ.get("PIPELINE_OUTPUT_DIR", ROOT / "Output")).expanduser().resolve()
 STAGE1_OUTPUT_DIR = OUTPUT_ROOT / "01_Data_Preparation"
@@ -54,19 +54,25 @@ STAGE5_OUTPUT_DIR = OUTPUT_ROOT / "05_Capacity_Determination"
 STAGE6_OUTPUT_DIR = Path(os.environ.get("PIPELINE_STAGE6_OUTPUT_DIR", OUTPUT_ROOT / "06_Layout_Generation"))
 STAGE7_OUTPUT_DIR = OUTPUT_ROOT / "07_Robustness_Evaluation"
 STAGE8_OUTPUT_DIR = OUTPUT_ROOT / "08_Final_Selection"
+SCENARIO_LABELS = {
+    "Scenario_1_Item_Height": "Scenario 1",
+    "Scenario_2_Item_Height": "Scenario 2",
+    "Scenario_3_Item_Height": "Scenario 3",
+    "Scenario_4_Item_Height": "Scenario 4",
+    "Scenario_5_Item_Height": "Scenario 5",
+    "Scenario_6_Item_Height": "Scenario 6",
+}
 
+# Stage 3 summary location and supported clustering methods.
 SLOT_SIZE_ROOT = STAGE3_OUTPUT_DIR
-
 METHODS = ("quantile_binning", "hierarchical_clustering", "kmeans_clustering")
-BASE_OCCUPIED_LOCATIONS_COUNT = 926
+
+# Physical geometry limits and structured beam/location coordinate patterns.
 COLUMN_MAX_HEIGHT = 770.0
 TOP_BEAM_HEIGHT = 16.0
 MAX_USED_HEIGHT_BASE = COLUMN_MAX_HEIGHT - TOP_BEAM_HEIGHT
-MIN_BEAMS_PER_COLUMN = 3
-MIN_LOCATIONS_PER_COLUMN = 4
 BEAM_HEIGHT = 16.0
 BEAM_RELOCATION_TOLERANCE_CM = 0.0
-MAX_REPRESENTATIVE_SLOT_SIZE_CM = 239.0
 
 LOCATION_CODE_PATTERN = re.compile(r"^([A-Z])(\d{2})(\d{2})([A-Za-z]+)?$")
 BEAM_SPAN_PATTERN = re.compile(r"^([A-Z])\[(\d{2})-(\d{2})\]:([0-9]{1,2}[A-Za-z]?)$")
@@ -74,6 +80,7 @@ BEAM_SINGLE_PATTERN = re.compile(r"^([A-Z])(\d{2}):([0-9]{1,2}[A-Za-z]?)$")
 
 
 def _to_float(value: object | None) -> float | None:
+    """Parse a numeric cell, returning ``None`` for blanks and invalid values."""
     # Shared safe numeric parser used across pipeline stages.
     if value is None:
         return None
@@ -86,7 +93,13 @@ def _to_float(value: object | None) -> float | None:
         return None
 
 
+def _format_number(value: float | None) -> str:
+    """Format an optional numeric value to three decimal places."""
+    return "" if value is None else f"{value:.3f}"
+
+
 def _to_int_default(value: object | None, default: int = 0) -> int:
+    """Parse an integer-like cell, accepting decimal-formatted numeric strings."""
     # Convert numeric-like values to int with fallback default.
     if value is None:
         return default
@@ -99,7 +112,43 @@ def _to_int_default(value: object | None, default: int = 0) -> int:
         return default
 
 
+def _normalize_distribution_to_target(distribution: dict[int, int], target_total: int) -> dict[int, int]:
+    """Scale integer bucket counts to a target total with largest-remainder balancing."""
+    if not distribution or target_total <= 0:
+        return {}
+
+    current_total = sum(distribution.values())
+    if current_total <= 0:
+        return {}
+    if current_total == target_total:
+        return dict(distribution)
+
+    raw_scaled = {size: count * (target_total / current_total) for size, count in distribution.items()}
+    normalized = {size: int(math.floor(value)) for size, value in raw_scaled.items()}
+    remainder = target_total - sum(normalized.values())
+    if remainder > 0:
+        ranked = sorted(
+            distribution,
+            key=lambda size: (raw_scaled[size] - normalized[size], -size),
+            reverse=True,
+        )
+        for size in ranked[:remainder]:
+            normalized[size] += 1
+    elif remainder < 0:
+        ranked = sorted(
+            distribution,
+            key=lambda size: (normalized[size] - raw_scaled[size], size),
+            reverse=True,
+        )
+        for size in ranked[:abs(remainder)]:
+            if normalized[size] > 0:
+                normalized[size] -= 1
+
+    return {size: count for size, count in normalized.items() if count > 0}
+
+
 def _decode_excel_text(value: object | None) -> str:
+    """Unwrap Excel's ``=\"...\"`` encoding for values that should remain text."""
     # Normalize spreadsheet-forced text values of the form ="..." back to raw text.
     text = "" if value is None else str(value).strip()
     if len(text) >= 4 and text.startswith('="') and text.endswith('"'):
@@ -109,6 +158,7 @@ def _decode_excel_text(value: object | None) -> str:
 
 
 def _encode_excel_text(value: object | None) -> str:
+    """Escape and wrap text so spreadsheet applications preserve it as text."""
     # Force spreadsheet tools (notably Excel) to keep comma-separated values as text.
     text = _decode_excel_text(value)
     if text == "":
@@ -118,6 +168,7 @@ def _encode_excel_text(value: object | None) -> str:
 
 
 def _allocate_counts_from_percentages(total_count: int, percentages: list[float]) -> list[int]:
+    """Convert shares to integer counts with largest-remainder balancing."""
     # Proportional allocation using floor + largest remainder balancing.
     raw = [max(0.0, percentage) * total_count for percentage in percentages]
     floors = [int(math.floor(value)) for value in raw]
@@ -141,11 +192,69 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(reader)
 
 
+def _write_csv_preserve(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    """Write a CSV with the requested field order, creating parent directories."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as target:
+        writer = csv.DictWriter(target, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _derived_occupied_location_target() -> int:
+    """Derive the shared occupied-location target from Stage 1 status snapshots."""
+    path = STAGE1_OUTPUT_DIR / "Current_Layout_Space_Utilization.csv"
+    rows = _read_csv(path)
+    if not rows or "Occupied_Locations" not in rows[0]:
+        raise ValueError(f"{path} must contain an Occupied_Locations column with numeric values")
+    values = [
+        value
+        for row in rows
+        if (value := _to_float(row.get("Occupied_Locations"))) is not None
+    ]
+    if not values:
+        raise ValueError(f"{path} contains no numeric Occupied_Locations values")
+    return math.ceil(sum(values) / len(values))
+
+
+def _derived_max_representative_slot_size() -> float:
+    """Find the largest representative slot size in the merged Stage 3 summary."""
+    path = SLOT_SIZE_ROOT / "Stage3_Slot_Size_Configuration_Summary_All.csv"
+    rows = _read_csv(path)
+    if not rows or "Representative Slot Size" not in rows[0]:
+        raise ValueError(f"{path} must contain a Representative Slot Size column with numeric values")
+    values = [
+        value
+        for row in rows
+        if (value := _to_float(row.get("Representative Slot Size"))) is not None
+    ]
+    if not values:
+        raise ValueError(f"{path} contains no numeric Representative Slot Size values")
+    return max(values)
+
+
+def refresh_derived_constants() -> None:
+    """Refresh shared targets from the latest Stage 1 and Stage 3 outputs."""
+    global BASE_OCCUPIED_LOCATIONS_COUNT, MAX_REPRESENTATIVE_SLOT_SIZE_CM
+    occupied_locations_path = STAGE1_OUTPUT_DIR / "Current_Layout_Space_Utilization.csv"
+    slot_size_summary_path = SLOT_SIZE_ROOT / "Stage3_Slot_Size_Configuration_Summary_All.csv"
+    if occupied_locations_path.exists():
+        BASE_OCCUPIED_LOCATIONS_COUNT = _derived_occupied_location_target()
+    if slot_size_summary_path.exists():
+        MAX_REPRESENTATIVE_SLOT_SIZE_CM = _derived_max_representative_slot_size()
+
+
+BASE_OCCUPIED_LOCATIONS_COUNT: int | None = None
+MAX_REPRESENTATIVE_SLOT_SIZE_CM: float | None = None
+refresh_derived_constants()
+
+
 def _deduplicate_output_columns(
     fieldnames: list[str],
     rows: list[dict[str, str]],
     preserve_fields: set[str] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
+    """Drop row-identical columns unless their names are explicitly preserved."""
     # Remove duplicate output columns that carry identical values row-by-row.
     # Some reporting columns are intentionally kept even when they are constant across a shortlist
     # because they are diagnostic KPIs and should remain available in the exported summary.
@@ -186,6 +295,7 @@ def _write_csv_clean(
     rows: list[dict[str, str]],
     preserve_fields: set[str] | None = None,
 ) -> None:
+    """Write a CSV after removing redundant columns and creating its parent path."""
     # Standardized CSV writer with parent-folder creation and column cleanup.
     path.parent.mkdir(parents=True, exist_ok=True)
     cleaned_fields, cleaned_rows = _deduplicate_output_columns(fieldnames, rows, preserve_fields=preserve_fields)
@@ -196,17 +306,13 @@ def _write_csv_clean(
 
 
 
-def _ignore_layout_constraints() -> bool:
-    """Respect the explicit override for legacy no-layout benchmarking."""
-    raw = os.environ.get("PIPELINE_IGNORE_LAYOUT", "").strip().upper()
-    return raw in {"1", "TRUE", "YES", "ON"}
-
-
 def _fixed_layout_location_total() -> int:
+    """Return the fixed-layout location contribution, currently defined as zero."""
     return 0
 
 
 def _explicit_occupied_target_total() -> int:
+    """Return the nonnegative shared occupied-location demand target."""
     # The 890 target is the working occupied-location demand. Physical fixed
     # layout slots (including the 234 cm slot) remain in the layout but are
     # excluded from the storage-demand total used for matching this target.
@@ -258,6 +364,7 @@ def _enforce_occupied_location_target(
 
 
 def _exclude_fixed_layout_slot_counts(counts: dict[int, int]) -> dict[int, int]:
+    """Keep positive demand counts while excluding non-demand layout slots."""
     # The active baseline does not carry layout slots in the demand model.
     return {
         size: max(int(count), 0)
@@ -267,6 +374,7 @@ def _exclude_fixed_layout_slot_counts(counts: dict[int, int]) -> dict[int, int]:
 
 
 def _is_split_location(location: str) -> bool:
+    """Check whether a location code has a split-position suffix."""
     match = LOCATION_CODE_PATTERN.match(location)
     if not match:
         return False
@@ -299,6 +407,7 @@ def _build_generated_layout_location_rows(
     segments: set[tuple[str, int, int]] | None = None,
     layout_thresholds_by_rack: dict[str, tuple[int, float]] | None = None,
 ) -> list[dict[str, str]]:
+    """Expand per-column slot assignments into location rows with beam coordinates."""
     # Expand column-level slot assignments into synthetic location rows.
     location_rows: list[dict[str, str]] = []
     segment_by_column: dict[str, tuple[str, int, int]] = {}
@@ -354,150 +463,8 @@ def _build_generated_layout_location_rows(
     return location_rows
 
 
-def _allocate_layout_by_column(
-    target_exact_counts: dict[float, int],
-    column_keys: list[str],
-    style: str,
-) -> tuple[bool, dict[float, int], dict[str, float], dict[str, list[float]], str, dict[str, float]]:
-    """Allocate exact slot-size demand using a feasibility-first profile generator."""
-    if not target_exact_counts:
-        return True, {}, {}, {}, "No exact counts to allocate.", {}
-
-    available_sizes = sorted({
-        float(size)
-        for size in target_exact_counts.keys()
-        if float(size) > 0.0
-    })
-
-    legal_pool = sorted({
-        int(round(float(size)))
-        for size in available_sizes
-        if float(size) > 0.0 and int(round(float(size))) <= int(round(MAX_REPRESENTATIVE_SLOT_SIZE_CM))
-        and int(round(float(size))) % 10 in (4, 9)
-    }, reverse=False)
-
-    if not legal_pool:
-        legal_pool = [int(round(float(max(available_sizes or [1.0], default=1.0))))]
-
-    def _candidate_profile_for_column() -> list[list[float]]:
-        min_rows = 1
-        max_rows = min(12, max(min_rows, 6))
-        results: list[list[float]] = []
-
-        for row_count in range(min_rows, max_rows + 1):
-            base_target = MAX_USED_HEIGHT_BASE - BEAM_HEIGHT * max(row_count - 1, MIN_BEAMS_PER_COLUMN)
-            if base_target <= 0.0:
-                continue
-            remaining_slots = row_count
-
-            def _build_sequences(total_remaining: float, slots_left: int, prefix_values: list[float], last_value: float) -> None:
-                if slots_left == 0:
-                    if abs(total_remaining) <= 1e-9:
-                        results.append([float(value) for value in prefix_values])
-                    return
-                if total_remaining < 0.0:
-                    return
-
-                for legal_size in legal_pool:
-                    if legal_size <= 0:
-                        continue
-                    if slots_left == 1:
-                        gap = total_remaining - float(legal_size)
-                        if gap < -1e-9:
-                            continue
-                        if gap > (MAX_REPRESENTATIVE_SLOT_SIZE_CM - float(last_value)) + 1e-9:
-                            continue
-                        candidate = prefix_values + [float(legal_size)]
-                        physical_total = sum(candidate) + (len(candidate) - 1) * BEAM_HEIGHT
-                        if abs(physical_total - MAX_USED_HEIGHT_BASE) > 1e-9:
-                            continue
-                        results.append([float(value) for value in candidate])
-                        continue
-                    remaining_capacity = total_remaining - float(legal_size)
-                    if remaining_capacity < 0.0:
-                        continue
-                    _build_sequences(
-                        remaining_capacity,
-                        slots_left - 1,
-                        prefix_values + [float(legal_size)],
-                        float(legal_size),
-                    )
-
-            _build_sequences(base_target, remaining_slots, [], 0.0)
-
-        deduped: list[list[float]] = []
-        seen: set[tuple[float, ...]] = set()
-        for profile in results:
-            signature = tuple(float(value) for value in profile)
-            if signature in seen:
-                continue
-            seen.add(signature)
-            deduped.append(profile)
-        return deduped
-
-    assignments_by_column: dict[str, list[float]] = defaultdict(list)
-    used_height_by_column: dict[str, float] = defaultdict(float)
-    assigned_exact_counts: dict[float, int] = {slot_size: 0 for slot_size in target_exact_counts}
-    remaining_counts = {float(size): int(count) for size, count in target_exact_counts.items()}
-
-    for column_key in list(column_keys):
-        candidate_profiles = _candidate_profile_for_column()
-        if not candidate_profiles:
-            continue
-        best_profile = None
-        best_score = (-1, -1e18, -1e18, tuple())
-        for profile in candidate_profiles:
-            profile_counts: dict[float, int] = defaultdict(int)
-            for value in profile:
-                key = float(value)
-                if key <= 0.0:
-                    continue
-                profile_counts[key] += 1
-            coverage = sum(min(remaining_counts.get(float(size), 0), count) for size, count in profile_counts.items())
-            leftover_penalty = sum(
-                max(remaining_counts.get(float(size), 0) - count, 0)
-                for size, count in profile_counts.items()
-            )
-            height_penalty = abs((sum(profile) + (len(profile) - 1) * BEAM_HEIGHT) - MAX_USED_HEIGHT_BASE)
-            score = (coverage, -leftover_penalty, -height_penalty, tuple(sorted(profile_counts.items())))
-            if score > best_score:
-                best_score = score
-                best_profile = profile
-        if best_profile is not None:
-            assignments_by_column[column_key] = [float(value) for value in best_profile]
-            used_height_by_column[column_key] = sum(best_profile)
-            for value in best_profile:
-                rounded = float(value)
-                if rounded <= 0.0:
-                    continue
-                if rounded in remaining_counts:
-                    remaining_counts[rounded] = max(remaining_counts[rounded] - 1, 0)
-                else:
-                    remaining_counts[rounded] = max(remaining_counts.get(rounded, 0) - 1, 0)
-
-    diagnostics = {
-        "Allocation_Decisions_Total": float(sum(target_exact_counts.values())),
-        "Feasible_Columns_Considered_Total": float(len(assignments_by_column)),
-        "Feasible_Columns_Min": float(min(len(assignments_by_column), 1)),
-        "Feasible_Columns_Max": float(len(assignments_by_column)),
-        "Feasible_Columns_Average": float(len(assignments_by_column) / max(len(column_keys), 1)),
-        "Forced_By_Feasibility_Count": 0.0,
-    }
-
-    if any(value > 0 for value in remaining_counts.values()):
-        return False, {size: 0 for size in target_exact_counts}, dict(used_height_by_column), dict(assignments_by_column), "No complete feasible profile assignment satisfied the remaining slot demands.", diagnostics
-
-    for column_key, slots in assignments_by_column.items():
-        for slot_size in slots:
-            slot_key = float(slot_size)
-            if slot_key in assigned_exact_counts:
-                assigned_exact_counts[slot_key] += 1
-    assignments_by_column = {column_key: slots for column_key, slots in assignments_by_column.items() if slots}
-    used_height_by_column = {column_key: float(sum(slots)) for column_key, slots in assignments_by_column.items()}
-    return True, assigned_exact_counts, dict(used_height_by_column), assignments_by_column, "Feasibility-first profile allocation succeeded.", diagnostics
-
-
 def _normalize_beam_level(level: str) -> str:
+    """Normalize a beam-level token to a comparable two-digit form."""
     # Normalize level tokens to zero-padded comparable strings.
     token = str(level).strip()
     match = re.match(r"^(\d{1,2})([A-Za-z]?)$", token)
@@ -533,12 +500,14 @@ def _parse_beam_coordinate_parts(coordinate: str) -> tuple[str, int, int, str] |
 
 
 def _format_beam_unit(rack: str, c0: int, c1: int, level: str) -> str:
+    """Format a single-column or spanning beam as its canonical unit ID."""
     if c0 == c1:
         return f"{rack}{c0:02d}:{level}"
     return f"{rack}[{c0:02d}-{c1:02d}]:{level}"
 
 
 def _beam_unit_columns(beam_unit: str) -> set[str]:
+    """Expand a beam unit into the rack-column keys covered by its span."""
     parsed = _parse_beam_coordinate_parts(beam_unit)
     if parsed is None:
         return set()
@@ -547,6 +516,7 @@ def _beam_unit_columns(beam_unit: str) -> set[str]:
 
 
 def _beam_units_by_column(rows: list[dict[str, str]]) -> dict[str, set[str]]:
+    """Map each layout column to the canonical beam units crossing that column."""
     # Build explicit beam-unit membership per column from row-level coordinates.
     # This preserves partial spans (for example around layout) for per-column
     # relocation/add/remove accounting.
@@ -570,6 +540,7 @@ def _beam_units_by_column(rows: list[dict[str, str]]) -> dict[str, set[str]]:
 
 
 def _beam_level_index(level: str) -> int | None:
+    """Return the numeric part of a normalized beam-level token."""
     normalized = _normalize_beam_level(level)
     match = re.match(r"^(\d{2})", normalized)
     if not match:
@@ -581,6 +552,7 @@ def _column_slot_sizes_from_rows(
     rows: list[dict[str, str]],
     slot_size_field: str,
 ) -> dict[str, dict[int, float]]:
+    """Index slot heights by rack-column key and row number."""
     # Build per-column slot heights by row index from row-level datasets.
     slot_sizes: dict[str, dict[int, float]] = defaultdict(dict)
     for row in rows:
@@ -598,6 +570,7 @@ def _beam_unit_heights_from_slot_sizes(
     beam_units: set[str],
     slot_sizes_by_column: dict[str, dict[int, float]],
 ) -> dict[str, float]:
+    """Estimate beam elevations by summing the slots below each beam level."""
     # Estimate physical beam elevations (cm) from stacked slot heights below each beam level.
     heights: dict[str, float] = {}
     for beam_unit in beam_units:
@@ -635,6 +608,7 @@ def _build_current_beam_units_and_segments(
     prepared_rows: list[dict[str, str]] | None = None,
     beam_height_rows: list[dict[str, str]] | None = None,
 ) -> tuple[set[str], set[tuple[str, int, int]], dict[str, float]]:
+    """Build current beam IDs, structural spans, and elevations from Stage 1 data."""
     # Build baseline beam units and horizontal segment definitions from Stage 1 data.
     beam_units: set[str] = set()
     segments: set[tuple[str, int, int]] = set()
@@ -707,6 +681,7 @@ def _build_proposed_beam_units_from_layout_rows(
     layout_rows: list[dict[str, str]],
     segments: set[tuple[str, int, int]],
 ) -> tuple[set[str], dict[str, float]]:
+    """Extract proposed beam IDs and elevations from generated location rows."""
     # Infer proposed beam units directly from explicit generated beam coordinates.
     # This preserves partial spans around layout/split areas instead of collapsing
     # each segment to the minimum common row depth.
@@ -747,104 +722,6 @@ def _build_proposed_beam_units_from_layout_rows(
     return proposed_units, proposed_heights
 
 
-@lru_cache(maxsize=4096)
-def _exact_beam_height_sequences(
-    slot_sizes: tuple[int, ...],
-    target_height: int,
-    max_slots: int,
-    beam_height: int = 16,
-) -> tuple[tuple[int, ...], ...]:
-    """Return every slot-type sequence whose slots plus internal beams hit a target exactly."""
-    if target_height <= 0 or max_slots <= 0 or not slot_sizes:
-        return ()
-
-    @lru_cache(maxsize=None)
-    def _compositions(total: int, length: int) -> tuple[tuple[int, ...], ...]:
-        if length == 0:
-            return ((),) if total == 0 else ()
-        if total < length * min(slot_sizes) or total > length * max(slot_sizes):
-            return ()
-        solutions: list[tuple[int, ...]] = []
-        for slot_size in slot_sizes:
-            for suffix in _compositions(total - slot_size, length - 1):
-                solutions.append((slot_size,) + suffix)
-        return tuple(sorted(set(solutions)))
-
-    solutions: list[tuple[int, ...]] = []
-    for length in range(1, max_slots + 1):
-        slot_total = target_height - beam_height * (length - 1)
-        if slot_total <= 0:
-            continue
-        solutions.extend(_compositions(slot_total, length))
-    return tuple(sorted(set(solutions)))
-
-
-def _constructive_beam_preservation_pass(
-    column_assignments: dict[str, list[float]],
-    segments: set[tuple[str, int, int]],
-    baseline_beam_heights: dict[str, float],
-    configuration_slot_sizes: list[float] | None = None,
-) -> dict[str, list[float]]:
-    """Build segment-wide slot templates from exact original beam-height matches."""
-    if not column_assignments or not configuration_slot_sizes:
-        return {key: [float(value) for value in values] for key, values in column_assignments.items()}
-
-    slot_sizes = tuple(sorted({int(round(value)) for value in configuration_slot_sizes if float(value) > 0.0}))
-    if not slot_sizes:
-        return {key: [float(value) for value in values] for key, values in column_assignments.items()}
-
-    segment_targets: dict[tuple[str, int, int], list[int]] = defaultdict(list)
-    for beam_unit, height in baseline_beam_heights.items():
-        parsed = _parse_beam_coordinate_parts(beam_unit)
-        if parsed is None:
-            continue
-        rack, c0, c1, _level = parsed
-        segment_targets[(rack, c0, c1)].append(int(round(float(height))))
-
-    optimized = {key: [float(value) for value in values] for key, values in column_assignments.items()}
-
-    for segment in sorted(segments):
-        targets = sorted(set(segment_targets.get(segment, [])))
-        if not targets:
-            continue
-
-        segment_columns = [f"{segment[0]}{col:02d}" for col in range(segment[1], segment[2] + 1)]
-        available_columns = [key for key in segment_columns if key in optimized]
-        if not available_columns:
-            continue
-        max_slots = max(
-            max(len(optimized[key]) for key in available_columns),
-            len(targets) + 1,
-        )
-
-        candidate_by_target = {
-            target: _exact_beam_height_sequences(slot_sizes, target, max_slots)
-            for target in targets
-        }
-        candidate_sequences = sorted({sequence for sequences in candidate_by_target.values() for sequence in sequences})
-        if not candidate_sequences:
-            continue
-
-        def _score(sequence: tuple[int, ...]) -> tuple[int, int, tuple[int, ...]]:
-            prefix_height = 0
-            matched_targets = 0
-            for index, slot_size in enumerate(sequence):
-                prefix_height += slot_size
-                candidate_height = prefix_height + 16 * index
-                if candidate_height in targets:
-                    matched_targets += 1
-            return matched_targets, -len(sequence), sequence
-
-        best_sequence = max(candidate_sequences, key=_score)
-        if _score(best_sequence)[0] <= 0:
-            continue
-
-        for column_key in available_columns:
-            optimized[column_key] = [float(value) for value in best_sequence[: len(optimized[column_key])]]
-
-    return optimized
-
-
 def _beam_relocations(
     current_units: set[str],
     proposed_units: set[str],
@@ -853,6 +730,7 @@ def _beam_relocations(
     current_units_by_column: dict[str, set[str]] | None = None,
     proposed_units_by_column: dict[str, set[str]] | None = None,
 ) -> tuple[int, dict[str, int], dict[str, int], dict[str, int]]:
+    """Pair beam units by segment and report relocations, removals, and additions."""
     # Count beam changes by segment.
     # Added/removed beams are driven by the difference in beam counts.
     # Relocations are paired beams whose locations/heights do not match.
@@ -940,6 +818,7 @@ def _initial_beam_grid_counts(
     prepared_rows: list[dict[str, str]] | None,
     current_units: set[str],
 ) -> tuple[int, int]:
+    """Count existing beams and supported storage grids from prepared warehouse rows."""
     # Derive baseline counts directly from Stage 1 prepared/beam data. Explicit
     # beam support includes supported 1b/1c and split locations; floor-level
     # 01/1a positions remain excluded.
@@ -964,6 +843,7 @@ def _material_requirements(
     proposed_units: set[str],
     proposed_layout_rows: list[dict[str, str]],
 ) -> tuple[int, int, int, int]:
+    """Return required and additional beam/grid counts for a proposed layout."""
     # Required materials are based on total required counts in the proposed layout.
     required_beams = len(proposed_units)
     required_grids = sum(1 for row in proposed_layout_rows if _to_int_default(row.get("Row"), 0) > 1)
@@ -992,31 +872,25 @@ else:
     SCRIPT_DIR = Path(__file__).resolve().parent
 
 ORDERED_SCRIPTS = [
-    "01_Data_Preparation/01_data_preparation.py",
-    "02_Scenario_Generation/02_scenario_generation_weighted_delta.py",
-    "03_Slot_Size_Generation/03_slot_size_generation_main.py",
-    "04_Candidate_Configuration/04_candidate_configuration.py",
-    "05_Capacity_Determination/05_capacity_determination.py",
-    "06_Layout_Generation/06_layout_generation.py",
-    "07_Robustness_Evaluation/07_robustness_evaluation.py",
-    "08_Final_Selection/08_final_selection.py",
+    "01_data_preparation.py",
+    "02_scenario_generation_weighted_delta.py",
+    "03_slot_size_generation_main.py",
+    "04_candidate_configuration.py",
+    "05_capacity_determination.py",
+    "06_layout_generation.py",
+    "07_robustness_evaluation.py",
+    "08_final_selection.py",
 ]
-SPACE_UTILIZATION_SCRIPT = "06_Layout_Generation_Space_Utilization/06_layout_generation_space_utilization.py"
-SPACE_UTILIZATION_STAGE7_SCRIPT = "07_Robustness_Evaluation_Space_Utilization/07_robustness_evaluation_space_utilization.py"
-SPACE_UTILIZATION_STAGE8_SCRIPT = "08_Final_Selection_Space_Utilization/08_final_selection_space_utilization.py"
-PICKING_EFFICIENCY_SCRIPT = "06_Layout_Generation_Picking_Efficiency/06_layout_generation_picking_efficiency.py"
-PICKING_EFFICIENCY_STAGE7_SCRIPT = "07_Robustness_Evaluation_Picking_Efficiency/07_robustness_evaluation_picking_efficiency.py"
-PICKING_EFFICIENCY_STAGE8_SCRIPT = "08_Final_Selection_Picking_Efficiency/08_final_selection_picking_efficiency.py"
-BEAM_PRESERVATION_SCRIPT = "06_Layout_Generation_Beam_Preservation/06_layout_generation_beam_preservation.py"
-BEAM_PRESERVATION_STAGE7_SCRIPT = "07_Robustness_Evaluation_Beam_Preservation/07_robustness_evaluation_beam_preservation.py"
-BEAM_PRESERVATION_STAGE8_SCRIPT = "08_Final_Selection_Beam_Preservation/08_final_selection_beam_preservation.py"
+ACTIVE_METHOD_ENV = "PIPELINE_ACTIVE_METHOD"
 
 
 def ordered_scripts() -> list[str]:
+    """Return the configured stage entrypoints in execution order."""
     return list(ORDERED_SCRIPTS)
 
 
 def _script_path(script_name: str) -> Path:
+    """Resolve a pipeline entrypoint relative to the active script directory."""
     # Resolve stage script path relative to pipeline folder.
     return SCRIPT_DIR / script_name
 
@@ -1030,17 +904,33 @@ def _run_script(script_name: str) -> None:
     runpy.run_path(str(script_path), run_name="__main__")
 
 
+def _run_method_script(script_name: str, method: str) -> None:
+    """Run a shared Stage 6-8 entry point for one layout method."""
+    previous = os.environ.get(ACTIVE_METHOD_ENV)
+    os.environ[ACTIVE_METHOD_ENV] = method
+    try:
+        _run_script(script_name)
+    finally:
+        if previous is None:
+            os.environ.pop(ACTIVE_METHOD_ENV, None)
+        else:
+            os.environ[ACTIVE_METHOD_ENV] = previous
+
+
 def _run_space_utilization_variant() -> bool:
+    """Check whether the SU variant is enabled by environment or command line."""
     requested = os.environ.get("PIPELINE_RUN_SPACE_UTILIZATION", "").strip().upper()
     return requested in {"1", "TRUE", "YES", "ON"} or "--include-space-utilization" in sys.argv[1:]
 
 
 def _run_picking_efficiency_variant() -> bool:
+    """Check whether the PE variant is enabled by environment or command line."""
     requested = os.environ.get("PIPELINE_RUN_PICKING_EFFICIENCY", "").strip().upper()
     return requested in {"1", "TRUE", "YES", "ON"} or "--include-picking-efficiency" in sys.argv[1:]
 
 
 def _run_beam_preservation_variant() -> bool:
+    """Check whether the BP variant is enabled by environment or command line."""
     requested = os.environ.get("PIPELINE_RUN_BEAM_PRESERVATION", "").strip().upper()
     return requested in {"1", "TRUE", "YES", "ON"} or "--include-beam-preservation" in sys.argv[1:]
 
@@ -1048,26 +938,41 @@ def _run_beam_preservation_variant() -> bool:
 def run_pipeline() -> None:
     """Run all pipeline stages in deterministic order."""
     for script_name in ordered_scripts():
-        _run_script(script_name)
-        if script_name == "06_Layout_Generation/06_layout_generation.py" and _run_space_utilization_variant():
-            _run_script(SPACE_UTILIZATION_SCRIPT)
-            _run_script(SPACE_UTILIZATION_STAGE7_SCRIPT)
-            _run_script(SPACE_UTILIZATION_STAGE8_SCRIPT)
-        if script_name == "06_Layout_Generation/06_layout_generation.py" and _run_picking_efficiency_variant():
-            _run_script(PICKING_EFFICIENCY_SCRIPT)
-            _run_script(PICKING_EFFICIENCY_STAGE7_SCRIPT)
-            _run_script(PICKING_EFFICIENCY_STAGE8_SCRIPT)
-        if script_name == "06_Layout_Generation/06_layout_generation.py" and _run_beam_preservation_variant():
-            _run_script(BEAM_PRESERVATION_SCRIPT)
-            _run_script(BEAM_PRESERVATION_STAGE7_SCRIPT)
-            _run_script(BEAM_PRESERVATION_STAGE8_SCRIPT)
+        if script_name in {
+            "06_layout_generation.py",
+            "07_robustness_evaluation.py",
+            "08_final_selection.py",
+        }:
+            _run_method_script(script_name, "Baseline")
+        else:
+            _run_script(script_name)
+        if script_name in {
+            "01_data_preparation.py",
+            "03_slot_size_generation_main.py",
+        }:
+            refresh_derived_constants()
+        if script_name == "06_layout_generation.py":
+            for method, enabled in (
+                ("SU", _run_space_utilization_variant()),
+                ("PE", _run_picking_efficiency_variant()),
+                ("BP", _run_beam_preservation_variant()),
+            ):
+                if enabled:
+                    for method_stage in (
+                        "06_layout_generation.py",
+                        "07_robustness_evaluation.py",
+                        "08_final_selection.py",
+                    ):
+                        _run_method_script(method_stage, method)
 
     if _run_space_utilization_variant() or _run_picking_efficiency_variant() or _run_beam_preservation_variant():
-        from combine_heuristic_outputs import combine_stage
+        _run_method_script("06_layout_generation.py", "PICKING_SCORE_COMPARISON")
 
-        # Baseline stages combine before the heuristics finish, so refresh once everything has run.
-        for stage in (6, 7, 8):
-            combine_stage(stage)
+    from combine_heuristic_outputs import combine_stage
+
+    # Refresh combined outputs after all requested methods are ready.
+    for stage in (6, 7, 8):
+        combine_stage(stage)
 
 
 if __name__ == "__main__":

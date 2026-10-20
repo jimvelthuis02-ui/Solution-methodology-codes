@@ -4,10 +4,12 @@ import csv
 import re
 from pathlib import Path
 
+# Recognize both base and already-suffixed configuration IDs.
 _CONFIG_ID_PATTERN = re.compile(r"\bCFG_(\d{3})(?:_(SU|PE|BP))?\b")
 
 
 def suffixed_path(path: Path, suffix: str) -> Path:
+    """Return a path with the heuristic suffix inserted before its extension."""
     marker = f"_{suffix}"
     if path.stem.endswith(marker):
         return path
@@ -15,6 +17,7 @@ def suffixed_path(path: Path, suffix: str) -> Path:
 
 
 def _suffix_cell(value: str, suffix: str, renamed_files: dict[str, str]) -> str:
+    """Apply the method suffix to config IDs and references to renamed output files."""
     result = _CONFIG_ID_PATTERN.sub(lambda match: f"CFG_{match.group(1)}_{suffix}", str(value))
     for old_name, new_name in sorted(renamed_files.items(), key=lambda item: len(item[0]), reverse=True):
         result = result.replace(old_name, new_name)
